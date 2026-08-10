@@ -5,7 +5,7 @@
 - 当前版本：`2.0.0`
 - 技术栈：`FastAPI`、`WebSocket`、多 Agent 协作、`FFmpeg`
 - 产品能力：`TOS`、`Seed-Speech`、`Seed-2.1-turbo`、`SeeDream-5.0-pro`、`SeeDance-2.5`
-- AI 开发工具：`Trae.ai`、`Kimi-2.6`、`GPT-5.4`
+- AI 开发工具：`Trae.ai`、`DeepSeek-V4-Flash-GA`、`GPT-5.5`
 
 ## ✨ Seedance 2.5 核心亮点
 
@@ -96,8 +96,8 @@
 ## AI 开发工具
 
 - `Trae.ai`：代码开发、排查、工程整理
-- `Kimi-2.6`：需求梳理、方案讨论、文档辅助
-- `GPT-5.4`：代码修改、逻辑整理、调试、文档重写
+- `DeepSeek-V4-Flash-GA`：需求梳理、方案讨论、文档辅助
+- `GPT-5.5`：代码修改、逻辑整理、调试、文档重写
 
 ## 运行前提准备
 
