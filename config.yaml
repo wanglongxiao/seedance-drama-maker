@@ -16,6 +16,17 @@ modelark:
   api_key: "${MODELARK_API_KEY}"
   base_url: "${MODELARK_BASE_URL:-https://ark.ap-southeast.bytepluses.com/api/v3}"
 
+asset_library:
+  region: "${ASSET_LIBRARY_REGION:-ap-southeast-1}"
+  api_host: "${ASSET_LIBRARY_API_HOST:-ark.ap-southeast-1.byteplusapi.com}"
+  project_name: "${ASSET_LIBRARY_PROJECT_NAME:-default}"
+  group_type: "AIGC"
+  moderation_strategy: "Skip"
+  activation_poll_interval: 3
+  activation_timeout: 300
+  connection_timeout: 30
+  socket_timeout: 300
+
 # Speech ASR 认证信息
 speech:
   appid: "${SPEECH_APPID}"

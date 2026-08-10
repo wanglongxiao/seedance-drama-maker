@@ -92,7 +92,9 @@
     "download": "⬇️ 下载",
     "downloadVideo": "⬇️ 下载视频",
     "newProject": "🆕 创建新项目",
-    "exitAutoRun": "退出自动模式"
+    "exitAutoRun": "退出自动模式",
+    "endProject": "结束项目",
+    "endingProject": "结束中..."
   },
   "labels": {
     "audioMessage": "🎤 语音消息",
@@ -217,7 +219,12 @@
     "genericStepComplete": "{step}已完成！\n\n请在聊天区输入：\n• \"继续\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"开始\" - 进行下一步：{nextStep}\n• \"重新生成\" / \"重做\" / \"regen\" - 重新制作{step}",
     "referenceAssetRegeneratedSuccess": "✅ 参考图“{name}”已重新生成！",
     "httpErrorStatus": "HTTP 请求失败，状态码：{status}",
-    "referenceNameRequired": "请先为每张上传的人物/角色图片和布景图片填写名称。"
+    "referenceNameRequired": "请先为每张上传的人物/角色图片和布景图片填写名称。",
+    "projectEndConfirm": "结束项目后，将删除本项目在 TOS 中的临时文件、虚拟素材库素材与素材资产组。确认结束吗？",
+    "projectEnding": "正在结束项目并清理资源...",
+    "projectEnded": "✅ 项目已结束，资源清理已开始。",
+    "projectEndFailed": "❌ 结束项目失败: {error}",
+    "projectEndNoActive": "当前没有可结束的项目。"
   },
   "chat": {
     "system_prompt": "你是一个专业的AI视频生成助手。你的任务是：\n1. 理解用户的视频创作需求\n2. 询问必要的细节（如风格、角色、场景等）\n3. 引导用户提供参考图片或语音描述\n4. 当信息足够时，告知用户可以开始生成视频\n\n请用友好、专业的语气与用户交流。",

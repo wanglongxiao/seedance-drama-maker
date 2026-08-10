@@ -244,7 +244,7 @@ class VideoAgent:
             fallback_reference_image=reference_image,
         )
         reference_urls = self._dedupe_reference_urls(prepared_reference_images, None)
-        reference_image_url = reference_urls[0] if reference_urls else None
+        reference_image_url = self._primary_reference_source_url(prepared_reference_images, None)
 
         if not reference_image_url:
             raise ValueError(f"Scene {scene_number}: reference_image_url is required")
@@ -304,13 +304,33 @@ class VideoAgent:
     ) -> List[str]:
         urls: List[str] = []
         for image in reference_images or []:
-            url = getattr(image, "url", None)
+            url = self._get_generation_reference_url(image)
             if url and url not in urls:
                 urls.append(url)
-        fallback_url = getattr(fallback_reference_image, "url", None)
+        fallback_url = self._get_generation_reference_url(fallback_reference_image)
         if fallback_url and fallback_url not in urls:
             urls.insert(0, fallback_url)
         return urls
+
+    def _get_generation_reference_url(self, image: Optional[GeneratedImage]) -> Optional[str]:
+        if image is None:
+            return None
+        reference_type = str(getattr(image, "reference_type", "") or "").strip().lower()
+        asset_id = str(getattr(image, "asset_id", "") or "").strip()
+        if reference_type == "character" and asset_id:
+            return f"asset://{asset_id}"
+        return getattr(image, "url", None)
+
+    def _primary_reference_source_url(
+        self,
+        reference_images: Optional[List[GeneratedImage]],
+        fallback_reference_image: Optional[GeneratedImage] = None,
+    ) -> Optional[str]:
+        for image in reference_images or []:
+            source_url = getattr(image, "url", None)
+            if source_url:
+                return source_url
+        return getattr(fallback_reference_image, "url", None)
 
     def _create_video_task_with_references(
         self,
@@ -788,7 +808,7 @@ class VideoAgent:
         prompt += f"。修改意见: {feedback}"
 
         reference_urls = self._dedupe_reference_urls(prepared_reference_images, None)
-        reference_image_url = reference_urls[0] if reference_urls else None
+        reference_image_url = self._primary_reference_source_url(prepared_reference_images, None)
         if not reference_image_url:
             raise ValueError(f"Reference image is required for video regeneration")
 

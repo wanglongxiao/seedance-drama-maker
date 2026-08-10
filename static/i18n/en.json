@@ -95,7 +95,9 @@
     "download": "⬇️ Download",
     "downloadVideo": "⬇️ Download Video",
     "newProject": "🆕 New Project",
-    "exitAutoRun": "Exit Auto Mode"
+    "exitAutoRun": "Exit Auto Mode",
+    "endProject": "End Project",
+    "endingProject": "Ending..."
   },
   "labels": {
     "audioMessage": "🎤 Voice message",
@@ -225,7 +227,12 @@
     "storyboardComplete": "🧩 Storyboard images complete!\n\nEnter in chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - next step: 🎬 Video generation (new flow: generate and review scene by scene)\n• \"regenerate\" / \"redo\" / \"regen\" - regenerate 🧩 Storyboard images",
     "storyboardRegeneratedSuccess": "✅ Storyboard image for scene {scene} regenerated!",
     "httpErrorStatus": "HTTP request failed with status {status}",
-    "referenceNameRequired": "Please enter a name for every uploaded character and backdrop image before continuing."
+    "referenceNameRequired": "Please enter a name for every uploaded character and backdrop image before continuing.",
+    "projectEndConfirm": "Ending the project will delete this project's temporary TOS files, virtual asset library assets, and asset group. Do you want to continue?",
+    "projectEnding": "Ending the project and cleaning resources...",
+    "projectEnded": "✅ The project has been ended and resource cleanup has started.",
+    "projectEndFailed": "❌ Failed to end project: {error}",
+    "projectEndNoActive": "There is no active project to end."
   },
   "chat": {
     "system_prompt": "You are a professional AI video creation assistant. Your tasks are:\n1. Understand the user's video creation requirements\n2. Ask for the necessary details such as style, characters, and scenes\n3. Guide the user to provide reference images or voice descriptions\n4. Tell the user when enough information has been collected and video generation can start\n\nRespond in a friendly and professional tone.",

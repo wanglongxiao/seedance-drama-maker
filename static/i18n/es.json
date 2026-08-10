@@ -95,7 +95,9 @@
     "download": "⬇️ Descargar",
     "downloadVideo": "⬇️ Descargar Video",
     "newProject": "🆕 Nuevo Proyecto",
-    "exitAutoRun": "Salir del modo automático"
+    "exitAutoRun": "Salir del modo automático",
+    "endProject": "Finalizar proyecto",
+    "endingProject": "Finalizando..."
   },
   "labels": {
     "audioMessage": "🎤 Mensaje de voz",
@@ -218,6 +220,11 @@
     "rollbackInvalidStep": "❌ El paso \"{step}\" no existe.\n\nPasos disponibles: Guion, Imagen de referencia, Imagen del storyboard, Video del storyboard, Unión",
     "rollbackNoStartedStep": "❌ Aún no se ha iniciado ningún paso, por lo que no se puede retroceder.\n\nPrimero escribe \"start\" o \"autorun\".",
     "rollbackStepNotCompleted": "❌ No se puede volver al paso \"{step}\" porque aún no se ha completado.\n\nPasos completados: {completedSteps}\nSolo puedes volver a un paso ya completado.",
+    "projectEndConfirm": "Al finalizar el proyecto se eliminarán los archivos temporales de TOS, los materiales de la biblioteca virtual y el grupo de materiales de este proyecto. ¿Quieres continuar?",
+    "projectEnding": "Finalizando el proyecto y limpiando recursos...",
+    "projectEnded": "✅ El proyecto se finalizó y la limpieza de recursos ya comenzó.",
+    "projectEndFailed": "❌ No se pudo finalizar el proyecto: {error}",
+    "projectEndNoActive": "No hay ningún proyecto activo para finalizar.",
     "rollbackRequestFailed": "❌ Error en la solicitud de rollback. Inténtalo de nuevo",
     "genericStepCompleteStatus": "{step} está completo. Escribe \"continue\" o \"next\" en el chat para pasar a {nextStep}, o escribe \"regenerar\", \"rehacer\" o \"regen\" para rehacerlo.",
     "genericStepComplete": "¡{step} está completo!\n\nEscribe en el chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - siguiente paso: {nextStep}\n• \"regenerar\" / \"rehacer\" / \"regen\" - rehacer {step}",

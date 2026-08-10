@@ -19,6 +19,7 @@ from app.agents.image_agent import ImageAgent
 from app.agents.video_agent import VideoAgent
 from app.agents.video_review_agent import VideoReviewAgent
 from app.agents.merge_agent import MergeAgent
+from app.services.asset_library_service import asset_library_service, AssetLibraryError
 from app.services.tos_service import tos_service
 
 logger = get_logger("main_agent")
@@ -76,6 +77,10 @@ class SceneSkippedError(RuntimeError):
     def __init__(self, skip_info: dict):
         super().__init__(skip_info.get("message", "scene skipped"))
         self.skip_info = skip_info
+
+
+class ProjectEndedError(RuntimeError):
+    """Raised when an ended project receives more work."""
 
 
 def extract_aspect_ratio(user_input: str) -> Optional[str]:
@@ -181,6 +186,123 @@ class MainAgent:
         self._reference_generation_tasks: Dict[str, asyncio.Task] = {}
         self._reference_asset_regeneration_tasks: Dict[str, asyncio.Task] = {}
 
+    def _build_asset_group_name(self, project_id: str) -> str:
+        return f"seedance-project-{project_id}"
+
+    def _build_asset_group_description(self, project: VideoProject) -> str:
+        user_input = str(getattr(project, "user_input", "") or "").strip()
+        short_input = user_input[:120]
+        return f"Seedance project {project.project_id}: {short_input}" if short_input else f"Seedance project {project.project_id}"
+
+    def _raise_if_project_ended(self, project: Optional[VideoProject]) -> None:
+        if project and getattr(project, "is_ended", False):
+            raise ProjectEndedError(f"Project {project.project_id} has already been ended")
+
+    def mark_project_ended(self, project_id: str, reason: Optional[str] = None) -> Optional[VideoProject]:
+        project = self.projects.get(project_id)
+        if not project:
+            return None
+
+        project.is_ended = True
+        project.end_reason = reason or "ended"
+        project.status = "ended"
+        project.current_step = "ended"
+
+        generation_task = self._reference_generation_tasks.pop(project_id, None)
+        if generation_task and not generation_task.done():
+            generation_task.cancel()
+
+        for task_key, task in list(self._reference_asset_regeneration_tasks.items()):
+            if not task_key.startswith(f"{project_id}:"):
+                continue
+            self._reference_asset_regeneration_tasks.pop(task_key, None)
+            if task and not task.done():
+                task.cancel()
+
+        self._reference_generation_slots.pop(project_id, None)
+        return project
+
+    def remove_project(self, project_id: str) -> None:
+        self.projects.pop(project_id, None)
+        self._reference_generation_slots.pop(project_id, None)
+        self._reference_asset_cache.pop(project_id, None)
+        self._reference_generation_tasks.pop(project_id, None)
+        for task_key in list(self._reference_asset_regeneration_tasks.keys()):
+            if task_key.startswith(f"{project_id}:"):
+                self._reference_asset_regeneration_tasks.pop(task_key, None)
+
+    def _ensure_project_asset_group(self, project: VideoProject) -> Dict[str, Any]:
+        self._raise_if_project_ended(project)
+        if getattr(project, "asset_group_id", None):
+            return {
+                "Id": project.asset_group_id,
+                "Name": project.asset_group_name,
+                "ProjectName": project.asset_project_name or config.asset_library_project_name,
+            }
+
+        group_name = self._build_asset_group_name(project.project_id)
+        group = asset_library_service.ensure_project_asset_group(
+            project_id=project.project_id,
+            group_name=group_name,
+            description=self._build_asset_group_description(project),
+            project_name=config.asset_library_project_name,
+        )
+        project.asset_group_id = str(group.get("Id") or "").strip() or None
+        project.asset_group_name = str(group.get("Name") or group_name).strip() or group_name
+        project.asset_project_name = str(group.get("ProjectName") or config.asset_library_project_name).strip()
+        if not project.asset_group_id:
+            raise AssetLibraryError(f"Asset group id is missing for project {project.project_id}")
+        return group
+
+    def _register_uploaded_portrait_assets(self, project: VideoProject) -> None:
+        self._ensure_project_asset_group(project)
+        for asset in getattr(project, "uploaded_reference_images", []) or []:
+            if getattr(asset, "reference_type", None) != "character":
+                continue
+            if getattr(asset, "asset_id", None):
+                continue
+            asset_info = asset_library_service.register_image_asset(
+                group_id=project.asset_group_id,
+                url=asset.url,
+                name=asset.name or f"character-{project.project_id}",
+                project_name=project.asset_project_name,
+            )
+            asset.asset_id = str(asset_info.get("Id") or "").strip() or None
+            asset.asset_status = str(asset_info.get("Status") or "").strip() or None
+
+    def _find_uploaded_character_asset(
+        self,
+        project: VideoProject,
+        asset_name: str,
+        source_url: str,
+    ) -> Optional[UploadedReferenceImage]:
+        normalized_name = self._normalize_name_key(asset_name)
+        for item in getattr(project, "uploaded_reference_images", []) or []:
+            if getattr(item, "reference_type", None) != "character":
+                continue
+            if source_url and str(getattr(item, "url", "") or "").strip() == source_url:
+                return item
+            if normalized_name and self._normalize_name_key(getattr(item, "name", "")) == normalized_name:
+                return item
+        return None
+
+    def _register_generated_portrait_asset(
+        self,
+        project: VideoProject,
+        image: GeneratedImage,
+        asset_name: str,
+    ) -> GeneratedImage:
+        self._ensure_project_asset_group(project)
+        asset_info = asset_library_service.register_image_asset(
+            group_id=project.asset_group_id,
+            url=image.url,
+            name=asset_name or f"character-{project.project_id}",
+            project_name=project.asset_project_name,
+        )
+        image.asset_id = str(asset_info.get("Id") or "").strip() or None
+        image.asset_status = str(asset_info.get("Status") or "").strip() or None
+        return image
+
     async def create_project(
         self,
         user_input: str,
@@ -256,9 +378,13 @@ class MainAgent:
             uploaded_reference_images=uploaded_assets,
             task_tos_prefix=tos_service.build_project_prefix(project_id),
             task_temp_dir=str(task_temp_dir),
+            asset_group_name=self._build_asset_group_name(project_id),
+            asset_project_name=config.asset_library_project_name,
         )
 
         self.projects[project_id] = project
+        await asyncio.to_thread(self._ensure_project_asset_group, project)
+        await asyncio.to_thread(self._register_uploaded_portrait_assets, project)
 
         logger.info(f"Project created with combined_input: {combined_input[:200]}...")
 
@@ -416,6 +542,16 @@ class MainAgent:
         image.regenerate_locked = used_original
         image.is_reference = True
         image.source = "uploaded_original" if used_original else "generated"
+
+        if category == "character":
+            uploaded_asset = self._find_uploaded_character_asset(project, asset_name, source_url)
+            if uploaded_asset and getattr(uploaded_asset, "asset_id", None):
+                image.asset_id = uploaded_asset.asset_id
+                image.asset_status = uploaded_asset.asset_status or "Active"
+            elif getattr(image, "asset_id", None):
+                image.asset_status = image.asset_status or "Active"
+            else:
+                self._register_generated_portrait_asset(project, image, asset_name)
         return image
 
     async def _store_reference_asset_async(
@@ -942,6 +1078,7 @@ class MainAgent:
         project = self.projects.get(project_id)
         if not project:
             raise ValueError(f"Project not found: {project_id}")
+        self._raise_if_project_ended(project)
 
         if not hasattr(project, 'reference_image') or not project.reference_image:
             raise ValueError(f"Reference image not found for project {project_id}")
@@ -997,6 +1134,7 @@ class MainAgent:
 
             scene_index = min(project.next_scene_index, len(project.script.scenes))
             while scene_index < len(project.script.scenes):
+                self._raise_if_project_ended(project)
                 num_scenes = len(project.script.scenes)
                 scene = project.script.scenes[scene_index]
                 scene_number = scene_index + 1
@@ -1154,6 +1292,7 @@ class MainAgent:
         is_manual_mode = review_mode == "manual"
 
         while True:
+            self._raise_if_project_ended(project)
             # 这里处理的是系统自动发起的分镜生成流程。
             # 无论审核模式是 auto 还是 manual，只要分镜“生成失败/返回重复 seed”，都走自动重生成预算。
             if scene_state.total_generation_count >= max_total_generations:
@@ -1658,6 +1797,7 @@ class MainAgent:
         progress_callback: Optional[Callable[[VideoProject], Awaitable[None]]] = None,
     ) -> GeneratedImage:
         """生成角色参考图与场景参考图，并保留兼容字段。"""
+        self._raise_if_project_ended(project)
         logger.info(f"Step 1: Generating reference image library for project {project.project_id}")
         user_style_info = getattr(project, "combined_input", None)
         aspect_ratio = getattr(project, "aspect_ratio", None)
@@ -1702,6 +1842,7 @@ class MainAgent:
             index: int,
             stored_image: GeneratedImage,
         ) -> None:
+            self._raise_if_project_ended(project)
             async with progress_lock:
                 if category == "character":
                     generated_character_images[index] = stored_image
@@ -1712,6 +1853,7 @@ class MainAgent:
                     await progress_callback(project)
 
         async def generate_character_job(index: int, character) -> None:
+            self._raise_if_project_ended(project)
             matched_assets = character_asset_map.get(character.name, [])
             matched_urls = [asset.url for asset in matched_assets]
             async with semaphore:
@@ -1723,6 +1865,8 @@ class MainAgent:
                         is_reference=True,
                         name=character.name,
                         reference_type="character",
+                        asset_id=matched_assets[0].asset_id,
+                        asset_status=matched_assets[0].asset_status,
                     )
                     stored = await self._store_reference_asset_async(
                         project, generated, "character", character.name, index, used_original=True
@@ -1740,6 +1884,7 @@ class MainAgent:
             await finalize_generated_image("character", index, stored)
 
         async def generate_scene_job(index: int, scene_definition: Dict[str, str]) -> None:
+            self._raise_if_project_ended(project)
             scene_name = scene_definition["name"]
             matched_assets = scene_asset_map.get(scene_name, [])
             matched_urls = [asset.url for asset in matched_assets]
@@ -1802,6 +1947,7 @@ class MainAgent:
         project: VideoProject,
         progress_callback: Optional[Callable[[VideoProject], Awaitable[None]]] = None,
     ) -> GeneratedImage:
+        self._raise_if_project_ended(project)
         active_task = self._reference_generation_tasks.get(project.project_id)
         if active_task and not active_task.done():
             return await asyncio.shield(active_task)
@@ -1811,6 +1957,7 @@ class MainAgent:
             last_error: Optional[Exception] = None
 
             for attempt in range(max_auto_retries + 1):
+                self._raise_if_project_ended(project)
                 self._reset_reference_library_state(project)
                 try:
                     if attempt > 0:
@@ -1855,6 +2002,7 @@ class MainAgent:
         reference_slot_index: Optional[int] = None,
         feedback: str = "用户要求重新生成",
     ) -> GeneratedImage:
+        self._raise_if_project_ended(project)
         reference_type = str(reference_type or "").strip().lower()
         normalized_name = str(asset_name or "").strip()
         if reference_type not in {"character", "scene"}:
@@ -1867,6 +2015,7 @@ class MainAgent:
             return await asyncio.shield(active_task)
 
         async def run_regeneration() -> GeneratedImage:
+            self._raise_if_project_ended(project)
 
             session_slots = self._get_reference_generation_session(project)
             image_list = (
@@ -2009,6 +2158,7 @@ class MainAgent:
         feedback: str = "用户要求重新生成",
     ) -> GeneratedImage:
         """重新生成整套参考图库，并返回兼容链路使用的主参考图。"""
+        self._raise_if_project_ended(project)
         logger.info(f"Regenerating reference image (参考图库) for project {project.project_id}")
 
         if getattr(project, "use_original_reference", False) and getattr(project, "reference_images", None):

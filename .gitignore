@@ -20,7 +20,12 @@ temp/
 # 调试产物
 .dbg/
 *.log
+/.run/
 
 # IDE
 .vscode/
 .idea/
+
+# Local planning and private integration docs
+/plan.md
+/docs/

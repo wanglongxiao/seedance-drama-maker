@@ -95,7 +95,9 @@
     "download": "⬇️ ダウンロード",
     "downloadVideo": "⬇️ 動画をダウンロード",
     "newProject": "🆕 新しいプロジェクト",
-    "exitAutoRun": "自動モードを終了"
+    "exitAutoRun": "自動モードを終了",
+    "endProject": "プロジェクトを終了",
+    "endingProject": "終了中..."
   },
   "labels": {
     "audioMessage": "🎤 音声メッセージ",
@@ -218,6 +220,11 @@
     "rollbackInvalidStep": "❌ ステップ「{step}」は存在しません。\n\n利用可能なステップ: 脚本、参照画像、絵コンテ画像、絵コンテ動画、結合",
     "rollbackNoStartedStep": "❌ まだ開始されたステップがないため、ロールバックできません。\n\nまず「開始生成」または「autorun」を入力してください。",
     "rollbackStepNotCompleted": "❌ 「{step}」へはロールバックできません。そのステップはまだ完了していません。\n\n完了済みステップ: {completedSteps}\n完了済みのステップにのみ戻れます。",
+    "projectEndConfirm": "プロジェクトを終了すると、このプロジェクトの TOS 一時ファイル、仮想アセットライブラリの素材、アセットグループが削除されます。終了してよろしいですか？",
+    "projectEnding": "プロジェクトを終了し、リソースをクリーンアップしています...",
+    "projectEnded": "✅ プロジェクトを終了しました。リソースのクリーンアップを開始しました。",
+    "projectEndFailed": "❌ プロジェクトの終了に失敗しました: {error}",
+    "projectEndNoActive": "終了できるアクティブなプロジェクトはありません。",
     "rollbackRequestFailed": "❌ ロールバック要求に失敗しました。もう一度お試しください",
     "genericStepCompleteStatus": "{step} が完了しました。チャットで「continue」または「next」を入力すると {nextStep} に進みます。再実行するには「regenerate」「redo」または「regen」を入力してください。",
     "genericStepComplete": "{step} が完了しました！\n\nチャットに入力してください：\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - 次のステップ: {nextStep}\n• \"regenerate\" / \"redo\" / \"regen\" - {step} をやり直す",

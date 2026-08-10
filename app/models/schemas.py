@@ -86,6 +86,8 @@ class GeneratedImage(BaseModel):
     is_end_frame: bool = False
     is_reference: bool = False  # 是否是参考图库图片
     regenerate_locked: bool = False
+    asset_id: Optional[str] = None
+    asset_status: Optional[str] = None
     created_at: datetime = datetime.now()
 
 
@@ -94,6 +96,8 @@ class UploadedReferenceImage(BaseModel):
     url: str
     name: str
     reference_type: Literal["character", "scene"]
+    asset_id: Optional[str] = None
+    asset_status: Optional[str] = None
     created_at: datetime = datetime.now()
 
 class GeneratedVideo(BaseModel):
@@ -152,6 +156,11 @@ class VideoProject(BaseModel):
     reference_image_library: Dict[str, List[GeneratedImage]] = Field(default_factory=dict)
     task_tos_prefix: Optional[str] = None
     task_temp_dir: Optional[str] = None
+    asset_group_id: Optional[str] = None
+    asset_group_name: Optional[str] = None
+    asset_project_name: Optional[str] = None
+    is_ended: bool = False
+    end_reason: Optional[str] = None
     # 两步图片生成相关字段
     reference_image: Optional[GeneratedImage] = None  # 参考图库主图
     video_review_mode: str = "manual"

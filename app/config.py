@@ -116,6 +116,18 @@ class Config:
     @property
     def speech_base_url(self) -> str:
         return self.get('speech.base_url')
+
+    @property
+    def asset_library_region(self) -> str:
+        return self.get('asset_library.region', 'ap-southeast-1')
+
+    @property
+    def asset_library_api_host(self) -> str:
+        return self.get('asset_library.api_host', 'ark.ap-southeast-1.byteplusapi.com')
+
+    @property
+    def asset_library_project_name(self) -> str:
+        return self.get('asset_library.project_name', 'default')
     
     @property
     def tos_bucket(self) -> str:

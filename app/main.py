@@ -19,6 +19,7 @@ from app.utils.i18n import normalize_locale, translate
 from app.utils.logger import get_logger
 from app.utils.task_paths import ensure_project_temp_dir, cleanup_project_temp_dir
 from app.agents.main_agent import main_agent
+from app.services.asset_library_service import asset_library_service
 from app.services.tos_service import tos_service
 from app.services.asr_service import asr_service
 from app.models.schemas import UploadResponse, ASRResponse
@@ -64,6 +65,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 websocket_connections: Dict[str, WebSocket] = {}
 step_confirmations: Dict[str, asyncio.Event] = {}
 project_client_owners: Dict[str, str] = {}
+disconnect_cleanup_tasks: Dict[str, asyncio.Task] = {}
 
 
 def parse_form_bool(value: Optional[str]) -> bool:
@@ -102,6 +104,32 @@ def validate_project_client_access(project_id: str, client_id: Optional[str]) ->
     return translate(locale, "error.project_access_denied", project_id=project_id)
 
 
+def validate_project_cleanup_access(project_id: str, client_id: Optional[str]) -> Optional[str]:
+    project = main_agent.get_project(project_id)
+    if not project:
+        return None
+
+    owner_client_id = project_client_owners.get(project_id)
+    if not owner_client_id:
+        return None
+
+    if client_id and owner_client_id == client_id:
+        return None
+
+    if owner_client_id not in websocket_connections:
+        return None
+
+    locale = normalize_locale(getattr(project, "output_language", "zh-CN"))
+    return translate(locale, "error.project_access_denied", project_id=project_id)
+
+
+def build_end_cleanup_keep_prefixes(project) -> list[str]:
+    keep_prefixes = []
+    if getattr(project, "final_video_url", None):
+        keep_prefixes.append("videos/final")
+    return keep_prefixes
+
+
 async def notify_videos_step_complete_if_ready(client_id: str, project, lang: str) -> None:
     total_scenes = len(getattr(getattr(project, "script", None), "scenes", []) or [])
     completed_videos = len(getattr(project, "videos", None) or [])
@@ -114,6 +142,76 @@ async def notify_videos_step_complete_if_ready(client_id: str, project, lang: st
                 "message": translate(lang, "step.videos.complete")
             }
         })
+
+
+async def end_project_resources(
+    project_id: str,
+    *,
+    reason: str,
+    client_id: Optional[str] = None,
+) -> Dict[str, Optional[str]]:
+    project = main_agent.get_project(project_id)
+    if not project:
+        try:
+            tos_service.cleanup_project_directory(project_id, keep_prefixes=[])
+        except Exception as e:
+            logger.error(f"TOS cleanup failed for missing project {project_id}: {str(e)}")
+        try:
+            cleanup_project_temp_dir(project_id)
+        except Exception as e:
+            logger.error(f"Local temp cleanup failed for missing project {project_id}: {str(e)}")
+        project_client_owners.pop(project_id, None)
+        return {"project_id": project_id, "status": "missing", "end_reason": reason}
+
+    main_agent.mark_project_ended(project_id, reason=reason)
+    await cleanup_project_files(
+        project,
+        keep_prefixes=build_end_cleanup_keep_prefixes(project),
+        cleanup_asset_library=True,
+    )
+    main_agent.remove_project(project_id)
+    project_client_owners.pop(project_id, None)
+
+    if client_id:
+        disconnect_cleanup_tasks.pop(f"{project_id}:{client_id}", None)
+
+    return {"project_id": project_id, "status": "ended", "end_reason": reason}
+
+
+async def schedule_disconnect_project_cleanup(client_id: str) -> None:
+    owned_project_ids = [
+        project_id for project_id, owner_client_id in list(project_client_owners.items())
+        if owner_client_id == client_id
+    ]
+    if not owned_project_ids:
+        return
+
+    for project_id in owned_project_ids:
+        task_key = f"{project_id}:{client_id}"
+        existing_task = disconnect_cleanup_tasks.get(task_key)
+        if existing_task and not existing_task.done():
+            continue
+
+        async def delayed_cleanup(current_project_id: str, current_client_id: str, current_task_key: str) -> None:
+            try:
+                await asyncio.sleep(2)
+                if current_client_id in websocket_connections:
+                    return
+                if project_client_owners.get(current_project_id) != current_client_id:
+                    return
+                await end_project_resources(
+                    current_project_id,
+                    reason="browser_disconnect",
+                    client_id=current_client_id,
+                )
+            except Exception as e:
+                logger.error(f"Disconnect cleanup failed for project {current_project_id}: {str(e)}")
+            finally:
+                disconnect_cleanup_tasks.pop(current_task_key, None)
+
+        disconnect_cleanup_tasks[task_key] = asyncio.create_task(
+            delayed_cleanup(project_id, client_id, task_key)
+        )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -775,6 +873,35 @@ async def rollback_step(request: Request):
         return {"success": False, "error": translate("zh-CN", "error.step_execute_failed", error=str(e))}
 
 
+@app.post("/project/{project_id}/end")
+async def end_project(
+    project_id: str,
+    client_id: Optional[str] = Form(None),
+    reason: Optional[str] = Form("user_end"),
+    ui_language: Optional[str] = Form("zh-CN"),
+):
+    ui_language = normalize_locale(ui_language)
+    try:
+        access_error = validate_project_cleanup_access(project_id, client_id)
+        if access_error:
+            return {"success": False, "error": access_error}
+
+        result = await end_project_resources(
+            project_id,
+            reason=str(reason or "user_end"),
+            client_id=client_id,
+        )
+        return {
+            "success": True,
+            "project_id": project_id,
+            "status": result["status"],
+            "message": translate(ui_language, "message.project.ended"),
+        }
+    except Exception as e:
+        logger.error(f"End project failed for {project_id}: {str(e)}")
+        return {"success": False, "error": translate(ui_language, "error.project_end_failed", error=str(e))}
+
+
 # WebSocket连接管理
 class ConnectionManager:
     def __init__(self):
@@ -801,6 +928,7 @@ class ConnectionManager:
             del websocket_connections[client_id]
         if client_id in step_confirmations:
             del step_confirmations[client_id]
+        asyncio.create_task(schedule_disconnect_project_cleanup(client_id))
         logger.info(f"WebSocket disconnected. Client: {client_id}, Total: {len(self.active_connections)}")
     
     async def send_message(self, client_id: str, message: dict):
@@ -1413,7 +1541,12 @@ async def execute_merge_step(client_id: str, project_id: str):
     await cleanup_project_files(project)
 
 
-async def cleanup_project_files(project):
+async def cleanup_project_files(
+    project,
+    *,
+    keep_prefixes: Optional[list[str]] = None,
+    cleanup_asset_library: bool = False,
+):
     """
     清理项目相关的临时文件
     - TOS 中仅保留角色/场景参考图、分镜视频、合成视频
@@ -1423,7 +1556,7 @@ async def cleanup_project_files(project):
     try:
         tos_service.cleanup_project_directory(
             project.project_id,
-            keep_prefixes=[
+            keep_prefixes=keep_prefixes or [
                 "references/characters",
                 "references/scenes",
                 "videos/scenes",
@@ -1437,6 +1570,18 @@ async def cleanup_project_files(project):
         cleanup_project_temp_dir(project.project_id)
     except Exception as e:
         logger.error(f"Local temp cleanup failed for project {project.project_id}: {str(e)}")
+
+    if cleanup_asset_library and getattr(project, "asset_group_id", None):
+        try:
+            await asyncio.to_thread(
+                asset_library_service.cleanup_asset_group,
+                group_id=project.asset_group_id,
+                project_name=getattr(project, "asset_project_name", None),
+            )
+            project.asset_group_id = None
+            project.asset_group_name = None
+        except Exception as e:
+            logger.error(f"Asset library cleanup failed for project {project.project_id}: {str(e)}")
 
     logger.info(f"Cleanup completed for project {project.project_id}")
 

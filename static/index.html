@@ -13,7 +13,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AI 视频生成助手</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260509a">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260810b">
 </head>
 <body>
 
@@ -80,7 +80,12 @@
             <div class="overall-progress" id="overallProgress">
                 <div class="overall-progress-header">
                     <span class="overall-progress-title" id="overallProgressTitle">📋 整体进度</span>
-                    <span class="overall-progress-percent" id="overallProgressPercent">0%</span>
+                    <div class="overall-progress-actions">
+                        <button class="project-end-btn" id="endProjectBtn" style="display: none;">
+                            结束项目
+                        </button>
+                        <span class="overall-progress-percent" id="overallProgressPercent">0%</span>
+                    </div>
                 </div>
                 <div class="overall-progress-bar">
                     <div class="overall-progress-fill" id="overallProgressFill" style="width: 0%"></div>
@@ -130,6 +135,6 @@
         </div>
     </div>
     
-    <script src="/static/js/app.js?v=20260509a"></script>
+    <script src="/static/js/app.js?v=20260810b"></script>
 </body>
 </html>

@@ -95,7 +95,9 @@
     "download": "⬇️ 下載",
     "downloadVideo": "⬇️ 下載影片",
     "newProject": "🆕 建立新專案",
-    "exitAutoRun": "退出自動模式"
+    "exitAutoRun": "退出自動模式",
+    "endProject": "結束專案",
+    "endingProject": "結束中..."
   },
   "labels": {
     "audioMessage": "🎤 語音訊息",
@@ -218,6 +220,11 @@
     "rollbackInvalidStep": "❌ 步驟名稱「{step}」不存在。\n\n可用步驟：劇本、參考圖、分鏡圖、分鏡影片、合成",
     "rollbackNoStartedStep": "❌ 目前尚未開始任何步驟，無法退回。\n\n請先輸入「開始生成」或「一鍵生成」開始製作。",
     "rollbackStepNotCompleted": "❌ 無法退回到「{step}」，因為該步驟尚未完成。\n\n目前已完成步驟：{completedSteps}\n只能退回到已完成的步驟。",
+    "projectEndConfirm": "結束專案後，將刪除此專案在 TOS 中的臨時檔案、虛擬素材庫素材與素材資產組。確認要結束嗎？",
+    "projectEnding": "正在結束專案並清理資源...",
+    "projectEnded": "✅ 專案已結束，資源清理已開始。",
+    "projectEndFailed": "❌ 結束專案失敗: {error}",
+    "projectEndNoActive": "目前沒有可結束的專案。",
     "rollbackRequestFailed": "❌ 退回請求失敗，請重試",
     "genericStepCompleteStatus": "{step}已完成！請在聊天區輸入「繼續」或「下一步」進行{nextStep}，或輸入「重新生成」、「重做」或「regen」重新製作",
     "genericStepComplete": "{step}已完成！\n\n請在聊天區輸入：\n• 「繼續」 / 「下一步」 / 「ok」 / 「好」 / 「go」 / 「開始」 - 進行下一步：{nextStep}\n• 「重新生成」 / 「重做」 / 「regen」 - 重新製作{step}",

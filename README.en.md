@@ -155,6 +155,11 @@ VIDEO_ENDPOINT=your-video-endpoint
 VIDEO_API_KEY=your-video-api-key
 VIDEO_REVIEW_ENDPOINT=your-video-review-endpoint
 VIDEO_REVIEW_API_KEY=your-video-review-api-key
+
+# Virtual asset library
+ASSET_LIBRARY_REGION=ap-southeast-1
+ASSET_LIBRARY_API_HOST=ark.ap-southeast-1.byteplusapi.com
+ASSET_LIBRARY_PROJECT_NAME=default
 ```
 
 Keep placeholders in `config.yaml`; values are injected from `.env` at runtime:
@@ -230,6 +235,22 @@ Two post-upload behaviors are supported:
 
 The workflow does not enter the next countdown or continue step until all reference generation and regeneration jobs are fully completed.
 
+### 3.1 Private Virtual Portrait Library
+
+The system now integrates a private virtual portrait library:
+
+- Every project creates its own dedicated asset group with a one-to-one project mapping
+- All character / portrait images in the project, including uploaded originals and generated references, are registered as assets and store their `asset_id`
+- NSFW asset uploads are supported by creating assets with `Moderation.Strategy = Skip`, which turns off Content pre-filter
+- Assets enter the generation chain only after polling `GetAsset.Status = Active`
+
+Authentication notes:
+
+- Video inference still uses the `ModelArk` Bearer API key
+- Asset-library APIs use `BytePlus AK/SK` signed requests
+- Runtime configuration therefore requires both `MODELARK_API_KEY` and `BYTEPLUS_AK/BYTEPLUS_SK`
+- The BytePlus account must also have the virtual asset-library subscription enabled; otherwise `CreateAssetGroup` returns `SubscriptionRequired`
+
 ### 4. Scene Video Generation
 
 `VideoAgent` generates each scene video with:
@@ -239,6 +260,18 @@ The workflow does not enter the next countdown or continue step until all refere
 - The current storyboard scene script
 - User style requirements
 
+Character references now use `asset://asset-id` URIs in video generation requests whenever an asset is available, for example:
+
+```json
+{
+  "type": "image_url",
+  "role": "reference_image",
+  "image_url": {
+    "url": "asset://asset-xxxxxxxx"
+  }
+}
+```
+
 Key rules:
 
 - Automatic failure retry counts are controlled by YAML
@@ -246,6 +279,22 @@ Key rules:
 - The last frame of the previous scene is used as the first-frame reference only when backdrop overlap and script continuity both hold
 - Detected faces in that first frame are masked in pure black before uploading to `TOS`
 - The video prompt appends a no-background-music constraint by default unless the user explicitly requests a music style
+
+### 4.1 Project Ending And Cleanup
+
+The Web UI now includes an `End Project` button. Cleanup can be triggered in three ways:
+
+- the user clicks `End Project`
+- the user closes the current project page
+- the user closes the browser and the frontend reports cleanup with `sendBeacon` / `keepalive fetch`
+
+Cleanup removes:
+
+- temporary files and directories in `TOS`
+- virtual asset-library assets for the project
+- the asset group associated with the project
+
+If the project has already produced a final video, the final export under `videos/final` is preserved.
 
 ### 5. Video Review And Flow Control
 
@@ -366,6 +415,33 @@ http://localhost:8888
 - `重新生成` / `重做` / `regen`
 - `退回-剧本` / `退回-参考图` / `退回-视频`
 - `一键生成` / `autorun` / `auto`
+
+## Latest End-To-End Verification
+
+The latest real local integration run has already verified the full workflow:
+
+- upload a portrait to `TOS`
+- upload audio and run `Seed-Speech` `ASR`
+- create a project-scoped virtual asset group and register the portrait asset
+- generate the script with the real script model endpoint
+- inject character references into video generation with `asset://asset-id`
+- complete multi-scene generation, AI review, and final merge
+- trigger `End Project` cleanup to remove temporary `TOS` files, assets, and the asset group
+
+Notes:
+
+- The latest real E2E run successfully produced a final video under `videos/final`
+- Scene review, final merge, and project-ending cleanup were all validated in the real cloud workflow
+- Cleanup removes temporary materials and intermediate outputs while preserving the final export
+
+## Repository Hygiene And Safe Commits
+
+To prevent secret leakage or accidental publication of test artifacts, this repository follows these rules:
+
+- Real `apikey`, `AK/SK`, `appid`, and private bucket names must stay only in the local `.env`
+- `.env`, `/.run/`, `*.log`, cache directories, `/plan.md`, and `/docs/` must not enter Git
+- README files, `config.yaml`, and `.env.example` keep placeholders only and never contain real credentials
+- Before committing, make sure test audio, test images, service logs, and temporary exports are not staged
 
 ## Open Source Rules
 

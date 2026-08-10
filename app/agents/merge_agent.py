@@ -7,6 +7,7 @@ import os
 import json
 from typing import List
 from datetime import datetime
+from urllib.parse import urlparse
 from app.config import config
 from app.services.ffmpeg_service import ffmpeg_service
 from app.services.tos_service import tos_service
@@ -26,6 +27,32 @@ class MergeAgent:
     def _is_temporary_edge_trim_enabled(self) -> bool:
         trim_switch = str(config.get('merge.temporary_edge_trim', 'off')).strip().lower()
         return trim_switch in {"on", "true", "1", "yes"}
+
+    def _is_remote_url(self, value: str) -> bool:
+        parsed = urlparse(str(value or "").strip())
+        return parsed.scheme in {"http", "https"}
+
+    def _upload_or_copy_merged_output(self, source: str, output_filename: str, project_id: str) -> str:
+        """将合并结果统一落到 videos/final 下，兼容本地文件路径和远程 URL。"""
+        if self._is_remote_url(source):
+            logger.info("Merged output is a remote URL; copying into final output directory")
+            return tos_service.copy_url_to_tos(
+                source_url=source,
+                target_filename=output_filename,
+                project_id=project_id,
+                category="videos/final",
+            )
+
+        local_path = str(source or "").strip()
+        if local_path.startswith("file://"):
+            local_path = local_path[7:]
+
+        return tos_service.upload_file(
+            local_path=local_path,
+            custom_filename=output_filename,
+            project_id=project_id,
+            category="videos/final",
+        )
     
     def merge_videos(
         self,
@@ -81,12 +108,11 @@ class MergeAgent:
             
             logger.info(f"Video merged locally: {local_path}")
             
-            # 上传到TOS
-            final_url = tos_service.upload_file(
-                local_path=local_path,
-                custom_filename=output_filename,
+            # 上传到TOS；单分镜时 merge_videos 可能直接返回远程场景 URL
+            final_url = self._upload_or_copy_merged_output(
+                source=local_path,
+                output_filename=output_filename,
                 project_id=project_id,
-                category="videos/final",
             )
             
             logger.info(f"Final video uploaded: {final_url}")

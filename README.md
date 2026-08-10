@@ -155,6 +155,11 @@ VIDEO_ENDPOINT=your-video-endpoint
 VIDEO_API_KEY=your-video-api-key
 VIDEO_REVIEW_ENDPOINT=your-video-review-endpoint
 VIDEO_REVIEW_API_KEY=your-video-review-api-key
+
+# Virtual asset library
+ASSET_LIBRARY_REGION=ap-southeast-1
+ASSET_LIBRARY_API_HOST=ark.ap-southeast-1.byteplusapi.com
+ASSET_LIBRARY_PROJECT_NAME=default
 ```
 
 `config.yaml` 中对应字段保留占位符即可，运行时会自动从 `.env` 注入：
@@ -230,6 +235,22 @@ models:
 
 只有在所有参考图生成或重生成任务都完成后，系统才会进入下一步倒计时或等待继续指令。
 
+### 3.1 虚拟素材库（Private Virtual Portrait Library）
+
+系统已经接入虚拟素材库能力：
+
+- 每个项目创建独立素材资产组，维持项目与素材资产组一一对应
+- 项目内所有人物/角色图片，包括上传原图与生成参考图，都会注册为素材资产并记录 `asset_id`
+- 支持 NSFW 素材上传，创建素材时使用 `Moderation.Strategy = Skip` 关闭 Content pre-filter
+- 只有当素材状态轮询到 `GetAsset.Status = Active` 后，才会进入视频生成链路
+
+鉴权说明：
+
+- 视频推理仍使用 `ModelArk Bearer API Key`
+- 素材库接口使用 `BytePlus AK/SK` 签名调用
+- 因此运行时必须同时配置 `MODELARK_API_KEY` 与 `BYTEPLUS_AK/BYTEPLUS_SK`
+- 当前账号还需要在 BytePlus 控制台开通虚拟素材库对应订阅，否则 `CreateAssetGroup` 会返回 `SubscriptionRequired`
+
 ### 4. 分镜视频生成
 
 `VideoAgent` 生成每个分镜视频时，会结合：
@@ -239,6 +260,18 @@ models:
 - 当前分镜脚本
 - 当前用户风格要求
 
+其中人物/角色参考图会优先使用虚拟素材库的 `asset://asset-id` 形式写入视频生成请求，例如：
+
+```json
+{
+  "type": "image_url",
+  "role": "reference_image",
+  "image_url": {
+    "url": "asset://asset-xxxxxxxx"
+  }
+}
+```
+
 关键规则：
 
 - 自动失败重试次数受 YAML 配置限制
@@ -246,6 +279,22 @@ models:
 - 仅在“当前分镜与上一分镜布景重叠且脚本承接成立”时，才会截取上一分镜最后一帧作为分镜首帧参考
 - 该首帧会做人脸检测，并对识别出的人脸做纯黑遮挡后再上传到 `TOS`
 - 视频提示词默认追加“限定：不生成背景音乐”，除非用户需求中明确指定背景音乐风格
+
+### 4.1 项目结束与资源清理
+
+Web UI 新增“结束项目”按钮，并支持在以下场景触发清理：
+
+- 用户手动点击“结束项目”
+- 用户主动关闭当前项目页面
+- 用户关闭浏览器，前端通过 `sendBeacon` / `keepalive fetch` 做最佳努力上报
+
+清理范围：
+
+- 删除本项目在 `TOS` 中的临时文件与临时目录
+- 删除本项目虚拟素材库中的素材资产
+- 删除本项目对应的素材资产组
+
+如果项目已经产出最终视频，则保留 `videos/final` 下的最终成片，避免误删导出结果。
 
 ### 5. 视频审核与流程推进
 
@@ -366,6 +415,33 @@ http://localhost:8888
 - `重新生成` / `重做` / `regen`
 - `退回-剧本` / `退回-参考图` / `退回-视频`
 - `一键生成` / `autorun` / `auto`
+
+## 最新联调验证
+
+项目最近一次本地真实联调已完整跑通以下链路：
+
+- 上传人像到 `TOS`
+- 上传语音并调用 `Seed-Speech` 完成 `ASR`
+- 创建项目级虚拟素材资产组并注册人物资产
+- 使用真实剧本模型生成剧本
+- 在视频生成请求中使用 `asset://asset-id` 注入人物参考
+- 完成多分镜视频生成、AI 审核与最终合成
+- 触发“结束项目”后自动清理 `TOS` 临时文件、素材资产和素材资产组
+
+说明：
+
+- 最近一次真实 E2E 已成功产出最终视频并上传至 `videos/final`
+- 分镜审核、最终合成、项目结束清理均已在真实调用链路中验证
+- 清理逻辑默认删除临时素材与中间产物，保留最终成片，避免误删导出结果
+
+## 仓库清理与安全提交
+
+为避免公开仓库泄露密钥或测试产物，当前仓库遵循以下规则：
+
+- 所有真实 `apikey`、`AK/SK`、`appid`、私有桶名只允许保留在本地 `.env`
+- `.env`、`/.run/`、`*.log`、缓存目录、`/plan.md`、`/docs/` 均不进入 Git
+- README、`config.yaml`、`.env.example` 只保留占位符示例，不写入真实凭证
+- 提交前请确认测试音频、测试图片、服务日志、临时导出文件没有进入暂存区
 
 ## 开源使用规则
 

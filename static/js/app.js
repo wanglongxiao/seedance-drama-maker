@@ -48,8 +48,11 @@ let regeneratingReferenceAssetKeys = new Set();
 let regeneratingVideoSceneNumbers = new Set();
 let useOriginalReference = false;
 let referenceImageRegenerateLocked = false;
-const I18N_VERSION = '20260509a';
-const FRONTEND_CONFIG_VERSION = '20260509a';
+let projectEnding = false;
+let projectEnded = false;
+let projectEndBeaconSent = false;
+const I18N_VERSION = '20260810b';
+const FRONTEND_CONFIG_VERSION = '20260810b';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
     'zh-cn': 'zh-CN',
@@ -105,6 +108,9 @@ function ensureDraftProjectId() {
     } else {
         currentProjectId = `p${Math.random().toString(36).slice(2, 10)}`;
     }
+    projectEnded = false;
+    projectEndBeaconSent = false;
+    updateProjectActionState();
     return currentProjectId;
 }
 
@@ -171,6 +177,7 @@ const stepScriptLabel = document.getElementById('stepScriptLabel');
 const stepReferenceLabel = document.getElementById('stepReferenceLabel');
 const stepVideosLabel = document.getElementById('stepVideosLabel');
 const stepMergeLabel = document.getElementById('stepMergeLabel');
+const endProjectBtn = document.getElementById('endProjectBtn');
 
 // 媒体弹窗元素
 const mediaModal = document.getElementById('mediaModal');
@@ -301,6 +308,7 @@ function applyStaticTranslations() {
     if (statusSection && statusSection.style.display === 'none') {
         statusSection.innerHTML = `<p class="status-text" id="statusText">${t('progress.waiting')}</p>`;
     }
+    updateProjectActionState();
 }
 
 function rerenderPreviewCards() {
@@ -417,6 +425,112 @@ function renderStatusBar(text, mode = 'info', stepName = '') {
     }
 }
 
+function hasActiveProjectContext() {
+    return !!currentProjectId && !projectEnded;
+}
+
+function updateProjectActionState() {
+    if (!endProjectBtn) return;
+    const visible = !!currentProjectId && !projectEnded;
+    endProjectBtn.style.display = visible ? 'inline-flex' : 'none';
+    endProjectBtn.disabled = projectEnding;
+    endProjectBtn.textContent = projectEnding ? t('actions.endingProject') : t('actions.endProject');
+}
+
+function buildProjectEndFormData(reason = 'user_end') {
+    const formData = new FormData();
+    formData.append('client_id', wsClientId || '');
+    formData.append('reason', reason);
+    formData.append('ui_language', currentLanguage);
+    return formData;
+}
+
+function sendProjectEndBeacon(reason = 'browser_close') {
+    if (!hasActiveProjectContext() || projectEnding || projectEndBeaconSent) {
+        return false;
+    }
+    const projectId = currentProjectId;
+    if (!projectId) return false;
+
+    projectEndBeaconSent = true;
+    const url = `/project/${encodeURIComponent(projectId)}/end`;
+    const formData = buildProjectEndFormData(reason);
+
+    if (navigator.sendBeacon) {
+        return navigator.sendBeacon(url, formData);
+    }
+
+    fetch(url, {
+        method: 'POST',
+        body: formData,
+        keepalive: true,
+    }).catch((error) => {
+        console.error('Project end beacon fallback failed:', error);
+    });
+    return true;
+}
+
+async function endProject(reason = 'user_end', options = {}) {
+    const { skipConfirm = false, resetAfter = true, silent = false } = options;
+
+    if (!hasActiveProjectContext()) {
+        if (!silent) {
+            addAgentMessage(t('messages.projectEndNoActive'));
+        }
+        return false;
+    }
+
+    if (!skipConfirm && !window.confirm(t('messages.projectEndConfirm'))) {
+        return false;
+    }
+
+    const projectId = currentProjectId;
+    projectEnding = true;
+    projectEnded = false;
+    updateProjectActionState();
+    cancelAutoRunCountdown();
+    renderStatusBar(t('messages.projectEnding'), 'loading', t('actions.endProject'));
+
+    try {
+        const response = await fetch(`/project/${encodeURIComponent(projectId)}/end`, {
+            method: 'POST',
+            body: buildProjectEndFormData(reason),
+        });
+        const result = await response.json();
+
+        if (!response.ok || !result.success) {
+            throw new Error(result.error || getHttpErrorMessage(response.status));
+        }
+
+        projectEnding = false;
+        projectEnded = true;
+        projectEndBeaconSent = true;
+        updateProjectActionState();
+
+        if (resetAfter) {
+            resetProject();
+        } else {
+            hideStatusSection();
+        }
+
+        if (!silent) {
+            addAgentMessage(t('messages.projectEnded'));
+        }
+        return true;
+    } catch (error) {
+        console.error('End project error:', error);
+        projectEnding = false;
+        projectEnded = false;
+        projectEndBeaconSent = false;
+        updateProjectActionState();
+        renderStatusBar(t('messages.projectEndFailed', { error: error.message || t('labels.unknown') }), 'info', t('actions.endProject'));
+        if (!silent) {
+            addAgentMessage(t('messages.projectEndFailed', { error: error.message || t('labels.unknown') }));
+        }
+        return false;
+    }
+}
+
 function removeAutoRunCountdownMessage() {
     const countdownMsg = document.getElementById('autoRunCountdownMessage');
     if (countdownMsg) {
@@ -527,6 +641,7 @@ async function init() {
 
     await Promise.all([initI18n(), loadFrontendConfig()]);
     renderWelcomeMessage(true);
+    updateProjectActionState();
     connectWebSocket();
     bindEvents();
 }
@@ -585,6 +700,9 @@ function handleWebSocketMessage(data) {
             addAgentMessage(data.data.message);
             if (data.data.project_id) {
                 currentProjectId = data.data.project_id;
+                projectEnded = false;
+                projectEndBeaconSent = false;
+                updateProjectActionState();
             }
             break;
             
@@ -775,6 +893,12 @@ function bindEvents() {
     imageBtn.addEventListener('click', () => imageInput.click());
     imageInput.addEventListener('change', handleImageUpload);
 
+    if (endProjectBtn) {
+        endProjectBtn.addEventListener('click', () => {
+            void endProject('user_end');
+        });
+    }
+
     // 录音 - 按一下开始，再按一下停止
     micBtn.addEventListener('click', toggleRecording);
 
@@ -789,6 +913,13 @@ function bindEvents() {
         if (e.key === 'Escape' && mediaModal.classList.contains('active')) {
             closeMediaModal();
         }
+    });
+
+    window.addEventListener('pagehide', () => {
+        sendProjectEndBeacon('pagehide');
+    });
+    window.addEventListener('beforeunload', () => {
+        sendProjectEndBeacon('beforeunload');
     });
 }
 
@@ -1230,6 +1361,9 @@ async function sendMessage() {
                 const result = await response.json();
                 if (result.success) {
                     currentProjectId = result.project_id;
+                    projectEnded = false;
+                    projectEndBeaconSent = false;
+                    updateProjectActionState();
                     addAgentMessage(result.response);
                 } else {
                     addAgentMessage(t('messages.serverError', { error: result.error }));
@@ -1299,6 +1433,9 @@ async function sendMessage() {
         
         if (result.success) {
             currentProjectId = result.project_id;
+            projectEnded = false;
+            projectEndBeaconSent = false;
+            updateProjectActionState();
             addAgentMessage(result.response);
 
             if (result.script_updated && result.script_output) {
@@ -3189,6 +3326,7 @@ function displayFinalVideo(url) {
     stepProgress.videos = 100;
     updateStepHighlight('merge_agent', 100);
     updateOverallProgress();
+    updateProjectActionState();
 }
 
 // 显示加载
@@ -3221,6 +3359,9 @@ function resetProject() {
     referenceImageLocked = false;
     referenceImageRegenerateLocked = false;
     referenceImageRegenerating = false;
+    projectEnding = false;
+    projectEnded = false;
+    projectEndBeaconSent = false;
     cancelAutoRunCountdown();
     mergeStepVisible = false;
     videoOutputsByScene = {};
@@ -3249,6 +3390,7 @@ function resetProject() {
     
     hideStatusSection();
     updateUploadedFiles();
+    updateProjectActionState();
 }
 
 // HTML 转义

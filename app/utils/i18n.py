@@ -359,6 +359,20 @@ BACKEND_TRANSLATIONS = {
         "ja": "プロジェクト {project_id} は現在別のブラウザーウィンドウで実行中です。該当のウィンドウで続行してください。",
         "es": "El proyecto {project_id} se está ejecutando actualmente en otra ventana del navegador. Continúa allí.",
     },
+    "message.project.ended": {
+        "zh-CN": "项目已结束，临时文件与虚拟素材库资源已开始清理。",
+        "zh-TW": "專案已結束，臨時檔案與虛擬素材庫資源已開始清理。",
+        "en": "The project has been ended, and cleanup of temporary files and virtual asset library resources has started.",
+        "ja": "プロジェクトを終了しました。一時ファイルと仮想アセットライブラリのクリーンアップを開始しました。",
+        "es": "El proyecto se ha finalizado y ya empezó la limpieza de archivos temporales y recursos de la biblioteca virtual de materiales.",
+    },
+    "error.project_end_failed": {
+        "zh-CN": "结束项目失败：{error}",
+        "zh-TW": "結束專案失敗：{error}",
+        "en": "Failed to end project: {error}",
+        "ja": "プロジェクトの終了に失敗しました: {error}",
+        "es": "No se pudo finalizar el proyecto: {error}",
+    },
     "error.no_active_websocket": {
         "zh-CN": "没有活跃的 WebSocket 连接，请刷新页面后重试。",
         "zh-TW": "沒有有效的 WebSocket 連線，請重新整理頁面後再試。",
