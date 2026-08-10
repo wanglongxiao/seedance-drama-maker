@@ -5,7 +5,7 @@ English documentation. Simplified Chinese version: `README.md`
 - Current version: `2.0.0`
 - Stack: `FastAPI`, `WebSocket`, multi-agent orchestration, `FFmpeg`
 - BytePlus products: `TOS`, `Seed-Speech`, `Seed-2.1-turbo`, `SeeDream-5.0-pro`, `SeeDance-2.5`
-- AI development tools: `Trae.ai`, `Kimi-2.6`, `GPT-5.4`
+- AI development tools: `Trae.ai`, `DeepSeek-V4-Flash-GA`, `GPT-5.5`
 
 ## ✨ Seedance 2.5 Highlights
 
@@ -96,8 +96,8 @@ All of the above are available through [byteplus.com](https://www.byteplus.com/)
 ## AI Development Tools
 
 - `Trae.ai`: coding, debugging, repository cleanup
-- `Kimi-2.6`: requirement clarification, solution discussion, documentation support
-- `GPT-5.4`: code editing, debugging, logic cleanup, documentation rewriting
+- `DeepSeek-V4-Flash-GA`: requirement clarification, solution discussion, documentation support
+- `GPT-5.5`: code editing, debugging, logic cleanup, documentation rewriting
 
 ## Prerequisites
 
