@@ -1,0 +1,1454 @@
+# Copyright (c) 2026 Alex Wang
+# @author Alex Wang <https://github.com/wanglongxiao>
+# @contact https://www.linkedin.com/in/alexwanglx/
+# Open Source Usage: attribution required; preserve this notice in redistributions.
+
+import os
+import json
+import asyncio
+from typing import Optional, Dict
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+
+from app.config import config
+from app.utils.i18n import normalize_locale, translate
+from app.utils.logger import get_logger
+from app.utils.task_paths import ensure_project_temp_dir, cleanup_project_temp_dir
+from app.agents.main_agent import main_agent
+from app.services.tos_service import tos_service
+from app.services.asr_service import asr_service
+from app.models.schemas import UploadResponse, ASRResponse
+from app import __version__
+
+logger = get_logger("main")
+
+
+
+# 创建FastAPI应用
+app = FastAPI(
+    title="Video Chatbot Agent",
+    description="AI视频生成聊天机器人",
+    version=__version__
+)
+
+
+@app.middleware("http")
+async def disable_cache_for_frontend(request: Request, call_next):
+    response = await call_next(request)
+    if request.method == "GET" and (
+        request.url.path == "/" or
+        request.url.path.startswith("/static/")
+    ):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+# CORS中间件
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 静态文件
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# 存储WebSocket连接和等待状态
+websocket_connections: Dict[str, WebSocket] = {}
+step_confirmations: Dict[str, asyncio.Event] = {}
+project_client_owners: Dict[str, str] = {}
+
+
+def parse_form_bool(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def bind_project_to_client(project_id: str, client_id: Optional[str]) -> None:
+    if project_id and client_id:
+        project_client_owners[project_id] = client_id
+        logger.info(f"Project {project_id} is bound to client {client_id}")
+
+
+def validate_project_client_access(project_id: str, client_id: Optional[str]) -> Optional[str]:
+    """校验项目是否由当前客户端持有；若旧连接已断开，则允许重新绑定。"""
+    if not project_id or not client_id:
+        return None
+
+    owner_client_id = project_client_owners.get(project_id)
+    if not owner_client_id:
+        bind_project_to_client(project_id, client_id)
+        return None
+
+    if owner_client_id == client_id:
+        return None
+
+    if owner_client_id not in websocket_connections:
+        logger.warning(
+            f"Project {project_id} owner {owner_client_id} is offline; "
+            f"rebinding to client {client_id}"
+        )
+        bind_project_to_client(project_id, client_id)
+        return None
+
+    project = main_agent.get_project(project_id)
+    locale = normalize_locale(getattr(project, "output_language", "zh-CN")) if project else "zh-CN"
+    return translate(locale, "error.project_access_denied", project_id=project_id)
+
+
+async def notify_videos_step_complete_if_ready(client_id: str, project, lang: str) -> None:
+    total_scenes = len(getattr(getattr(project, "script", None), "scenes", []) or [])
+    completed_videos = len(getattr(project, "videos", None) or [])
+    next_scene_index = int(getattr(project, "next_scene_index", 0) or 0)
+    if total_scenes > 0 and completed_videos >= total_scenes and next_scene_index >= total_scenes:
+        await manager.send_message(client_id, {
+            "type": "step_complete",
+            "data": {
+                "step": "videos",
+                "message": translate(lang, "step.videos.complete")
+            }
+        })
+
+
+@app.get("/", response_class=HTMLResponse)
+async def get_index():
+    """主页面"""
+    return FileResponse(
+        "static/index.html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
+
+
+@app.post("/upload")
+async def upload_file(
+    file: UploadFile = File(...),
+    project_id: Optional[str] = Form(None),
+) -> UploadResponse:
+    """上传文件到TOS"""
+    try:
+        project_temp_dir = ensure_project_temp_dir(project_id or "shared")
+        temp_path = str(project_temp_dir / file.filename)
+        with open(temp_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        
+        # 上传到TOS
+        file_extension = os.path.splitext(file.filename or "")[1].lower()
+        file_category = "uploads/audio" if file_extension in {".wav", ".mp3", ".m4a", ".aac", ".ogg"} else "uploads/images"
+        url = tos_service.upload_file(
+            temp_path,
+            project_id=project_id,
+            category=file_category,
+        )
+        
+        # 删除临时文件
+        os.remove(temp_path)
+        
+        return UploadResponse(
+            success=True,
+            url=url,
+            filename=file.filename
+        )
+        
+    except Exception as e:
+        logger.error(f"Upload failed: {str(e)}")
+        return UploadResponse(
+            success=False,
+            error=str(e)
+        )
+
+
+@app.post("/asr")
+async def speech_to_text(audio_url: str = Form(...)) -> ASRResponse:
+    """语音识别"""
+    try:
+        text = asr_service.recognize(audio_url)
+        return ASRResponse(success=True, text=text)
+    except Exception as e:
+        logger.error(f"ASR failed: {str(e)}")
+        return ASRResponse(success=False, error=str(e))
+
+
+@app.post("/chat")
+async def chat(
+    message: str = Form(...),
+    project_id: Optional[str] = Form(None),
+    client_id: Optional[str] = Form(None),
+    image_urls: Optional[str] = Form("[]"),
+    image_assets: Optional[str] = Form("[]"),
+    audio_url: Optional[str] = Form(None),
+    ui_language: Optional[str] = Form("zh-CN"),
+    use_original_reference: Optional[str] = Form("false"),
+):
+    """聊天接口"""
+    ui_language = normalize_locale(ui_language)
+    try:
+        # 解析图片URL
+        images = json.loads(image_urls) if image_urls else []
+        uploaded_image_assets = json.loads(image_assets) if image_assets else []
+        existing_project = main_agent.get_project(project_id) if project_id else None
+        is_new_project = existing_project is None
+        
+        # 如果没有项目ID，创建新项目
+        if is_new_project:
+            project = await main_agent.create_project(
+                user_input=message,
+                reference_images=images,
+                uploaded_reference_images=uploaded_image_assets,
+                audio_url=audio_url,
+                output_language=ui_language,
+                use_original_reference=parse_form_bool(use_original_reference),
+                project_id=project_id,
+            )
+            project_id = project.project_id
+            bind_project_to_client(project_id, client_id)
+        else:
+            access_error = validate_project_client_access(project_id, client_id)
+            if access_error:
+                return {"success": False, "error": access_error}
+            main_agent.set_project_output_language(project_id, ui_language)
+        
+        project = main_agent.get_project(project_id)
+        if is_new_project:
+            # 首次输入后直接进入剧本生成，不再经过冗余 LLM 对话预处理
+            response = translate(ui_language, "message.direct_start_script")
+            ready_for_script_start = True
+            script_updated = False
+            script_output = None
+        else:
+            # 手动模式下，剧本生成完成后允许通过聊天框直接提交“改剧本”要求
+            if main_agent.can_rewrite_script(project):
+                script = await main_agent.rewrite_script(project_id, message)
+                response = translate(ui_language, "message.script.updated")
+                ready_for_script_start = False
+                script_updated = True
+                script_output = script.dict()
+            else:
+                # 已有项目时，仍保留“补充需求追加”能力
+                response = main_agent.chat_with_user(message, project_id, output_language=ui_language)
+                ready_for_script_start = False
+                script_updated = False
+                script_output = None
+        
+        return {
+            "success": True,
+            "project_id": project_id,
+            "is_new_project": is_new_project,
+            "response": response,
+            "ready_for_script_start": ready_for_script_start,
+            "script_updated": script_updated,
+            "script_output": script_output,
+        }
+        
+    except Exception as e:
+        logger.error(f"Chat failed: {str(e)}")
+        return {
+            "success": False,
+            "error": translate(ui_language, "chat.error", error=str(e))
+        }
+
+
+@app.get("/project/{project_id}")
+async def get_project(project_id: str):
+    """获取项目信息"""
+    project = main_agent.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=translate("zh-CN", "error.project_not_found"))
+    
+    return {
+        "success": True,
+        "project": project.dict()
+    }
+
+
+@app.get("/api/frontend-config")
+async def get_frontend_config():
+    """返回前端可安全读取的 UI 配置"""
+    auto_run_countdown_seconds = config.get('ui.auto_run_countdown_seconds', 10)
+    reference_config = config.get('video_generation.reference_images', {}) or {}
+    return {
+        "success": True,
+        "config": {
+            "auto_run_countdown_seconds": max(0, int(auto_run_countdown_seconds)),
+            "reference_image_max_count": max(1, int(reference_config.get("upload_max_count", 30))),
+            "character_reference_max_count": max(1, int(reference_config.get("upload_character_max_count", 10))),
+            "scene_reference_max_count": max(1, int(reference_config.get("upload_scene_max_count", 20))),
+        }
+    }
+
+
+@app.post("/continue_generate_after_reference")
+async def continue_generate_after_reference(
+    project_id: str = Form(...),
+    client_id: str = Form(None),
+    ui_language: Optional[str] = Form("zh-CN"),
+    review_mode: Optional[str] = Form(None),
+):
+    """用户确认参考图后，开始新流程视频生成（逐个生成+审核）"""
+    ui_language = normalize_locale(ui_language)
+    try:
+        # 优先使用前端传入的 client_id，确保消息发到正确的页面
+        if len(websocket_connections) == 0:
+            return {"success": False, "error": translate(ui_language, "error.no_active_websocket")}
+
+        if not client_id:
+            # 兼容旧前端：未传 client_id 时退化为第一个连接（可能不准确）
+            client_id = list(websocket_connections.keys())[0]
+            logger.warning(f"/continue_generate_after_reference: missing client_id, fallback to {client_id}")
+
+        if client_id not in websocket_connections:
+            return {"success": False, "error": translate(ui_language, "error.invalid_client_id", client_id=client_id)}
+
+        access_error = validate_project_client_access(project_id, client_id)
+        if access_error:
+            return {"success": False, "error": access_error}
+
+        main_agent.set_project_output_language(project_id, ui_language)
+        main_agent.set_project_video_review_mode(project_id, review_mode)
+        await continue_generate_after_reference_confirmation(client_id, project_id, review_mode=review_mode)
+
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"continue_generate_after_reference failed: {str(e)}")
+        return {"success": False, "error": translate(ui_language, "error.step_execute_failed", error=str(e))}
+
+
+@app.post("/regenerate")
+async def regenerate(
+    project_id: str = Form(...),
+    type: str = Form(...),  # 'image' 或 'video'
+    scene_number: int = Form(...),
+    client_id: Optional[str] = Form(None),
+    ui_language: Optional[str] = Form("zh-CN"),
+    reference_type: Optional[str] = Form(None),
+    reference_name: Optional[str] = Form(None),
+    reference_slot_index: Optional[int] = Form(None),
+):
+    """重新生成图片或视频"""
+    ui_language = normalize_locale(ui_language)
+    try:
+        project = main_agent.get_project(project_id)
+        if not project:
+            return {"success": False, "error": translate(ui_language, "error.project_not_found")}
+        access_error = validate_project_client_access(project_id, client_id)
+        if access_error:
+            return {"success": False, "error": access_error}
+        main_agent.set_project_output_language(project_id, ui_language)
+        project = main_agent.get_project(project_id)
+
+        # 获取用户指定的比例和风格信息
+        aspect_ratio = getattr(project, 'aspect_ratio', None)
+        user_style_info = getattr(project, 'combined_input', None)
+
+        logger.info(f"Regenerating {type} for scene {scene_number}, aspect_ratio: {aspect_ratio or 'default'}")
+
+        if type == "image":
+            if scene_number == 0:
+                current_step = getattr(project, "current_step", "")
+                video_flow_started = current_step in {"images_generated", "videos_generated", "completed"}
+                video_flow_started = video_flow_started or bool(getattr(project, "videos", None))
+                video_flow_started = video_flow_started or getattr(project, "next_scene_index", 0) > 0
+                logger.info(
+                    f"Reference image regenerate gate: current_step={current_step}, "
+                    f"videos={len(getattr(project, 'videos', []) or [])}, "
+                    f"next_scene_index={getattr(project, 'next_scene_index', 0)}, "
+                    f"locked={video_flow_started}"
+                )
+                if video_flow_started:
+                    return {
+                        "success": False,
+                        "error": translate(ui_language, "error.reference_regeneration_locked")
+                    }
+
+                normalized_reference_type = str(reference_type or "").strip().lower()
+                normalized_reference_name = str(reference_name or "").strip()
+                if not normalized_reference_type or not normalized_reference_name:
+                    return {
+                        "success": False,
+                        "error": translate(ui_language, "error.reference_asset_target_required")
+                    }
+
+                existing_reference_images = (
+                    getattr(project, "character_reference_images", [])
+                    if normalized_reference_type == "character"
+                    else getattr(project, "scene_reference_images", [])
+                )
+                target_reference = next(
+                    (
+                        item for item in (existing_reference_images or [])
+                        if str(getattr(item, "name", "") or "").strip() == normalized_reference_name
+                    ),
+                    None
+                )
+                if target_reference and getattr(target_reference, "regenerate_locked", False):
+                    return {
+                        "success": False,
+                        "error": translate(ui_language, "error.reference_regeneration_locked_original")
+                    }
+                new_image = await main_agent.regenerate_reference_asset(
+                    project,
+                    reference_type=normalized_reference_type,
+                    asset_name=normalized_reference_name,
+                    reference_slot_index=reference_slot_index,
+                    feedback="用户要求重新生成",
+                )
+
+                project.status = "waiting_reference_confirmation"
+                project.current_step = "waiting_reference_confirmation"
+                logger.info(f"Updated project.reference_image to new reference image: {new_image.url}")
+
+                return {
+                    "success": True,
+                    "url": new_image.url,
+                    "reference_type": getattr(new_image, "reference_type", None),
+                    "reference_name": getattr(new_image, "name", None),
+                    "reference_output": main_agent._build_reference_output(project, translate(ui_language, "message.reference.regenerated_confirm_prompt")),
+                    "type": "image",
+                    "scene_number": scene_number
+                }
+
+            # 获取参考图URL
+            reference_image_url = None
+            if scene_number == 999:
+                # 重新生成尾帧图时，使用参考图库作为角色参考
+                if hasattr(project, 'reference_image') and project.reference_image:
+                    reference_image_url = project.reference_image.url
+                    logger.info(f"Using reference image for end frame (999) regeneration: {reference_image_url}")
+            else:
+                # 分镜图片需要使用生成的参考图作为参考
+                if hasattr(project, 'reference_image') and project.reference_image:
+                    reference_image_url = project.reference_image.url
+                    logger.info(f"Using reference image for scene {scene_number} regeneration: {reference_image_url}")
+
+            # 重新生成图片，保持用户指定的比例和风格
+            new_image = await asyncio.to_thread(
+                main_agent.image_agent.regenerate_image,
+                scene_number=scene_number,
+                script=project.script,
+                feedback="用户要求重新生成",
+                user_style_info=user_style_info,
+                aspect_ratio=aspect_ratio,
+                reference_image_url=reference_image_url
+            )
+
+            # 更新项目中的图片
+            for i, img in enumerate(project.images):
+                if img.scene_number == scene_number:
+                    project.images[i] = new_image
+                    break
+
+            # 如果是参考图（scene_number == 0），同时更新 project.reference_image
+            if scene_number == 0:
+                project.reference_image = new_image
+                logger.info(f"Updated project.reference_image to new reference image: {new_image.url}")
+
+            return {
+                "success": True,
+                "url": new_image.url,
+                "type": "image",
+                "scene_number": scene_number
+            }
+
+        elif type == "video":
+            logger.info(f"Regenerating video for scene {scene_number}")
+            logger.info(f"Total scenes in script: {len(project.script.scenes)}")
+            logger.info(f"Total videos: {len(project.videos)}")
+
+            # 获取参考图
+            reference_image = getattr(project, 'reference_image', None)
+            if not reference_image:
+                return {"success": False, "error": translate(ui_language, "error.reference_missing")}
+
+            review_mode = getattr(project, "video_review_mode", "manual")
+            scene_state = main_agent._get_scene_state(project, scene_number)
+            total_generation_limit = max(1, int(config.get('video_generation.scene_total_generate_limit', 3)))
+            previous_video_url = main_agent._get_previous_video_url(project, scene_number - 1)
+            project_language = normalize_locale(getattr(project, "output_language", "zh-CN"))
+            manual_request_attempt = 0
+            while True:
+                manual_request_attempt += 1
+                scene_state.manual_regeneration_count += 1
+
+                try:
+                    # 重新生成视频，使用参考图保持人物一致性
+                    new_video = await asyncio.to_thread(
+                        main_agent.video_agent.regenerate_video,
+                        scene_number=scene_number,
+                        script=project.script,
+                        project_id=project.project_id,
+                        reference_image=reference_image,
+                        reference_images=main_agent._select_reference_assets_for_scene(project, project.script.scenes[scene_number - 1]),
+                        previous_video_url=previous_video_url,
+                        feedback="用户要求重新生成",
+                        # 已有分镜脚本时，不再把初始用户长文本塞进视频提示词
+                        user_style_info=getattr(project.script, "style", None),
+                        user_requirement_text=getattr(project, "combined_input", None),
+                        resolution=getattr(project, "video_resolution", None),
+                        aspect_ratio=getattr(project, "aspect_ratio", None),
+                    )
+                    new_video = await main_agent.archive_scene_video_async(
+                        project,
+                        new_video,
+                        generation_count=main_agent._next_scene_archive_attempt(scene_state),
+                    )
+                except Exception as e:
+                    scene_state.generation_failure_count += 1
+                    scene_state.last_feedback = str(e)
+                    can_skip_scene = (
+                        review_mode == "manual" and
+                        scene_state.generation_failure_count >= total_generation_limit
+                    )
+                    return {
+                        "success": False,
+                        "error": translate(project_language, "error.video_generation_failed", error=str(e)),
+                        "scene_number": scene_number,
+                        "can_skip_scene": can_skip_scene,
+                        "generation_failure_count": scene_state.generation_failure_count,
+                        "max_generation_count": total_generation_limit,
+                        "skip_message": translate(
+                            project_language,
+                            "message.video.scene_can_skip",
+                            scene=scene_number,
+                            limit=total_generation_limit,
+                        ) if can_skip_scene else None,
+                    }
+
+                if main_agent._has_duplicate_video_seed(project, new_video.seed):
+                    duplicate_seed = main_agent._normalize_video_seed(new_video.seed) or "unknown"
+                    duplicate_message = translate(
+                        project_language,
+                        "message.video.duplicate_seed_retry",
+                        scene=scene_number,
+                        seed=duplicate_seed,
+                    )
+                    logger.warning(
+                        f"Scene {scene_number} regenerate got duplicate seed {duplicate_seed}, retry without review"
+                    )
+                    scene_state.generation_failure_count += 1
+                    scene_state.last_feedback = duplicate_message
+                    can_skip_scene = (
+                        review_mode == "manual" and
+                        scene_state.generation_failure_count >= total_generation_limit
+                    )
+                    if manual_request_attempt >= total_generation_limit:
+                        return {
+                            "success": False,
+                            "error": translate(
+                                project_language,
+                                "message.video.duplicate_seed_retry_limit",
+                                scene=scene_number,
+                                limit=total_generation_limit,
+                                seed=duplicate_seed,
+                            ),
+                            "scene_number": scene_number,
+                            "can_skip_scene": False,
+                            "generation_failure_count": scene_state.generation_failure_count,
+                            "max_generation_count": total_generation_limit,
+                        }
+                    if can_skip_scene:
+                        return {
+                            "success": False,
+                            "error": duplicate_message,
+                            "scene_number": scene_number,
+                            "can_skip_scene": True,
+                            "generation_failure_count": scene_state.generation_failure_count,
+                            "max_generation_count": total_generation_limit,
+                            "skip_message": translate(
+                                project_language,
+                                "message.video.scene_can_skip",
+                                scene=scene_number,
+                                limit=total_generation_limit,
+                            ),
+                        }
+                    continue
+                break
+
+            logger.info(f"Video regenerated successfully: {new_video.url}")
+            scene_state.last_video = new_video
+            scene_state.generation_failure_count = 0
+            main_agent._register_video_seed(project, new_video.seed)
+
+            # 更新项目中的视频
+            video_found = False
+            for i, vid in enumerate(project.videos):
+                if vid.scene_number == scene_number:
+                    project.videos[i] = new_video
+                    video_found = True
+                    logger.info(f"Updated video at index {i}")
+                    break
+
+            if not video_found:
+                logger.warning(f"Video for scene {scene_number} not found in project, adding new video")
+                project.videos.append(new_video)
+
+            is_approved, feedback, score = await asyncio.to_thread(
+                main_agent.video_review_agent.review_video,
+                script_scene_description=project.script.scenes[scene_number - 1].description,
+                video_url=new_video.url,
+                previous_video_url=previous_video_url,
+                reference_image_url=project.reference_image.url,
+                output_language=normalize_locale(getattr(project, "output_language", "zh-CN")),
+            )
+
+            scene_state.last_score = score
+            scene_state.last_feedback = feedback
+            scene_state.completed = True
+            scene_state.approved = bool(is_approved)
+            if score > scene_state.best_score:
+                scene_state.best_score = score
+                scene_state.best_feedback = feedback
+                scene_state.best_video = new_video
+
+            review_output = {
+                "scene_number": scene_number,
+                "approved": is_approved,
+                "score": score,
+                "retry_count": scene_state.auto_retry_count,
+                "max_retries": max(0, int(config.get('video_review.max_retries', 2))),
+                "generation_count": scene_state.total_generation_count,
+                "manual_regeneration_count": scene_state.manual_regeneration_count,
+                "max_generation_count": total_generation_limit,
+                "feedback": feedback,
+                "review_mode": review_mode,
+                "manual_continue_allowed": review_mode == "manual",
+                "next_step": "merge" if scene_number == len(project.script.scenes) else "videos",
+                "is_last_scene": scene_number == len(project.script.scenes),
+                "message": translate(
+                    normalize_locale(getattr(project, "output_language", "zh-CN")),
+                    "message.video.review_passed" if is_approved else "message.video.review_failed",
+                    scene=scene_number,
+                    score=score,
+                    feedback=feedback
+                )
+            }
+
+            websocket = websocket_connections.get(client_id) if client_id else None
+            if websocket:
+                await websocket.send_json(jsonable_encoder({
+                    "type": "agent_output",
+                    "data": {
+                        "agent": "video_review_agent",
+                        "output": review_output
+                    }
+                }))
+
+            return {
+                "success": True,
+                "url": new_video.url,
+                "type": "video",
+                "scene_number": scene_number,
+                "review": review_output,
+            }
+        else:
+            return {"success": False, "error": translate(ui_language, "error.invalid_type")}
+
+    except Exception as e:
+        logger.error(f"Regenerate failed: {str(e)}")
+        return {"success": False, "error": translate(ui_language, "error.generation_failed", error=str(e))}
+
+
+@app.post("/skip_scene")
+async def skip_scene(
+    project_id: str = Form(...),
+    scene_number: int = Form(...),
+    client_id: Optional[str] = Form(None),
+    ui_language: Optional[str] = Form("zh-CN"),
+):
+    """跳过当前分镜并继续后续流程"""
+    ui_language = normalize_locale(ui_language)
+    try:
+        project = main_agent.get_project(project_id)
+        if not project:
+            return {"success": False, "error": translate(ui_language, "error.project_not_found")}
+
+        access_error = validate_project_client_access(project_id, client_id)
+        if access_error:
+            return {"success": False, "error": access_error}
+
+        main_agent.set_project_output_language(project_id, ui_language)
+        project = main_agent.get_project(project_id)
+        websocket = websocket_connections.get(client_id) if client_id else None
+        skip_result = await main_agent.skip_scene(
+            project_id=project_id,
+            scene_number=scene_number,
+            websocket=websocket,
+        )
+
+        review_mode = getattr(project, "video_review_mode", "manual")
+        if review_mode == "manual" and websocket:
+            await main_agent.continue_generate_after_reference_confirmation(
+                project_id=project_id,
+                websocket=websocket,
+                review_mode=review_mode,
+                merge_after_videos=False,
+                resume=True,
+            )
+
+        return {
+            "success": True,
+            **skip_result,
+        }
+    except Exception as e:
+        logger.error(f"Skip scene failed: {str(e)}")
+        return {"success": False, "error": translate(ui_language, "error.step_execute_failed", error=str(e))}
+
+
+@app.post("/rollback")
+async def rollback_step(request: Request):
+    """退回步骤并重新生成"""
+    try:
+        data = await request.json()
+        project_id = data.get("project_id")
+        target_step = data.get("target_step")
+        ui_language = normalize_locale(data.get("ui_language"))
+        client_id = data.get("client_id")
+
+        if not project_id or not target_step:
+            return {"success": False, "error": translate(ui_language, "error.missing_project_or_target_step")}
+
+        project = main_agent.get_project(project_id)
+        if not project:
+            return {"success": False, "error": translate(ui_language, "error.project_not_found")}
+        access_error = validate_project_client_access(project_id, client_id)
+        if access_error:
+            return {"success": False, "error": access_error}
+        main_agent.set_project_output_language(project_id, ui_language)
+        project = main_agent.get_project(project_id)
+
+        #// 步骤顺序
+        step_order = ['script', 'reference_image', 'videos', 'merge']
+        if target_step not in step_order:
+            return {"success": False, "error": translate(ui_language, "error.invalid_step", step=target_step)}
+
+        target_index = step_order.index(target_step)
+
+        # 重置该步骤及之后的所有步骤状态
+        # 清空剧本（如果是退回剧本）
+        if target_step == 'script':
+            project.script = None
+
+        # 清空参考图（如果是退回参考图或更早）
+        if target_index <= step_order.index('reference_image'):
+            project.reference_image = None
+            project.images = []
+            project.character_reference_images = []
+            project.scene_reference_images = []
+            project.reference_image_library = {}
+            # 保留 reference_images（用户上传的原图）
+
+        # 清空视频（如果是退回视频或更早）
+        if target_index <= step_order.index('videos'):
+            project.videos = []
+            project.video_scene_states = {}
+            project.next_scene_index = 0
+            project.generated_video_seeds = []
+
+        # 清空合成视频（如果是退回合成或更早）
+        if target_index <= step_order.index('merge'):
+            project.final_video_url = None
+
+        # 更新当前步骤
+        project.current_step = target_step
+        project.status = f"rolled_back_to_{target_step}"
+        project.progress = max(0, target_index * 25)
+
+        logger.info(f"Project {project_id} rolled back to step: {target_step}")
+
+        return {
+            "success": True,
+            "target_step": target_step,
+            "message": translate(ui_language, "message.rollback.success", step=target_step)
+        }
+
+    except Exception as e:
+        logger.error(f"Rollback failed: {str(e)}")
+        return {"success": False, "error": translate("zh-CN", "error.step_execute_failed", error=str(e))}
+
+
+# WebSocket连接管理
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+    
+    async def connect(self, websocket: WebSocket, client_id: str):
+        await websocket.accept()
+        self.active_connections[client_id] = websocket
+        websocket_connections[client_id] = websocket
+        logger.info(f"WebSocket connected. Client: {client_id}, Total: {len(self.active_connections)}")
+        # Tell frontend its server-assigned client_id so HTTP endpoints can target the correct WS.
+        try:
+            await websocket.send_json(jsonable_encoder({
+                "type": "connection",
+                "data": {"client_id": client_id}
+            }))
+        except Exception as e:
+            logger.warning(f"Failed to send connection client_id to {client_id}: {str(e)}")
+    
+    def disconnect(self, client_id: str):
+        if client_id in self.active_connections:
+            del self.active_connections[client_id]
+        if client_id in websocket_connections:
+            del websocket_connections[client_id]
+        if client_id in step_confirmations:
+            del step_confirmations[client_id]
+        logger.info(f"WebSocket disconnected. Client: {client_id}, Total: {len(self.active_connections)}")
+    
+    async def send_message(self, client_id: str, message: dict):
+        """发送消息到指定客户端，处理连接断开情况"""
+        if client_id not in self.active_connections:
+            logger.debug(f"Client {client_id} not in active connections, skipping message")
+            return
+        
+        try:
+            websocket = self.active_connections[client_id]
+            encoded_message = jsonable_encoder(message)
+            # 检查连接是否仍然打开
+            if websocket.client_state.name == "CONNECTED":
+                await websocket.send_json(encoded_message)
+            else:
+                logger.warning(f"WebSocket for client {client_id} is not connected (state: {websocket.client_state.name})")
+                # 清理断开的连接
+                self.disconnect(client_id)
+        except Exception as e:
+            error_msg = str(e)
+            # 忽略 "no close frame received or sent" 错误，这是正常的连接关闭
+            if "no close frame received or sent" in error_msg:
+                logger.info(f"WebSocket connection closed normally for client {client_id}")
+            else:
+                logger.error(f"Send message failed for client {client_id}: {error_msg}")
+            # 发送失败时清理连接
+            self.disconnect(client_id)
+    
+    async def broadcast(self, message: dict):
+        """广播消息到所有活跃连接"""
+        disconnected_clients = []
+        encoded_message = jsonable_encoder(message)
+        for client_id, connection in list(self.active_connections.items()):
+            try:
+                if connection.client_state.name == "CONNECTED":
+                    await connection.send_json(encoded_message)
+                else:
+                    disconnected_clients.append(client_id)
+            except Exception as e:
+                logger.error(f"Broadcast failed to {client_id}: {str(e)}")
+                disconnected_clients.append(client_id)
+        
+        # 清理断开的连接
+        for client_id in disconnected_clients:
+            self.disconnect(client_id)
+
+manager = ConnectionManager()
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket端点 - 支持长链接3600秒"""
+    import uuid
+    client_id = str(uuid.uuid4())
+    await manager.connect(websocket, client_id)
+    
+    # 初始化确认事件
+    step_confirmations[client_id] = asyncio.Event()
+    
+    try:
+        while True:
+            # 接收消息 - 设置较长的超时时间
+            data = await websocket.receive_json()
+            logger.info(f"WebSocket received from {client_id}: {data}")
+            
+            message_type = data.get("type")
+            
+            if message_type == "chat":
+                # 处理聊天消息
+                message = data.get("message", "")
+                project_id = data.get("project_id")
+                ui_language = data.get("ui_language")
+                if project_id:
+                    main_agent.set_project_output_language(project_id, ui_language)
+                
+                response = main_agent.chat_with_user(message, project_id, output_language=ui_language)
+                
+                await manager.send_message(client_id, {
+                    "type": "chat_response",
+                    "data": {
+                        "message": response,
+                        "project_id": project_id
+                    }
+                })
+                
+            elif message_type == "execute_step":
+                # 执行指定步骤
+                project_id = data.get("project_id")
+                step = data.get("step")
+                ui_language = data.get("ui_language")
+                review_mode = data.get("review_mode")
+                
+                if project_id and step:
+                    main_agent.set_project_output_language(project_id, ui_language)
+                    main_agent.set_project_video_review_mode(project_id, review_mode)
+                    asyncio.create_task(
+                        execute_step_with_websocket(client_id, project_id, step, review_mode=review_mode)
+                    )
+            elif message_type == "set_language":
+                project_id = data.get("project_id")
+                ui_language = data.get("ui_language")
+                if project_id:
+                    main_agent.set_project_output_language(project_id, ui_language)
+                    
+            elif message_type == "confirm_step":
+                # 用户确认步骤
+                confirmed = data.get("confirmed", True)
+                if confirmed:
+                    step_confirmations[client_id].set()
+                else:
+                    # 用户要求重新生成，重置事件
+                    step_confirmations[client_id] = asyncio.Event()
+                    step_confirmations[client_id].set()
+                    
+            elif message_type == "confirm_reference_image":
+                # 用户确认参考图库
+                confirmed = data.get("confirmed", True)
+                project_id = data.get("project_id")
+                
+                if confirmed:
+                    # 设置确认事件，继续生成分镜图片
+                    step_confirmations[client_id].set()
+                    
+                    # 异步执行分镜图片生成
+                    if project_id:
+                        asyncio.create_task(
+                            continue_generate_after_reference_confirmation(client_id, project_id)
+                        )
+                    
+                    await manager.send_message(client_id, {
+                        "type": "status",
+                        "data": {
+                            "agent": "image_agent",
+                            "message": translate(ui_language, "message.reference.confirmed_start_videos")
+                        }
+                    })
+                else:
+                    # 用户要求重新生成参考图库
+                    if project_id:
+                        # 重新生成参考图库
+                        asyncio.create_task(
+                            regenerate_reference_image(client_id, project_id)
+                        )
+                    
+            elif message_type == "ping":
+                # 心跳响应
+                try:
+                    await manager.send_message(client_id, {"type": "pong"})
+                except Exception as e:
+                    logger.warning(f"Failed to send pong to {client_id}: {str(e)}")
+                    # 如果发送失败，断开连接
+                    break
+                
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected normally: {client_id}")
+        manager.disconnect(client_id)
+    except Exception as e:
+        logger.error(f"WebSocket error for {client_id}: {str(e)}")
+        manager.disconnect(client_id)
+
+
+async def execute_step_with_websocket(client_id: str, project_id: str, step: str, review_mode: Optional[str] = None):
+    """执行步骤并通过WebSocket发送更新"""
+    websocket = websocket_connections.get(client_id)
+    if not websocket:
+        logger.error(f"WebSocket not found for client {client_id}")
+        return
+
+    access_error = validate_project_client_access(project_id, client_id)
+    if access_error:
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": access_error}
+        })
+        return
+    
+    project = main_agent.get_project(project_id)
+    if not project:
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": translate("zh-CN", "error.project_not_found")}
+        })
+        return
+    lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+    
+    try:
+        # 根据步骤执行相应的Agent
+        if step == "script":
+            await execute_script_step(client_id, project_id)
+        elif step == "reference_image":
+            # 只执行参考图生成（第一步）
+            await execute_reference_image_step(client_id, project_id)
+        elif step == "images":
+            # 兼容旧逻辑：执行完整的图片生成（参考图+分镜图）
+            await execute_images_step(client_id, project_id)
+        elif step == "videos":
+            await execute_videos_step(client_id, project_id, review_mode=review_mode)
+        elif step == "merge":
+            await execute_merge_step(client_id, project_id)
+        else:
+            await manager.send_message(client_id, {
+                "type": "error",
+                "data": {"message": translate(lang, "error.step_execute_failed", error=f"unknown step: {step}")}
+            })
+            
+    except Exception as e:
+        logger.error(f"Step execution failed: {str(e)}")
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": translate(lang, "error.step_execute_failed", error=str(e))}
+        })
+
+
+async def execute_script_step(client_id: str, project_id: str):
+    """执行剧本生成步骤"""
+    project = main_agent.get_project(project_id)
+    lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+    await manager.send_message(client_id, {
+        "type": "status",
+        "data": {"agent": "script_agent", "message": translate(lang, "progress.script.generating")}
+    })
+    
+    await manager.send_message(client_id, {
+        "type": "progress",
+        "data": {"agent": "script_agent", "progress": 10, "message": translate(lang, "progress.script.generating")}
+    })
+    
+    # 生成剧本
+    script = await main_agent._generate_script(main_agent.get_project(project_id))
+    project = main_agent.get_project(project_id)
+    project.script = script
+    project.current_step = "script_generated"
+    project.status = "script_generated"
+    project.progress = max(project.progress, 25)
+    
+    await manager.send_message(client_id, {
+        "type": "progress",
+        "data": {"agent": "script_agent", "progress": 100, "message": translate(lang, "progress.script.completed")}
+    })
+    
+    await manager.send_message(client_id, {
+        "type": "agent_output",
+        "data": {"agent": "script_agent", "output": script.dict()}
+    })
+    
+    # 通知步骤完成，等待用户确认
+    await manager.send_message(client_id, {
+        "type": "step_complete",
+        "data": {
+            "step": "script",
+            "message": translate(lang, "step.script.complete")
+        }
+    })
+
+
+async def execute_images_step(client_id: str, project_id: str):
+    """执行图片生成步骤（两步流程：先生成参考图库，用户确认后再生成分镜）"""
+    project = main_agent.get_project(project_id)
+    lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+    
+    # ========== 第一步：生成参考图库==========
+    await manager.send_message(client_id, {
+        "type": "status",
+        "data": {"agent": "image_agent", "message": translate(lang, "progress.reference.generating")}
+    })
+    
+    await manager.send_message(client_id, {
+        "type": "progress",
+        "data": {"agent": "image_agent", "progress": 30, "message": translate(lang, "progress.reference.generating")}
+    })
+    
+    async def push_reference_library_progress(updated_project):
+        await manager.send_message(client_id, {
+            "type": "agent_output",
+            "data": {
+                "agent": "image_agent",
+                "output": main_agent._build_reference_output(updated_project)
+            }
+        })
+
+    # 逐张生成并推送统一参考图库
+    reference_image = await main_agent.generate_reference_image_with_retry(
+        project,
+        progress_callback=push_reference_library_progress,
+    )
+    project.reference_image = reference_image
+    
+    await manager.send_message(client_id, {
+        "type": "progress",
+        "data": {"agent": "image_agent", "progress": 35, "message": translate(lang, "progress.reference.completed_wait")}
+    })
+    
+    await manager.send_message(client_id, {
+        "type": "agent_output",
+        "data": {
+            "agent": "image_agent",
+            "output": main_agent._build_reference_output(project, translate(lang, "message.reference.confirm_prompt"))
+        }
+    })
+    
+    # 等待用户确认参考图库
+    logger.info(f"Waiting for user confirmation of reference library for client {client_id}")
+    
+    # 重置确认事件
+    step_confirmations[client_id] = asyncio.Event()
+    
+    # 通知前端等待用户确认
+    await manager.send_message(client_id, {
+        "type": "step_complete",
+        "data": {
+            "step": "reference_image",
+            "message": translate(lang, "step.reference.complete"),
+            "require_confirmation": True,
+            "confirmation_type": "reference_image"
+        }
+    })
+    
+    # 等待用户确认（超时3600秒）
+    try:
+        await asyncio.wait_for(step_confirmations[client_id].wait(), timeout=3600)
+    except asyncio.TimeoutError:
+        logger.warning(f"Timeout waiting for reference image confirmation for client {client_id}")
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": translate(lang, "error.confirmation_timeout")}
+        })
+        return
+    
+    # 检查项目状态
+    if project.status == "cancelled":
+        logger.info(f"Project {project_id} was cancelled")
+        return
+    
+    # ========== 第二步：直接生成视频（简化流程，跳过分镜图生成）==========
+    await execute_videos_step(client_id, project_id)
+
+
+async def execute_reference_image_step(client_id: str, project_id: str):
+    """只执行参考图生成步骤（第一步）"""
+    project = main_agent.get_project(project_id)
+    lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+
+    await manager.send_message(client_id, {
+        "type": "status",
+        "data": {"agent": "image_agent", "message": translate(lang, "progress.reference.generating")}
+    })
+
+    await manager.send_message(client_id, {
+        "type": "progress",
+        "data": {"agent": "image_agent", "progress": 30, "message": translate(lang, "progress.reference.generating")}
+    })
+
+    async def push_reference_library_progress(updated_project):
+        await manager.send_message(client_id, {
+            "type": "agent_output",
+            "data": {
+                "agent": "image_agent",
+                "output": main_agent._build_reference_output(updated_project)
+            }
+        })
+
+    # 逐张生成并推送参考图库
+    reference_image = await main_agent.generate_reference_image_with_retry(
+        project,
+        progress_callback=push_reference_library_progress,
+    )
+    project.reference_image = reference_image
+
+    await manager.send_message(client_id, {
+        "type": "progress",
+        "data": {"agent": "image_agent", "progress": 35, "message": translate(lang, "progress.reference.completed_wait")}
+    })
+
+    await manager.send_message(client_id, {
+        "type": "agent_output",
+        "data": {
+            "agent": "image_agent",
+            "output": main_agent._build_reference_output(
+                project,
+                translate(lang, "message.reference.confirm_prompt")
+            )
+        }
+    })
+
+    # 通知步骤完成
+    await manager.send_message(client_id, {
+        "type": "step_complete",
+        "data": {
+            "step": "reference_image",
+            "message": translate(lang, "step.reference.complete")
+        }
+    })
+
+
+
+
+
+async def continue_generate_after_reference_confirmation(client_id: str, project_id: str, review_mode: Optional[str] = None):
+    """用户确认参考图后执行新流程：首分镜视频 -> 审核 -> 延伸视频 -> 审核 -> 等待进入合成"""
+    logger.info(f"[FLOW] Continuing generation after reference image confirmation for project {project_id}")
+
+    access_error = validate_project_client_access(project_id, client_id)
+    if access_error:
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": access_error}
+        })
+        return
+
+    project = main_agent.get_project(project_id)
+    if not project:
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": translate(lang, "error.project_not_found")}
+        })
+        return
+    lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+
+    if not hasattr(project, 'reference_image') or not project.reference_image:
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": translate(lang, "error.reference_missing")}
+        })
+        return
+
+    # 新流程：使用 MainAgent 的 continue_generate_after_reference_confirmation 方法
+    # 该方法会逐个生成分镜视频并审核
+    websocket = websocket_connections.get(client_id)
+
+    try:
+        logger.info(f"[FLOW] Starting new video generation flow with review for project {project_id}")
+        resume = bool(getattr(project, "videos", None)) or getattr(project, "next_scene_index", 0) > 0
+        await main_agent.continue_generate_after_reference_confirmation(
+            project_id=project_id,
+            websocket=websocket,
+            review_mode=review_mode,
+            merge_after_videos=False,
+            resume=resume,
+        )
+        project = main_agent.get_project(project_id)
+        await notify_videos_step_complete_if_ready(client_id, project, lang)
+        logger.info(f"[FLOW] Video generation flow completed for project {project_id}")
+    except Exception as e:
+        logger.error(f"[FLOW] Video generation flow failed: {str(e)}")
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": translate(lang, "error.video_generation_failed", error=str(e))}
+        })
+
+
+async def regenerate_reference_image(client_id: str, project_id: str):
+    """重新生成参考图库"""
+    logger.info(f"Regenerating reference image for project {project_id}")
+
+    access_error = validate_project_client_access(project_id, client_id)
+    if access_error:
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": access_error}
+        })
+        return
+    
+    project = main_agent.get_project(project_id)
+    if not project:
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": translate("zh-CN", "error.project_not_found")}
+        })
+        return
+    lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+    
+    try:
+        await manager.send_message(client_id, {
+            "type": "status",
+            "data": {"agent": "image_agent", "message": translate(lang, "progress.reference.regenerating")}
+        })
+        
+        await manager.send_message(client_id, {
+            "type": "progress",
+            "data": {"agent": "image_agent", "progress": 30, "message": translate(lang, "progress.reference.regenerating")}
+        })
+        
+        # 重新生成参考图库
+        reference_image = await main_agent._regenerate_reference_image(
+            project,
+            feedback="用户要求重新生成"
+        )
+
+        replaced = False
+        for i, image in enumerate(project.images):
+            if image.scene_number == 0:
+                project.images[i] = reference_image
+                replaced = True
+                break
+        if not replaced:
+            project.images.insert(0, reference_image)
+
+        project.reference_image = reference_image
+
+        logger.info(f"Reference image regenerated: {reference_image.url}")
+        logger.info(f"Reference image is_reference: {getattr(reference_image, 'is_reference', False)}")
+
+        await manager.send_message(client_id, {
+            "type": "progress",
+            "data": {"agent": "image_agent", "progress": 35, "message": translate(lang, "progress.reference.recompleted")}
+        })
+        
+        await manager.send_message(client_id, {
+            "type": "agent_output",
+            "data": {
+                "agent": "image_agent",
+                "output": main_agent._build_reference_output(project, translate(lang, "message.reference.regenerated_confirm_prompt"))
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to regenerate reference image: {str(e)}")
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": translate(lang, "error.generation_failed", error=str(e))}
+        })
+
+
+async def execute_videos_step(client_id: str, project_id: str, review_mode: Optional[str] = None):
+    """执行视频生成步骤 - 简化版本，直接使用参考图"""
+    project = main_agent.get_project(project_id)
+    lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+
+    # 检查是否有参考图
+    if not hasattr(project, 'reference_image') or not project.reference_image:
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": translate(lang, "error.reference_missing")}
+        })
+        return
+
+    websocket = websocket_connections.get(client_id)
+
+    # 复用统一的新流程：分镜视频生成失败与审核失败共享同一套重试次数，
+    # 但此入口只执行到“视频完成”，不自动进入合成步骤。
+    await main_agent.continue_generate_after_reference_confirmation(
+        project_id=project_id,
+        websocket=websocket,
+        review_mode=review_mode,
+        merge_after_videos=False,
+        resume=True,
+    )
+
+    project = main_agent.get_project(project_id)
+    await notify_videos_step_complete_if_ready(client_id, project, lang)
+
+
+async def execute_merge_step(client_id: str, project_id: str):
+    """执行视频合成步骤"""
+    project = main_agent.get_project(project_id)
+    lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+
+    total_scenes = len(getattr(getattr(project, "script", None), "scenes", []) or [])
+    completed_videos = len(getattr(project, "videos", None) or [])
+    next_scene_index = int(getattr(project, "next_scene_index", 0) or 0)
+    if total_scenes > 0 and (completed_videos < total_scenes or next_scene_index < total_scenes):
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": translate(lang, "error.merge_before_all_scenes_completed")}
+        })
+        logger.warning(
+            f"Rejected premature merge for project {project_id}: "
+            f"videos={completed_videos}/{total_scenes}, next_scene_index={next_scene_index}"
+        )
+        return
+
+    await manager.send_message(client_id, {
+        "type": "status",
+        "data": {"agent": "merge_agent", "message": translate(lang, "progress.merge.generating")}
+    })
+
+    await manager.send_message(client_id, {
+        "type": "progress",
+        "data": {"agent": "merge_agent", "progress": 90, "message": translate(lang, "progress.merge.generating")}
+    })
+
+    # 合成视频
+    final_url = await main_agent._merge_videos(project)
+    project.final_video_url = final_url
+    project.status = "completed"
+
+    await manager.send_message(client_id, {
+        "type": "progress",
+        "data": {"agent": "merge_agent", "progress": 100, "message": translate(lang, "progress.merge.completed")}
+    })
+
+    await manager.send_message(client_id, {
+        "type": "agent_output",
+        "data": {
+            "agent": "merge_agent",
+            "output": {"final_video_url": final_url}
+        }
+    })
+
+    # 通知所有步骤完成
+    await manager.send_message(client_id, {
+        "type": "step_complete",
+        "data": {
+            "step": "merge",
+            "message": translate(lang, "message.all_videos_completed")
+        }
+    })
+
+    # 清理TOS中的临时文件（图片和录音）
+    await cleanup_project_files(project)
+
+
+async def cleanup_project_files(project):
+    """
+    清理项目相关的临时文件
+    - TOS 中仅保留角色/场景参考图、分镜视频、合成视频
+    - 完全删除本地任务 temp 子目录
+    """
+    logger.info(f"Starting cleanup for project {project.project_id}")
+    try:
+        tos_service.cleanup_project_directory(
+            project.project_id,
+            keep_prefixes=[
+                "references/characters",
+                "references/scenes",
+                "videos/scenes",
+                "videos/final",
+            ],
+        )
+    except Exception as e:
+        logger.error(f"TOS cleanup failed for project {project.project_id}: {str(e)}")
+
+    try:
+        cleanup_project_temp_dir(project.project_id)
+    except Exception as e:
+        logger.error(f"Local temp cleanup failed for project {project.project_id}: {str(e)}")
+
+    logger.info(f"Cleanup completed for project {project.project_id}")
+
+
+if __name__ == "__main__":
+    server_port = int(config.get("server.port", 8888))
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=server_port,
+        reload=True,
+        log_level="info",
+        ws_ping_interval=30,  # WebSocket心跳间隔30秒
+        ws_ping_timeout=3600  # WebSocket超时3600秒（1小时）
+    )

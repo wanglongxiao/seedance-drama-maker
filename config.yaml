@@ -1,0 +1,219 @@
+# Copyright (c) 2026 Alex Wang
+# @author Alex Wang <https://github.com/wanglongxiao>
+# @contact https://www.linkedin.com/in/alexwanglx/
+# Open Source Usage: attribution required; preserve this notice in redistributions.
+# BytePlus AI Services Configuration
+# 多模态大模型 / 生图模型 / 生视频模型 / TOS 配置 / ASR 语音识别 / Chatbot Agent 配置
+
+# BytePlus 认证信息
+# 敏感信息通过 .env 环境变量注入，此处仅保留 ${VAR} 占位符，禁止硬编码真实值。
+byteplus:
+  ak: "${BYTEPLUS_AK}"
+  sk: "${BYTEPLUS_SK}"
+
+# ModelArk API Key
+modelark:
+  api_key: "${MODELARK_API_KEY}"
+  base_url: "${MODELARK_BASE_URL:-https://ark.ap-southeast.bytepluses.com/api/v3}"
+
+# Speech ASR 认证信息
+speech:
+  appid: "${SPEECH_APPID}"
+  api_key: "${SPEECH_API_KEY}"
+  base_url: "${SPEECH_BASE_URL:-https://voice.ap-southeast-1.bytepluses.com/api/v3}"
+  submit_path: "/auc/bigmodel/submit"
+  query_path: "/auc/bigmodel/query"
+
+# 模型端点配置
+# 说明：
+# - endpoint: ModelArk 中对应模型的 endpoint id，是代码实际调用的模型入口
+# - api_key: 该 endpoint 对应的 API Key；如果多个模型共用同一个 key，也分别写在各自配置段里，方便后续独立切换
+# - temperature / max_tokens: 仅对文本类 chat completion 模型生效；图片 / 视频模型不会读取这两个字段
+# - 当前代码只会读取下方这些配置段：main_agent / script / image / video / video_review / asr
+models:
+  # 主对话 Agent：负责用户交互、需求补全、流程编排和步骤推进
+  # 对应代码：app/agents/main_agent.py
+  main_agent:
+    endpoint: "${MAIN_AGENT_ENDPOINT}"
+    api_key: "${MAIN_AGENT_API_KEY}"
+    temperature: 0.7
+    max_tokens: 30000
+
+  # 剧本分镜 Agent：负责剧本、角色、分镜脚本生成
+  # 对应代码：app/agents/script_agent.py
+  script:
+    endpoint: "${SCRIPT_ENDPOINT}"
+    api_key: "${SCRIPT_API_KEY}"
+    temperature: 0.9
+    max_tokens: 30000
+
+  # 生图模型：用于参考图生成与参考图重新生成
+  # 对应代码：app/agents/image_agent.py
+  image:
+    endpoint: "${IMAGE_ENDPOINT}"
+    api_key: "${IMAGE_API_KEY}"
+    default_params:
+      size: "2K"
+
+  # 生视频模型：用于分镜视频生成
+  # 对应代码：app/agents/video_agent.py
+  video:
+    endpoint: "${VIDEO_ENDPOINT}"
+    api_key: "${VIDEO_API_KEY}"
+
+  # 视频审核模型：用于分镜视频视觉理解审核
+  # 对应代码：app/agents/video_review_agent.py
+  video_review:
+    endpoint: "${VIDEO_REVIEW_ENDPOINT}"
+    api_key: "${VIDEO_REVIEW_API_KEY}"
+    temperature: 0.3
+    max_tokens: 30000
+
+  # ASR 资源配置：用于音频转文字
+  # 对应代码：app/services/asr_service.py
+  asr:
+    resource_id: "${ASR_RESOURCE_ID:-volc.bigasr.auc}"
+    submit_path: "/auc/bigmodel/submit"
+    query_path: "/auc/bigmodel/query"
+
+# TOS 配置
+tos:
+  region: "${TOS_REGION:-ap-southeast-1}"
+  bucket: "${TOS_BUCKET}"
+  endpoint: "${TOS_ENDPOINT:-https://tos-ap-southeast-1.bytepluses.com}"
+  uploads_dir: "uploads"
+  temp_dir: "/tmp/aw-videobot-sd2"   # 本地任务临时目录根路径；每个任务在其下创建唯一子目录
+  request_timeout: 300      # TOS 上传/下载请求超时（秒）
+  socket_timeout: 300       # TOS 上传/下载数据传输超时（秒）
+  connection_timeout: 300   # TOS 建连超时（秒）
+  # 生成的文件将保存到此 bucket，权限设置为公共可读
+  # 文件URL格式: https://{bucket}.{endpoint-host}/uploads/{filename}
+
+# 视频生成配置
+video_generation:
+  # 视频总时长（秒）- 默认值 60，最大值 600
+  total_duration: 60
+  total_duration_min: 20
+  total_duration_max: 600
+  # 每个分镜时长范围（秒）- 最短 6，最长 30（适配 seedance-2.5）
+  scene_duration:
+    min: 6
+    max: 30
+  # 视频输出格式（seedance-2.5 支持 mov / mp4），统一使用 mov
+  output_format: "mov"
+  # 分镜数量（根据总时长自动计算）
+
+  # 视频分辨率选项 (480p, 720p)
+  # 默认使用 480p 以平衡生成速度和视频质量
+  resolution_options:
+    - "480p"
+    - "720p"
+  # 参考图片配置
+  reference_images:
+    max_count: 60  # 最多支持60张参考图片（人物/角色最多20张 + 布景最多40张）
+    character_max_count: 20  # 人物/角色参考图最多20张
+    scene_max_count: 40      # 布景参考图最多40张
+    upload_max_count: 30  # 前端用户一次最多上传30张参考图
+    upload_character_max_count: 10  # 前端用户一次最多上传10张人物/角色参考图
+    upload_scene_max_count: 20      # 前端用户一次最多上传20张布景参考图
+    max_concurrency: 8      # 统一参考图库生成最大并发数
+    auto_retry_count: 2     # 整套参考图库自动重试次数上限（首次失败后的自动重生成次数）
+  # 分镜视频生成/重新生成的并行上限（仅对可并行的批处理入口生效）
+  scene_max_concurrency: 8
+  default_resolution: "480p"
+  # 每个分镜视频的总生成次数上限（首次生成 + 自动重生成 + 人工点击重新生成合计）
+  scene_total_generate_limit: 3
+  # 平滑转场提示词后缀
+  transition_prompt: "超平滑的电影级转场，镜头运动如丝绸般流畅，无任何跳帧或卡顿，角色动作连贯自然，场景切换无缝衔接，专业电影摄影质感"
+
+# 视频审核配置
+video_review:
+  # 审核通过阈值（0-100分），达到或超过此分数视为通过
+  pass_threshold: 60
+  # 每个分镜最大重试审核次数（审核不通过时重新生成的最大次数）
+  max_retries: 2
+  # 默认审核模式：auto=自动重试, manual=手动确认
+  default_mode: "auto"
+  # 审核维度权重（可选，用于计算综合分数）
+  weights:
+    character_consistency: 0.40        # 人物/角色一致性
+    physical-laws: 0.30                # 物理世界规律
+    script_semantic_consistency: 0.30  # 与分镜脚本意义上一致
+
+# 剧本生成约束
+script_generation:
+  max_characters: 30         # 剧本中的主要人物/角色最多 30 人
+  max_setting_definitions: 40  # 剧本中的布景设定最多 40 个
+  max_storyboard_scenes: 50  # 剧本分镜数量上限
+
+# 生成策略配置
+generation:
+  # 并发配置
+  concurrency:
+    # 图片生成并发数
+    image_workers: 8
+    # 视频生成并发数
+    video_workers: 8
+    # 是否启用并发（true/false）
+    enabled: true
+
+  # 最大重试次数
+  max_retries: 3
+  # 参考图生成失败时的自动重试次数（最大不超过 2）
+  reference_image_max_retries: 2
+
+ui:
+  # 全自动模式步骤切换倒计时（秒）
+  auto_run_countdown_seconds: 10
+
+server:
+  # FastAPI 服务端口
+  port: 8888
+
+merge:
+  # 临时拼接裁帧逻辑开关：on=开启，off=关闭
+  temporary_edge_trim: "off"
+  # 前一段视频末尾裁掉的帧数
+  trim_previous_end_frames: 0
+  # 后一段视频开头裁掉的帧数
+  trim_next_start_frames: 1
+
+# API 限制和超时配置
+limits:
+  # 视频生成轮询间隔（秒）
+  video_poll_interval: 20
+  # 视频生成最大等待时间（秒）
+  video_max_wait_time: 900
+  # ASR 任务轮询间隔（秒）
+  asr_poll_interval: 2
+  # ASR 任务最大等待时间（秒）
+  asr_max_wait_time: 300
+  # 音频文件限制
+  asr_max_file_size: "512MB"
+  asr_max_duration: "5 hours"
+  # 请求超时
+  request_timeout: 180
+
+# 日志配置
+logging:
+  # 是否启用日志
+  enabled: true
+  # 日志级别: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+  # 是否在终端输出
+  console_output: true
+  # 是否记录Agent调用详情
+  log_agent_calls: true
+  # 是否记录大模型输入输出
+  log_llm_io: true
+  # 是否记录心跳
+  log_heartbeat: true
+  # 日志格式
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# 临时文件清理
+cleanup:
+  # 视频生成后是否清理临时文件
+  enabled: true
+  # 保留时间（小时），0表示立即清理
+  retain_hours: 0

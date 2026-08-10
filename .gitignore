@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.swp
+*.swo
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+temp/
+
+# 敏感凭证：禁止提交真实密钥
+.env
+.env.*
+!.env.example
+
+# 调试产物
+.dbg/
+*.log
+
+# IDE
+.vscode/
+.idea/

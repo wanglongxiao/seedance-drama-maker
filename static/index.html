@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <!--
+      Copyright (c) 2026 Alex Wang
+      @author Alex Wang <https://github.com/wanglongxiao>
+      @contact https://www.linkedin.com/in/alexwanglx/
+      Open Source Usage: attribution required; preserve this notice in redistributions.
+    -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>AI 视频生成助手</title>
+    <link rel="stylesheet" href="/static/css/style.css?v=20260509a">
+</head>
+<body>
+
+    <div class="app-container">
+        <!-- 左侧聊天区 (30%) -->
+        <div class="chat-section">
+            <div class="chat-header">
+                <div class="chat-header-top">
+                    <div class="chat-header-title-group">
+                        <h1 id="appTitle">🎬 AI 视频生成助手</h1>
+                        <p id="appSubtitle">告诉我你想创作的视频内容</p>
+                    </div>
+                    <div class="language-switcher">
+                        <label for="languageSelect" id="languageLabel">语言</label>
+                        <select id="languageSelect" class="language-select">
+                            <option value="en">English</option>
+                            <option value="zh-CN" selected>简体中文</option>
+                            <option value="zh-TW">繁體中文</option>
+                            <option value="ja">日本語</option>
+                            <option value="es">Español</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="chat-messages" id="chatMessages"></div>
+            
+            <div class="chat-input-area">
+                <!-- 已上传文件预览 -->
+                <div class="uploaded-files" id="uploadedFiles"></div>
+                
+                <div class="input-row">
+                    <button class="icon-btn" id="imageBtn" title="上传图片">
+                        📷
+                    </button>
+                    <input type="file" id="imageInput" accept="image/*" multiple hidden>
+                    
+                    <button class="icon-btn" id="micBtn" title="按住录音">
+                        🎤
+                    </button>
+                    
+                    <input 
+                        type="text" 
+                        class="text-input" 
+                        id="textInput" 
+                        placeholder="输入你想创作的视频内容..."
+                    >
+                    
+                    <button class="send-btn" id="sendBtn">
+                        发送
+                    </button>
+                </div>
+                
+                <div class="recording-indicator" id="recordingIndicator" style="display: none;">
+                    <span class="recording-dot"></span>
+                    正在录音...
+                </div>
+            </div>
+        </div>
+        
+        <!-- 右侧预览区 (70%) -->
+        <div class="preview-section">
+            <!-- 顶部：整体进度 + 步骤（合二为一） -->
+            <div class="overall-progress" id="overallProgress">
+                <div class="overall-progress-header">
+                    <span class="overall-progress-title" id="overallProgressTitle">📋 整体进度</span>
+                    <span class="overall-progress-percent" id="overallProgressPercent">0%</span>
+                </div>
+                <div class="overall-progress-bar">
+                    <div class="overall-progress-fill" id="overallProgressFill" style="width: 0%"></div>
+                </div>
+                <div class="step-progress-bar" id="stepProgressBar">
+                    <div class="step-progress-item" data-step="script" id="step-script">
+                        <div class="step-progress-dot">1</div>
+                        <div class="step-progress-label" id="stepScriptLabel">剧本</div>
+                    </div>
+                    <div class="step-progress-item" data-step="reference_image" id="step-reference">
+                        <div class="step-progress-dot">2</div>
+                        <div class="step-progress-label" id="stepReferenceLabel">参考图</div>
+                    </div>
+                    <div class="step-progress-item" data-step="videos" id="step-videos">
+                        <div class="step-progress-dot">3</div>
+                        <div class="step-progress-label" id="stepVideosLabel">视频</div>
+                    </div>
+                    <div class="step-progress-item" data-step="merge" id="step-merge">
+                        <div class="step-progress-dot">4</div>
+                        <div class="step-progress-label" id="stepMergeLabel">合成</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 内容展示区 -->
+            <div class="content-display" id="contentDisplay">
+                <div class="empty-state" id="emptyState">
+                    <div class="empty-icon">🎥</div>
+                    <p id="emptyStateText">开始创作后，这里将显示生成的内容</p>
+                </div>
+            </div>
+            
+            <!-- 状态提示区域 -->
+            <div class="status-section" id="statusSection" style="display: none;">
+                <p class="status-text" id="statusText">等待中...</p>
+            </div>
+            
+            <!-- 媒体弹窗 -->
+            <div class="media-modal" id="mediaModal">
+                <div class="media-modal-content">
+                    <button class="media-modal-close" id="mediaModalClose">✕</button>
+                    <div id="mediaModalBody"></div>
+                </div>
+            </div>
+            
+            <!-- 最终视频将显示在 content-display 中 -->
+        </div>
+    </div>
+    
+    <script src="/static/js/app.js?v=20260509a"></script>
+</body>
+</html>
