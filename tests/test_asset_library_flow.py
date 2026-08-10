@@ -8,9 +8,12 @@ import asyncio
 import pytest
 
 import app.main as main_module
+from app.agents.main_agent import MainAgent
 from app.agents.merge_agent import MergeAgent
 from app.agents.video_agent import VideoAgent
+from app.models.schemas import VideoProject
 from app.models.schemas import GeneratedImage
+from app.services.asset_library_service import AssetLibraryService
 
 
 class TestVideoAgentAssetReferences:
@@ -115,5 +118,44 @@ def test_merge_agent_copies_remote_single_scene_video_to_final_directory(monkeyp
             "final_video_demo.mov",
             "demo123",
             "videos/final",
+        )
+    ]
+
+
+def test_asset_group_description_uses_project_id_only():
+    agent = MainAgent()
+    project = VideoProject(
+        project_id="project-safe-123",
+        user_input="这里可能包含敏感文本，不应该写进 CreateAssetGroup Description",
+    )
+
+    assert agent._build_asset_group_description(project) == "project-safe-123"
+
+
+def test_create_asset_group_omits_empty_description(monkeypatch):
+    service = AssetLibraryService()
+    calls = []
+
+    monkeypatch.setattr(
+        service,
+        "_call",
+        lambda action, payload: calls.append((action, payload)) or {"Id": "group-demo"},
+    )
+
+    result = service.create_asset_group(
+        name="seedance-project-project-safe-123",
+        description="",
+        project_name="default",
+    )
+
+    assert result == "group-demo"
+    assert calls == [
+        (
+            "CreateAssetGroup",
+            {
+                "Name": "seedance-project-project-safe-123",
+                "GroupType": service.group_type,
+                "ProjectName": "default",
+            },
         )
     ]

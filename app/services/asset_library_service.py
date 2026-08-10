@@ -142,15 +142,16 @@ class AssetLibraryService:
         description: str = "",
         project_name: Optional[str] = None,
     ) -> str:
-        result = self._call(
-            "CreateAssetGroup",
-            {
-                "Name": name,
-                "Description": description[:300],
-                "GroupType": self.group_type,
-                "ProjectName": project_name or self.project_name,
-            },
-        )
+        payload: Dict[str, Any] = {
+            "Name": name,
+            "GroupType": self.group_type,
+            "ProjectName": project_name or self.project_name,
+        }
+        clean_description = str(description or "").strip()
+        if clean_description:
+            payload["Description"] = clean_description[:300]
+
+        result = self._call("CreateAssetGroup", payload)
         group_id = str(result.get("Id") or "").strip()
         if not group_id:
             raise AssetLibraryError("CreateAssetGroup succeeded but no group id was returned")

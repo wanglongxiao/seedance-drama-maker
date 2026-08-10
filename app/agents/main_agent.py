@@ -190,9 +190,9 @@ class MainAgent:
         return f"seedance-project-{project_id}"
 
     def _build_asset_group_description(self, project: VideoProject) -> str:
-        user_input = str(getattr(project, "user_input", "") or "").strip()
-        short_input = user_input[:120]
-        return f"Seedance project {project.project_id}: {short_input}" if short_input else f"Seedance project {project.project_id}"
+        # Avoid sending raw user input to asset-group metadata because
+        # the upstream API may reject sensitive text in descriptive fields.
+        return str(project.project_id or "").strip()
 
     def _raise_if_project_ended(self, project: Optional[VideoProject]) -> None:
         if project and getattr(project, "is_ended", False):
