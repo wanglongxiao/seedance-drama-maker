@@ -48,37 +48,29 @@ The system focuses on:
 
 ## Showcase
 
-### Generation Process
+### UI And Generation Flow
 
-#### ScreenRecord-0
+**UI overview and script generation**: from a single-sentence prompt the system auto-generates the title, style, character definitions, backdrop definitions, and storyboard scripts.
 
-<img src="./demo/ScreenRecord-0.png" alt="ScreenRecord-0" width="100%" />
+<img src="./demo/gen-story.png" alt="UI overview and script generation" width="100%" />
 
-#### ScreenRecord-1
+**Storyboard reference generation**: a line-art multi-panel storyboard is generated per scene and auto-reviewed by `StoryboardReviewAgent` (style / no duplicated character with normal limbs / correct gender).
 
-Please play: [demo/ScreenRecord-1.mp4](./demo/ScreenRecord-1.mp4)
+<img src="./demo/storyboard-image.png" alt="Storyboard reference generation" width="100%" />
 
-#### ScreenRecord-2
+**Scene videos and merge**: each scene is generated, AI-reviewed, and merged into the final long video.
 
-Please play: [demo/ScreenRecord-2.mp4](./demo/ScreenRecord-2.mp4)
+<img src="./demo/merge-video.png" alt="Scene videos and merge" width="100%" />
 
-#### ScreenRecord-3
+**Multilingual support**: the UI supports `zh-CN` / `zh-TW` / `en` / `ja` / `es`, and video dialogue is natively supported in 14 languages.
 
-Please play: [demo/ScreenRecord-3.mp4](./demo/ScreenRecord-3.mp4)
+<img src="./demo/i18n-ui.png" alt="Multilingual support" width="100%" />
 
-### Generated Results
+### Video Demos
 
-#### DemoVideo-1
-
-Please play: [demo/DemoVideo-1.mp4](./demo/DemoVideo-1.mp4)
-
-#### DemoVideo-2
-
-Please play: [demo/DemoVideo-2.mp4](./demo/DemoVideo-2.mp4)
-
-#### DemoVideo-3
-
-Please play: [demo/DemoVideo-3.mp4](./demo/DemoVideo-3.mp4)
+- Fully automated agent demo: [demo/how-to-use.mp4](./demo/how-to-use.mp4)
+- 2-minute live-action drama: [demo/real-drama.mp4](./demo/real-drama.mp4)
+- 2-minute comic-style drama: [demo/comics-drama.mp4](./demo/comics-drama.mp4)
 
 ## BytePlus Products Used
 
@@ -295,10 +287,10 @@ Character references now use `asset://asset-id` URIs in video generation request
 }
 ```
 
-Reference selection differs by video mode:
+Reference selection differs by video mode (switchable in the UI):
 
-- **Extend mode**: every scene except scene 1 additionally references the previous scene's generated video as `reference_video`, carrying over the ending character state, scene, and camera movement for a smooth transition
-- **Parallel mode**: each scene references only the character image / scene image / storyboard, without the previous scene's video
+- **Parallel mode (default)**: multiple scenes are generated at the same time for faster throughput; each scene references only the character image / scene image / storyboard, without the previous scene's video
+- **Extend mode**: scenes are generated serially, which is slower but optimizes scene-to-scene transitions — every scene except scene 1 additionally references the previous scene's generated video as `reference_video`, used only to keep character appearance/outfit/scene/lighting consistent while advancing the new scene from a fresh camera angle, avoiding near-identical adjacent shots
 
 Key rules:
 
@@ -483,3 +475,4 @@ To prevent secret leakage or accidental publication of test artifacts, this repo
 
 - See `CHANGELOG.en.md` for the English changelog
 - See `CHANGELOG.md` for the Simplified Chinese changelog
+

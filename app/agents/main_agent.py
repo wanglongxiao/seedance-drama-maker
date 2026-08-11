@@ -1787,7 +1787,7 @@ class MainAgent:
             elif not use_previous_video:
                 logger.info("[FLOW] Parallel mode: using reference images only (no previous-scene video)")
             else:
-                logger.info("[FLOW] Extension scene: using previous-scene last-frame image + reference images")
+                logger.info("[FLOW] Extension scene: referencing previous-scene video (consistency only, must advance to new shot)")
 
             # 并行模式下不参考前一分镜视频，effective_previous_* 置空
             effective_previous_video_url = previous_video_url if use_previous_video else None

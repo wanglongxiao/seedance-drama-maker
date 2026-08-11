@@ -48,37 +48,29 @@
 
 ## 项目展示
 
-### 生成过程
+### 界面与生成流程
 
-#### ScreenRecord-0
+**UI 界面展示与生成剧本**：一句话需求输入后，系统自动生成标题、风格、角色设定、布景设定与分镜脚本。
 
-<img src="./demo/ScreenRecord-0.png" alt="ScreenRecord-0" width="100%" />
+<img src="./demo/gen-story.png" alt="UI 界面展示与生成剧本" width="100%" />
 
-#### ScreenRecord-1
+**生成故事版参考图**：为每个分镜生成白描多宫格故事版，并经 `StoryboardReviewAgent` 自动审核（风格 / 角色不重复且肢体正常 / 性别正确）。
 
-请播放：[demo/ScreenRecord-1.mp4](./demo/ScreenRecord-1.mp4)
+<img src="./demo/storyboard-image.png" alt="生成故事版参考图" width="100%" />
 
-#### ScreenRecord-2
+**分镜视频与合成**：逐个分镜生成视频、AI 审核并进行最终长视频合成。
 
-请播放：[demo/ScreenRecord-2.mp4](./demo/ScreenRecord-2.mp4)
+<img src="./demo/merge-video.png" alt="分镜视频与合成" width="100%" />
 
-#### ScreenRecord-3
+**支持多语言**：前端界面支持 `zh-CN` / `zh-TW` / `en` / `ja` / `es`，视频对白原生支持 14 种语言。
 
-请播放：[demo/ScreenRecord-3.mp4](./demo/ScreenRecord-3.mp4)
+<img src="./demo/i18n-ui.png" alt="支持多语言" width="100%" />
 
-### 生成结果
+### 视频演示
 
-#### DemoVideo-1
-
-请播放：[demo/DemoVideo-1.mp4](./demo/DemoVideo-1.mp4)
-
-#### DemoVideo-2
-
-请播放：[demo/DemoVideo-2.mp4](./demo/DemoVideo-2.mp4)
-
-#### DemoVideo-3
-
-请播放：[demo/DemoVideo-3.mp4](./demo/DemoVideo-3.mp4)
+- 全自动 Agent 演示：[demo/how-to-use.mp4](./demo/how-to-use.mp4)
+- 2 分钟真人剧：[demo/real-drama.mp4](./demo/real-drama.mp4)
+- 2 分钟漫剧：[demo/comics-drama.mp4](./demo/comics-drama.mp4)
 
 ## 使用的 BytePlus 产品
 
@@ -295,10 +287,10 @@ models:
 }
 ```
 
-参考素材的引用逻辑按视频模式区分：
+参考素材的引用逻辑按视频模式区分（可在前端切换）：
 
-- **延长模式**：除分镜 1 外，其余分镜额外引用“上一分镜的生成视频”作为 `reference_video`，衔接结尾人物状态、场景与运镜，保持连贯转场
-- **并行模式**：各分镜只引用角色图 / 场景图 / 故事版，不引用上一分镜视频
+- **并行模式（默认）**：多个分镜同时生成，速度更快；各分镜只引用角色图 / 场景图 / 故事版，互不引用上一分镜视频
+- **延长模式**：分镜串行生成，速度偏慢，但优化了分镜间的过渡——除分镜 1 外，其余分镜额外引用“上一分镜的生成视频”作为 `reference_video`，仅用于保持角色形象/服装/场景/光线一致，并从新机位推进本分镜的新剧情，避免相邻分镜画面雷同
 
 关键规则：
 

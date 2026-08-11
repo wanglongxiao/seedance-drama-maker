@@ -29,3 +29,6 @@ temp/
 # Local planning and private integration docs
 /plan.md
 /docs/
+
+# Tests (kept local only, excluded from public repo)
+/tests/
