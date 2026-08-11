@@ -24,19 +24,148 @@ class ScriptAgent:
         self.timeout = 300  # 超时时间 300 秒
         # 从 yaml 配置读取视频时长设置
         self.default_total_duration = config.get('video_generation.total_duration', 60)  # 默认 60 秒
-        self.total_duration_min = config.get('video_generation.total_duration_min', 20)  # 最小 20 秒
-        self.total_duration_max = config.get('video_generation.total_duration_max', 300)  # 最大时长由 yaml 配置控制
+        self.total_duration_min = config.get('video_generation.total_duration_min', 30)  # 最小 30 秒
+        self.total_duration_max = config.get('video_generation.total_duration_max', 1200)  # 最大时长由 yaml 配置控制
         # 从 yaml 配置读取分镜时长范围
-        self.scene_duration_min = config.get('video_generation.scene_duration.min', 8)
-        self.scene_duration_max = config.get('video_generation.scene_duration.max', 15)
-        self.max_characters = int(config.get('script_generation.max_characters', 20))
+        self.scene_duration_min = config.get('video_generation.scene_duration.min', 10)
+        self.scene_duration_max = config.get('video_generation.scene_duration.max', 30)
+        self.max_characters = int(config.get('script_generation.max_characters', 30))
         self.max_setting_definitions = int(
             config.get('script_generation.max_setting_definitions',
                        config.get('script_generation.max_scene_definitions', 40))
         )
-        self.max_storyboard_scenes = int(config.get('script_generation.max_storyboard_scenes', 25))
+        self.max_storyboard_scenes = int(config.get('script_generation.max_storyboard_scenes', 50))
         self.temperature = config.get('models.script.temperature', 0.8)
         self.max_tokens = config.get('models.script.max_tokens', 4096)
+
+    def _disallowed_duration_examples(self) -> str:
+        """返回超出分镜时长范围的示例值，用于提示词约束。"""
+        first = self.scene_duration_max + 1
+        return f"{first}、{first + 1}"
+
+    def _normalize_single_line(self, value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip())
+
+    def _normalize_scene_feature_list(self, value: Any) -> List[str]:
+        if isinstance(value, list):
+            raw_items = value
+        else:
+            raw_items = re.split(r"[、,，/|；;\n]+", str(value or ""))
+
+        features: List[str] = []
+        seen = set()
+        for item in raw_items:
+            feature = self._normalize_single_line(item)
+            if not feature:
+                continue
+            key = feature.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            features.append(feature)
+        return features
+
+    def _normalize_character_outfits(self, value: Any) -> Dict[str, str]:
+        """规范化分镜的角色装扮映射为 {角色名: 装扮描述}，忽略空条目。"""
+        outfits: Dict[str, str] = {}
+        if isinstance(value, dict):
+            items = value.items()
+        elif isinstance(value, list):
+            # 兼容 [{"name": .., "outfit": ..}] 或 [{"character": .., "clothing": ..}] 结构
+            items = []
+            for entry in value:
+                if isinstance(entry, dict):
+                    name = entry.get("name") or entry.get("character") or entry.get("role")
+                    outfit = entry.get("outfit") or entry.get("clothing") or entry.get("costume") or entry.get("description")
+                    items.append((name, outfit))
+        else:
+            return outfits
+
+        for name, outfit in items:
+            char_name = self._normalize_single_line(name)
+            outfit_desc = self._normalize_single_line(outfit)
+            if char_name and outfit_desc:
+                outfits[char_name] = outfit_desc
+        return outfits
+
+    def _coerce_scene_text_field(self, value: Any) -> str:
+        """将分镜的 character_description / voice_description 归一化为字符串。
+
+        模型有时会把这类字段输出成按角色名分组的 dict（如
+        {"小悠": "穿着黑色...", "阿强": "..."}）或 list，需拍平成
+        "角色名：描述" 的多行字符串，避免 Scene 校验因类型不符失败。
+        """
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            parts = []
+            for name, desc in value.items():
+                name_str = self._normalize_single_line(name)
+                desc_str = self._normalize_single_line(desc)
+                if name_str and desc_str:
+                    parts.append(f"{name_str}：{desc_str}")
+                elif desc_str:
+                    parts.append(desc_str)
+            return "\n".join(parts)
+        if isinstance(value, list):
+            parts = []
+            for item in value:
+                if isinstance(item, dict):
+                    name = item.get("name") or item.get("character") or item.get("role")
+                    desc = item.get("description") or item.get("text") or item.get("action") or item.get("voice")
+                    name_str = self._normalize_single_line(name)
+                    desc_str = self._normalize_single_line(desc)
+                    if name_str and desc_str:
+                        parts.append(f"{name_str}：{desc_str}")
+                    elif desc_str:
+                        parts.append(desc_str)
+                    else:
+                        parts.append(self._normalize_single_line(item))
+                else:
+                    line = self._normalize_single_line(item)
+                    if line:
+                        parts.append(line)
+            return "\n".join(parts)
+        return str(value)
+
+    def _infer_time_of_day_from_text(self, *texts: Any) -> str:
+        content = " ".join(self._normalize_single_line(text) for text in texts if self._normalize_single_line(text)).lower()
+        if not content:
+            return ""
+
+        keyword_groups = [
+            ("凌晨", ["凌晨", "拂晓前", "凌晨时分", "before dawn"]),
+            ("清晨", ["清晨", "早晨", "晨光", "黎明", "破晓", "morning", "dawn", "sunrise"]),
+            ("中午", ["中午", "午后", "正午", "晌午", "noon", "midday", "afternoon"]),
+            ("黄昏", ["黄昏", "傍晚", "日落", "暮色", "晚霞", "dusk", "sunset", "twilight"]),
+            ("夜晚", ["深夜", "夜晚", "夜里", "晚上", "午夜", "霓虹夜景", "night", "midnight", "evening"]),
+            ("白天", ["白天", "白昼", "日间", " daytime", "daytime", "day "]),
+        ]
+        for label, keywords in keyword_groups:
+            if any(keyword in content for keyword in keywords):
+                return label
+        return ""
+
+    def _infer_weather_from_text(self, *texts: Any) -> str:
+        content = " ".join(self._normalize_single_line(text) for text in texts if self._normalize_single_line(text)).lower()
+        if not content:
+            return ""
+
+        keyword_groups = [
+            ("暴雨", ["暴雨", "大雨", "雷雨", "storm", "thunderstorm", "heavy rain"]),
+            ("雨天", ["雨", "下雨", "雨夜", "阴雨", "rain", "rainy", "drizzle"]),
+            ("雪天", ["雪", "下雪", "暴雪", "snow", "snowy", "blizzard"]),
+            ("雾天", ["雾", "迷雾", "浓雾", "fog", "foggy", "mist"]),
+            ("晴天", ["晴", "晴朗", "阳光", "日光", "sunny", "clear sky", "clear day"]),
+            ("阴天", ["阴天", "多云", "cloudy", "overcast"]),
+            ("大风", ["大风", "狂风", "风沙", "windy", "gale"]),
+        ]
+        for label, keywords in keyword_groups:
+            if any(keyword in content for keyword in keywords):
+                return label
+        return ""
 
     def _contains_adult_content(self, user_input: str) -> bool:
         """
@@ -204,11 +333,11 @@ class ScriptAgent:
                 )
                 messages[0]["content"] = (
                     self._get_system_prompt(output_language, target_total_duration)
-                    + f"\n\n【补充要求】如果分镜对白大量为空、剧情过短、分镜数量明显不足或超过上限、任意分镜 duration 超出 {self.scene_duration_min}-{self.scene_duration_max} 秒、相邻分镜缺少顺滑过渡、每段分镜末尾没有自然引向下一分镜的转场，或不同分镜的内容重复/雷同，请重新输出完整且可直接执行的 JSON。"
+                    + f"\n\n【补充要求】如果分镜对白大量为空、剧情过短、分镜数量明显不足或超过上限、任意分镜 duration 超出 {self.scene_duration_min}-{self.scene_duration_max} 秒、任意 scene_definition 缺少 time_of_day / weather / scene_features、任意分镜缺少 time_of_day / weather、相邻分镜缺少顺滑过渡、每段分镜末尾没有自然引向下一分镜的转场，或不同分镜的内容重复/雷同，请重新输出完整且可直接执行的 JSON。"
                 )
                 messages[1]["content"] = (
                     prompt
-                    + f"\n\n【补充要求】除非用户明确要求不生成对白或只生成旁白，否则请为大多数分镜提供有效 dialogue 内容。并且所有分镜必须有明确的新动作、新信息或新情节推进；相邻分镜之间要有顺滑、自然的过渡；每段分镜 description 的结尾都要给出能自然带到下一分镜的动作、视线、情绪或镜头转场钩子；每个分镜都要补足环境、人物、动作、神态、眼神、情绪、心理、语言等细节；禁止不同分镜复用几乎相同的场景描述和对白；分镜总数不得超过 {self.max_storyboard_scenes} 个；每个分镜的 duration 只能是 {self.scene_duration_min}-{self.scene_duration_max} 之间的整数秒数，禁止输出 16、17 或更大的时长。"
+                    + f"\n\n【补充要求】除非用户明确要求不生成对白或只生成旁白，否则请为大多数分镜提供有效 dialogue 内容。并且所有分镜必须有明确的新动作、新信息或新情节推进；相邻分镜之间要有顺滑、自然的过渡；每段分镜 description 的结尾都要给出能自然带到下一分镜的动作、视线、情绪或镜头转场钩子；每个分镜都要补足环境、人物、动作、神态、眼神、情绪、心理、语言等细节；禁止不同分镜复用几乎相同的场景描述和对白；分镜总数不得超过 {self.max_storyboard_scenes} 个；每个分镜的 duration 只能是 {self.scene_duration_min}-{self.scene_duration_max} 之间的整数秒数，禁止输出 {self._disallowed_duration_examples()} 或更大的时长；每个 scene_definition 都必须输出非空的 time_of_day / weather / scene_features；每个 scene 都必须输出非空的 time_of_day / weather。"
                     + "\n【补充要求】如果用户上传了带名称的角色/人物或布景参考图，这些名称必须原样保留，不得改名、缩写、翻译或替换为别名；这些名称必须直接用于 characters.name、scenes.characters_present、scene_definitions.name 和 scenes.scene_name。"
                 )
 
@@ -263,8 +392,9 @@ class ScriptAgent:
             "2. 必须保留用户没有要求修改的合理内容，按用户要求修改需要调整的部分。",
             "3. scenes 必须是完整数组，scene_number 连续递增。",
             f"4. 总时长应尽量维持在约 {total_duration} 秒，每个分镜时长仍需满足 {self.scene_duration_min}-{self.scene_duration_max} 秒。",
-            "5. dialogue、description、character_description、voice_description 要完整，不要省略。",
-            "6. 只输出 JSON，不要输出解释、前言、Markdown 代码块。",
+            "5. dialogue、description、character_description、voice_description、time_of_day、weather 要完整，不要省略。",
+            "6. scene_definitions 中每个布景必须保留或补齐 time_of_day、weather、scene_features。",
+            "7. 只输出 JSON，不要输出解释、前言、Markdown 代码块。",
             "",
             "【上一版完整剧本】",
             previous_script_json,
@@ -399,7 +529,7 @@ class ScriptAgent:
         match1 = re.search(duration_pattern1, user_input)
         if match1:
             seconds = int(match1.group(1))
-            if 10 <= seconds <= self.total_duration_max:
+            if 1 <= seconds <= self.total_duration_max:
                 return seconds
 
         # 匹配 "时长" + 分钟格式
@@ -409,7 +539,7 @@ class ScriptAgent:
             minutes = int(match2.group(1))
             seconds = int(match2.group(2)) if match2.group(2) else 0
             total_seconds = minutes * 60 + seconds
-            if 10 <= total_seconds <= self.total_duration_max:
+            if 1 <= total_seconds <= self.total_duration_max:
                 return total_seconds
 
         # 匹配独立的 "X秒" 格式（确保前面没有"时长"字样，避免重复匹配）
@@ -417,7 +547,7 @@ class ScriptAgent:
         match3 = re.search(duration_pattern3, user_input)
         if match3:
             seconds = int(match3.group(1))
-            if 10 <= seconds <= self.total_duration_max:
+            if 1 <= seconds <= self.total_duration_max:
                 return seconds
 
         # 匹配独立的 "X分钟" 格式
@@ -426,7 +556,7 @@ class ScriptAgent:
         if match4:
             minutes = int(match4.group(1))
             total_seconds = minutes * 60
-            if 10 <= total_seconds <= self.total_duration_max:
+            if 1 <= total_seconds <= self.total_duration_max:
                 return total_seconds
 
         return None
@@ -446,7 +576,7 @@ class ScriptAgent:
 【创作目标】
 1. 视频总时长约 {effective_total_duration} 秒，且不得超过配置上限 {self.total_duration_max} 秒。
 2. 每个分镜时长必须在 {self.scene_duration_min}-{self.scene_duration_max} 秒之间；如果剧情更长，必须拆成多个分镜。
-   - duration 只能填写 {self.scene_duration_min}-{self.scene_duration_max} 之间的整数，绝对禁止输出 16、17 或任何超出范围的值。
+   - duration 只能填写 {self.scene_duration_min}-{self.scene_duration_max} 之间的整数，绝对禁止输出 {self._disallowed_duration_examples()} 或任何超出范围的值。
 3. 剧本必须完整包含开端、发展、高潮、结局，剧情连贯、符合客观规律并具有起伏。
 4. 分镜总数不得超过 {self.max_storyboard_scenes} 个。
 
@@ -455,15 +585,18 @@ class ScriptAgent:
 2. 只要某个角色会在任一分镜真实出场，就必须出现在 characters 角色设定列表中；characters 必须覆盖 scenes.characters_present 中的出场角色。
 3. characters 与所有分镜里的出场角色总数共享同一个上限，最多 {self.max_characters} 个。
 4. 在“角色设定”之后输出“布景设定”，布景最多 {self.max_setting_definitions} 个。
-5. 布景设定要写清固定环境、时间、空间布局和氛围。
-6. 多角色分镜可同框、单人特写、空镜头、背影或剪影，但必须符合剧情逻辑。
+5. 布景设定要写清固定环境、时间、天气、空间布局和氛围。
+6. 每个布景设定必须额外输出 time_of_day、weather、scene_features 三个字段；scene_features 必须是数组，列出该场景的稳定视觉特征。
+7. 多角色分镜可同框、单人特写、空镜头、背影或剪影，但必须符合剧情逻辑。
 
 【分镜要求】
-1. 每个分镜必须包含：scene_number, scene_name, description, dialogue, duration, character_description, voice_description, mood, camera_angle, characters_present。
+1. 每个分镜必须包含：scene_number, scene_name, description, dialogue, duration, character_description, voice_description, mood, time_of_day, weather, camera_angle, characters_present。
 2. scene_name 必须引用 scene_definitions 中已有的 name；一个分镜涉及多个布景时可用"、"连接。
-3. 每个分镜都要写足细节：环境、人物、动作、神态、眼神、情绪、心理、语言、镜头信息。
-4. dialogue 要自然、有情感、符合角色性格，并推动剧情发展。
-5. description 必须可直接用于后续视频生成，避免空泛总结。
+3. 每个分镜都要明确写出 time_of_day（如清晨/白天/中午/黄昏/傍晚/深夜）和 weather（如晴天/小雨/沙尘天/雷暴雨/下雪/有雾），并将该时间/天气等‘场景状态’信息明确写入 description（场景描述部分）中，二者保持一致。
+4. 每个分镜都要写足细节：环境、人物、动作、神态、眼神、情绪、心理、语言、镜头信息。
+5. dialogue 要自然、有情感、符合角色性格和当前情绪情境，数量适度地推动剧情发展；不同情绪情境下的语气、用词、节奏要有区分。
+6. description 必须可直接用于后续视频生成，避免空泛总结；并且必须把本分镜的‘场景状态’（时间/天气）描述包含在内。
+7. 当某个出场角色在本分镜中的装扮与其在 characters 中的默认 clothing 不同（例如日常装扮/舞会盛装/衣衫破损/满身血污/穿透视装/正面裸体/只穿内衣/上身全裸/身穿盔甲/制服诱惑/仙人装扮/穿小熊公仔装/头发凌乱/眼神迷离/衣衫不整/酥胸半露等），必须做到两点：(a) 在该分镜的 character_description（角色动作部分）中明确写出该角色的‘角色装扮’描述；(b) 在该分镜的 character_outfits 字段中输出对应条目。若与默认装扮一致或无特殊装扮，则 character_description 无需强调装扮，也不需要在 character_outfits 中列出该角色。
 
 【转场与推进】
 1. 相邻分镜必须顺滑承接，不能跳切成像重新开始一个新故事。
@@ -486,10 +619,16 @@ class ScriptAgent:
 - background: 故事背景设定
 - characters: 角色列表，每个角色包含 name, age, gender, face_features, skin_tone, clothing, voice_type, voice_features, voice_style
   - age 必须是字符串，如"16岁"、"中年"
-- scene_definitions: 布景设定列表，每项包含 name, description
+  - gender 必须明确（如"男"/"女"），age 与 gender 会持久化并应用到后续生图/生视频，须保持前后一致
+  - clothing 为该角色的默认装扮，作为角色主图与后续分镜装扮判定的基准
+- scene_definitions: 布景设定列表，每项包含 name, description, time_of_day, weather, scene_features
+- scene_features 必须是字符串数组，写清稳定的场景视觉特征，例如灯光、陈设、地貌、材质、色调、标志性物件
 - scenes: 分镜列表
   - duration 必须是 {self.scene_duration_min}-{self.scene_duration_max} 之间的整数秒数
+  - time_of_day 和 weather 必须为非空字符串，并与分镜内容一致，且其描述必须同时体现在 description（场景描述部分）中
   - characters_present 中出现的角色名必须来自 characters.name
+  - character_outfits 为可选对象，键为角色名（须来自 characters_present），值为该角色在本分镜的特殊装扮描述；仅当装扮与默认 clothing 不同时才输出对应条目，同时该装扮描述必须同时体现在 character_description（角色动作部分）中
+  - character_description 与 voice_description 必须输出为单个字符串（可用换行分隔多个角色），禁止输出为对象/字典或数组；多个角色时用“角色名：描述”的形式在同一字符串内换行罗列
   - characters 与 scenes.characters_present 的出场角色总数不得超过 {self.max_characters}
 
 【绝对禁止】
@@ -557,14 +696,20 @@ class ScriptAgent:
         prompt_parts.append(f"- 视频总时长：约{effective_total_duration}秒")
         prompt_parts.append(f"- 总时长不得超过{self.total_duration_max}秒")
         prompt_parts.append(f"- 每个分镜时长：{self.scene_duration_min}-{self.scene_duration_max}秒之间灵活调整，根据剧情需要设定")
-        prompt_parts.append(f"- duration 字段只能输出 {self.scene_duration_min}-{self.scene_duration_max} 的整数，禁止输出 16、17 或更大值")
+        prompt_parts.append(
+            f"- duration 字段只能输出 {self.scene_duration_min}-{self.scene_duration_max} 的整数，"
+            f"禁止输出 {self._disallowed_duration_examples()} 或更大值"
+        )
         prompt_parts.append(f"- 分镜数量：约{effective_total_duration // ((self.scene_duration_min + self.scene_duration_max) // 2)}个，总数不得超过{self.max_storyboard_scenes}个")
         prompt_parts.append("- 剧情要求：有故事感、有起伏、连贯不跳跃、符合客观规律")
         prompt_parts.append("- 每个分镜都要写足环境、人物、动作、神态、眼神、情绪、心理、语言等细节")
+        prompt_parts.append("- 每个分镜都必须明确输出 time_of_day 和 weather 字段，例如白天/夜晚、晴天/雨天，并与分镜内容保持一致，且必须把该时间/天气‘场景状态’写入 description（场景描述部分）")
+        prompt_parts.append("- 若某出场角色本分镜的装扮与其默认 clothing 不同（如舞会盛装/衣衫破损/满身血污/身穿盔甲/制服诱惑/衣衫不整/酥胸半露等），必须在 character_description（角色动作部分）中写出该‘角色装扮’，并在 character_outfits 字段输出对应条目")
         prompt_parts.append("- 相邻分镜必须顺滑衔接、自然转场，但不要重复上一分镜已经完成的剧情主体")
         prompt_parts.append("- 下一分镜必须接住上一分镜尚未完成的动作、情绪或信息点，同时提供新的动作结果、新的信息或新的情绪变化")
         prompt_parts.append("- 即使同一布景同一人物连续出现，也不能复述上一分镜已经写过的动作、对白和画面状态")
         prompt_parts.append(f"- 所有分镜的出场角色总数与角色设定共用同一个上限，最多{self.max_characters}个；凡是出现在 characters_present 的角色，都必须在 characters 中给出设定")
+        prompt_parts.append("- 每个布景设定都必须输出 scene_features 数组，写清该场景的稳定特征，例如灯光、陈设、建筑材质、空间布局、环境符号")
 
         # 检查用户是否指定了对话/旁白生成方式
         if user_input:
@@ -587,6 +732,7 @@ class ScriptAgent:
         prompt_parts.append(f"【强制】角色设定最多 {self.max_characters} 个，布景设定最多 {self.max_setting_definitions} 个，分镜最多 {self.max_storyboard_scenes} 个。")
         prompt_parts.append(f"【强制】所有分镜的出场角色必须包含在角色设定中，且分镜出场角色总数最多 {self.max_characters} 个。")
         prompt_parts.append(f"【强制】所有分镜实际使用的布景都必须包含在布景设定中，且分镜实际使用布景总数最多 {self.max_setting_definitions} 个。")
+        prompt_parts.append("【强制】scene_definitions 中每个布景必须输出 time_of_day、weather、scene_features；scenes 中每个分镜必须输出 time_of_day、weather。")
         prompt_parts.append("【强制】相邻分镜必须连贯承接，但不能重复上一分镜已经完成的动作、对白、画面状态或情绪结果。")
         prompt_parts.append(translate(output_language, 'script.output_language_rule', language=language_name(output_language)))
         prompt_parts.append("请直接输出JSON格式的剧本内容，不要包含其他说明文字。")
@@ -822,6 +968,33 @@ class ScriptAgent:
             return False
 
         scene_definitions = script_data.get('scene_definitions') or []
+        incomplete_scene_definitions = [
+            str(item.get('name') or f'#{index}')
+            for index, item in enumerate(scene_definitions, start=1)
+            if not self._normalize_single_line(item.get('time_of_day'))
+            or not self._normalize_single_line(item.get('weather'))
+            or not self._normalize_scene_feature_list(item.get('scene_features'))
+        ]
+        if incomplete_scene_definitions:
+            logger.warning(
+                "Script quality check failed: scene definitions missing structured fields: %s",
+                ", ".join(incomplete_scene_definitions[:10]),
+            )
+            return False
+
+        incomplete_scene_conditions = [
+            str(scene.get('scene_number') or index)
+            for index, scene in enumerate(scenes, start=1)
+            if not self._normalize_single_line(scene.get('time_of_day'))
+            or not self._normalize_single_line(scene.get('weather'))
+        ]
+        if incomplete_scene_conditions:
+            logger.warning(
+                "Script quality check failed: scenes missing time_of_day/weather: %s",
+                ", ".join(incomplete_scene_conditions[:10]),
+            )
+            return False
+
         definition_keys = {
             self._normalize_scene_name_key(item.get('name'))
             for item in scene_definitions
@@ -975,7 +1148,7 @@ class ScriptAgent:
                             if match:
                                 scene['duration'] = int(match.group())
                             else:
-                                scene['duration'] = 6  # 默认值
+                                scene['duration'] = self.scene_duration_min
                         elif not isinstance(duration_val, int):
                             scene['duration'] = int(duration_val)
 
@@ -1022,17 +1195,39 @@ class ScriptAgent:
 
                     # 补齐 Scene 必需字段（模型可能漏字段，或备用提取只得到部分字段）
                     # Pydantic Scene: character_description/voice_description/mood 为必填 str
-                    if 'character_description' not in scene or scene['character_description'] is None:
-                        scene['character_description'] = ''
-                    if 'voice_description' not in scene or scene['voice_description'] is None:
-                        scene['voice_description'] = ''
+                    # 模型有时把 character_description / voice_description 输出成按角色名分组的
+                    # dict/list，这里统一拍平成字符串，避免 Scene 校验因类型不符报错。
+                    scene['character_description'] = self._coerce_scene_text_field(
+                        scene.get('character_description')
+                    )
+                    scene['voice_description'] = self._coerce_scene_text_field(
+                        scene.get('voice_description')
+                    )
                     if 'mood' not in scene or scene['mood'] is None:
                         scene['mood'] = ''
+                    inferred_time_of_day = self._infer_time_of_day_from_text(
+                        scene.get('time_of_day'),
+                        scene.get('scene_name'),
+                        scene.get('description'),
+                        scene.get('dialogue'),
+                    )
+                    inferred_weather = self._infer_weather_from_text(
+                        scene.get('weather'),
+                        scene.get('scene_name'),
+                        scene.get('description'),
+                        scene.get('dialogue'),
+                    )
+                    scene['time_of_day'] = self._normalize_single_line(scene.get('time_of_day') or inferred_time_of_day)
+                    scene['weather'] = self._normalize_single_line(scene.get('weather') or inferred_weather)
                     # camera_angle / characters_present 虽然在模型里是 Optional，但这里也给默认值，避免下游逻辑空指针
                     if 'camera_angle' not in scene or scene['camera_angle'] is None:
                         scene['camera_angle'] = ''
                     if 'characters_present' not in scene or scene['characters_present'] is None:
                         scene['characters_present'] = []
+                    # character_outfits：规范化为 {角色名: 装扮描述} 的字典，去除空值
+                    scene['character_outfits'] = self._normalize_character_outfits(
+                        scene.get('character_outfits')
+                    )
                     if 'scene_name' not in scene or not str(scene.get('scene_name') or '').strip():
                         alias_value = next((scene.get(alias) for alias in scene_name_aliases if scene.get(alias)), None)
                         if alias_value:
@@ -1064,10 +1259,12 @@ class ScriptAgent:
                     'scene_name': '主场景',
                     'description': data.get('background', '故事场景'),
                     'dialogue': '',
-                    'duration': 6,
+                    'duration': self.scene_duration_min,
                     'character_description': '',
                     'voice_description': '',
                     'mood': '',
+                    'time_of_day': self._infer_time_of_day_from_text(data.get('background')),
+                    'weather': self._infer_weather_from_text(data.get('background')),
                     'camera_angle': '',
                     'characters_present': []
                 }]
@@ -1093,6 +1290,7 @@ class ScriptAgent:
                 data.get('background') or '',
             )
             data['scene_definitions'] = data['scene_definitions'][:self.max_setting_definitions]
+            self._backfill_scene_conditions_from_definitions(data['scenes'], data['scene_definitions'])
             self._normalize_scene_character_presence(data['scenes'])
             self._align_scene_names_to_definitions(data['scenes'], data['scene_definitions'])
             data['_duration_adjustments'] = duration_adjustments
@@ -1110,17 +1308,22 @@ class ScriptAgent:
                 'characters': [],
                 'scene_definitions': [{
                     'name': '主场景',
-                    'description': '故事背景'
+                    'description': '故事背景',
+                    'time_of_day': '',
+                    'weather': '',
+                    'scene_features': [],
                 }],
                 'scenes': [{
                     'scene_number': 1,
                     'scene_name': '主场景',
                     'description': '故事开始',
                     'dialogue': '',
-                    'duration': 6,
+                    'duration': self.scene_duration_min,
                     'character_description': '',
                     'voice_description': '',
                     'mood': '',
+                    'time_of_day': '',
+                    'weather': '',
                     'camera_angle': '',
                     'characters_present': []
                 }]
@@ -1649,10 +1852,12 @@ class ScriptAgent:
                     'scene_name': f'场景{scene_num}',
                     'description': description,
                     'dialogue': '',
-                    'duration': 6,
+                    'duration': self.scene_duration_min,
                     'character_description': '',
                     'voice_description': '',
                     'mood': '',
+                    'time_of_day': self._infer_time_of_day_from_text(description),
+                    'weather': self._infer_weather_from_text(description),
                     'camera_angle': '',
                     'characters_present': []
                 })
@@ -1669,10 +1874,12 @@ class ScriptAgent:
                     'scene_name': f'场景{num}',
                     'description': f'分镜 {num}',
                     'dialogue': '',
-                    'duration': 6,
+                    'duration': self.scene_duration_min,
                     'character_description': '',
                     'voice_description': '',
                     'mood': '',
+                    'time_of_day': '',
+                    'weather': '',
                     'camera_angle': '',
                     'characters_present': []
                 })
@@ -1768,6 +1975,22 @@ class ScriptAgent:
         normalized['character_description'] = str(normalized.get('character_description') or '').strip()
         normalized['voice_description'] = str(normalized.get('voice_description') or '').strip()
         normalized['mood'] = str(normalized.get('mood') or '').strip()
+        normalized['time_of_day'] = self._normalize_single_line(
+            normalized.get('time_of_day')
+            or self._infer_time_of_day_from_text(
+                normalized.get('scene_name'),
+                normalized.get('description'),
+                normalized.get('dialogue'),
+            )
+        )
+        normalized['weather'] = self._normalize_single_line(
+            normalized.get('weather')
+            or self._infer_weather_from_text(
+                normalized.get('scene_name'),
+                normalized.get('description'),
+                normalized.get('dialogue'),
+            )
+        )
         normalized['camera_angle'] = str(normalized.get('camera_angle') or '').strip()
         characters_present = normalized.get('characters_present')
         normalized['characters_present'] = characters_present if isinstance(characters_present, list) else []
@@ -1792,7 +2015,7 @@ class ScriptAgent:
             for field_name in field_names:
                 pattern = (
                     rf'["\']?{field_name}["\']?\s*:\s*["\']([\s\S]*?)["\']'
-                    rf'(?=\s*,\s*["\'](?:scene_number|scene_name|sceneName|description|dialogue|duration|character_description|voice_description|mood|camera_angle|characters_present)\b|\s*\}}|\s*\])'
+                    rf'(?=\s*,\s*["\'](?:scene_number|scene_name|sceneName|description|dialogue|duration|character_description|voice_description|mood|time_of_day|weather|camera_angle|characters_present)\b|\s*\}}|\s*\])'
                 )
                 match = re.search(pattern, text)
                 if match:
@@ -1814,9 +2037,17 @@ class ScriptAgent:
             'character_description': extract_string(['character_description']),
             'voice_description': extract_string(['voice_description']),
             'mood': extract_string(['mood']),
+            'time_of_day': extract_string(['time_of_day', 'timeOfDay']),
+            'weather': extract_string(['weather']),
             'camera_angle': extract_string(['camera_angle']),
             'characters_present': [],
         }
+        scene['time_of_day'] = self._normalize_single_line(
+            scene['time_of_day'] or self._infer_time_of_day_from_text(scene['scene_name'], scene['description'], scene['dialogue'])
+        )
+        scene['weather'] = self._normalize_single_line(
+            scene['weather'] or self._infer_weather_from_text(scene['scene_name'], scene['description'], scene['dialogue'])
+        )
 
         if not scene['description'] and not scene['dialogue']:
             return None
@@ -1893,9 +2124,8 @@ class ScriptAgent:
         raw_scene_definitions: Any,
         scenes: List[Dict[str, Any]],
         background: str,
-    ) -> List[Dict[str, str]]:
-        _ = scenes
-        definitions: List[Dict[str, str]] = []
+    ) -> List[Dict[str, Any]]:
+        definitions: List[Dict[str, Any]] = []
         seen = set()
 
         def split_scene_names(value: str) -> List[str]:
@@ -1904,8 +2134,23 @@ class ScriptAgent:
         for item in raw_scene_definitions or []:
             if not isinstance(item, dict):
                 continue
-            name = str(item.get('name') or item.get('scene_name') or '').strip()
-            description = str(item.get('description') or item.get('scene_description') or '').strip()
+            name = self._normalize_single_line(item.get('name') or item.get('scene_name'))
+            description = self._normalize_single_line(item.get('description') or item.get('scene_description'))
+            time_of_day = self._normalize_single_line(
+                item.get('time_of_day')
+                or item.get('default_time_of_day')
+                or self._infer_time_of_day_from_text(description, name)
+            )
+            weather = self._normalize_single_line(
+                item.get('weather')
+                or item.get('default_weather')
+                or self._infer_weather_from_text(description, name)
+            )
+            scene_features = self._normalize_scene_feature_list(
+                item.get('scene_features')
+                or item.get('features')
+                or item.get('visual_features')
+            )
             if not name:
                 name = self._fallback_scene_name_from_description(description or background, len(definitions) + 1)
             if not description:
@@ -1915,13 +2160,74 @@ class ScriptAgent:
                 if key in seen:
                     continue
                 seen.add(key)
-                definitions.append({'name': split_name, 'description': description})
+                definitions.append({
+                    'name': split_name,
+                    'description': description,
+                    'time_of_day': time_of_day,
+                    'weather': weather,
+                    'scene_features': list(scene_features),
+                })
 
-        if not definitions and background:
-            name = self._fallback_scene_name_from_description(background, 1)
-            definitions.append({'name': name, 'description': str(background).strip()})
+        if not definitions:
+            inferred_background_time = self._infer_time_of_day_from_text(background, *(scene.get('description') for scene in scenes or []))
+            inferred_background_weather = self._infer_weather_from_text(background, *(scene.get('description') for scene in scenes or []))
+            fallback_name = self._fallback_scene_name_from_description(background or '主场景', 1)
+            fallback_description = self._normalize_single_line(background) or fallback_name
+            definitions.append({
+                'name': fallback_name,
+                'description': fallback_description,
+                'time_of_day': inferred_background_time,
+                'weather': inferred_background_weather,
+                'scene_features': self._normalize_scene_feature_list(background),
+            })
 
         return definitions
+
+    def _backfill_scene_conditions_from_definitions(
+        self,
+        scenes: List[Dict[str, Any]],
+        scene_definitions: List[Dict[str, Any]],
+    ) -> None:
+        if not scenes:
+            return
+
+        definition_map = {
+            self._normalize_scene_name_key(item.get('name')): item
+            for item in scene_definitions or []
+            if self._normalize_scene_name_key(item.get('name'))
+        }
+        for scene in scenes:
+            matched_definition = definition_map.get(self._normalize_scene_name_key(scene.get('scene_name')))
+            if matched_definition:
+                if not self._normalize_single_line(scene.get('time_of_day')):
+                    scene['time_of_day'] = self._normalize_single_line(
+                        matched_definition.get('time_of_day')
+                        or self._infer_time_of_day_from_text(
+                            matched_definition.get('description'),
+                            matched_definition.get('name'),
+                        )
+                    )
+                if not self._normalize_single_line(scene.get('weather')):
+                    scene['weather'] = self._normalize_single_line(
+                        matched_definition.get('weather')
+                        or self._infer_weather_from_text(
+                            matched_definition.get('description'),
+                            matched_definition.get('name'),
+                        )
+                    )
+
+            if not self._normalize_single_line(scene.get('time_of_day')):
+                scene['time_of_day'] = self._infer_time_of_day_from_text(
+                    scene.get('scene_name'),
+                    scene.get('description'),
+                    scene.get('dialogue'),
+                )
+            if not self._normalize_single_line(scene.get('weather')):
+                scene['weather'] = self._infer_weather_from_text(
+                    scene.get('scene_name'),
+                    scene.get('description'),
+                    scene.get('dialogue'),
+                )
 
     def _align_scene_names_to_definitions(
         self,

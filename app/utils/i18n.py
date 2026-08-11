@@ -80,11 +80,11 @@ BACKEND_TRANSLATIONS = {
         "es": "Regenerando la biblioteca de referencias...",
     },
     "message.reference.confirm_prompt": {
-        "zh-CN": "参考图库已生成，请确认是否满意。满意后请输入'确认'或点击继续按钮以生成分镜图片。",
-        "zh-TW": "參考圖庫已生成，請確認是否滿意。滿意後請輸入「確認」或點擊繼續按鈕以生成分鏡圖片。",
-        "en": "The reference library has been generated. Please confirm whether it is satisfactory. If it is, enter 'confirm' or click Continue to generate storyboard images.",
-        "ja": "参照画像ライブラリが生成されました。内容をご確認ください。問題なければ「confirm」と入力するか、続行ボタンを押して絵コンテ画像を生成してください。",
-        "es": "La biblioteca de referencias ya se generó. Confirma si te parece correcta. Si estás conforme, escribe 'confirm' o pulsa Continuar para generar las imágenes del storyboard.",
+        "zh-CN": "参考图库已生成完成，请确认是否满意。满意后请输入'确认'或点击继续按钮开始生成分镜视频。",
+        "zh-TW": "參考圖庫已生成完成，請確認是否滿意。滿意後請輸入「確認」或點擊繼續按鈕開始生成分鏡影片。",
+        "en": "The reference library is fully ready. Please confirm it. If it looks good, enter 'confirm' or click Continue to start generating the scene videos.",
+        "ja": "参照画像ライブラリの生成が完了しました。内容をご確認ください。問題なければ「confirm」と入力するか、続行ボタンを押してシーン動画の生成を開始してください。",
+        "es": "La biblioteca de referencias ya está completa. Confírmala y, si está bien, escribe 'confirm' o pulsa Continuar para empezar a generar los videos por escena.",
     },
     "message.reference.regenerated_confirm_prompt": {
         "zh-CN": "参考图库已重新生成，请确认是否满意。",
@@ -129,11 +129,11 @@ BACKEND_TRANSLATIONS = {
         "es": "📖 La generación del guion terminó. ¿Continuar con la generación de imágenes?",
     },
     "step.reference.complete": {
-        "zh-CN": "🎨 参考图库已生成！请确认是否满意，满意后继续生成分镜图片。",
-        "zh-TW": "🎨 參考圖庫已生成！請確認是否滿意，滿意後繼續生成分鏡圖片。",
-        "en": "🎨 The reference library is ready. Please confirm it before continuing with storyboard image generation.",
-        "ja": "🎨 参照画像ライブラリが生成されました。問題なければ確認後に絵コンテ画像生成へ進んでください。",
-        "es": "🎨 La biblioteca de referencias está lista. Confírmala antes de continuar con la generación de imágenes del storyboard.",
+        "zh-CN": "🎨 参考图库已生成完成！请确认是否满意，满意后继续生成分镜视频。",
+        "zh-TW": "🎨 參考圖庫已生成完成！請確認是否滿意，滿意後繼續生成分鏡影片。",
+        "en": "🎨 The reference library is complete. Confirm it before continuing to scene video generation.",
+        "ja": "🎨 参照画像ライブラリの生成が完了しました。確認後にシーン動画生成へ進んでください。",
+        "es": "🎨 La biblioteca de referencias está completa. Confírmala antes de continuar con la generación de videos por escena.",
     },
     "step.videos.complete": {
         "zh-CN": "🎬 视频生成完成！是否合成最终视频？",

@@ -112,6 +112,16 @@ class LLMService:
         mapped_size = ratio_map.get(normalized_size, {}).get(ratio)
         return mapped_size or size
 
+    def _normalize_video_duration(self, duration: int) -> int:
+        """按项目配置约束视频时长，同时保持在模型支持范围内。"""
+        configured_min = int(config.get('video_generation.scene_duration.min', 10))
+        configured_max = int(config.get('video_generation.scene_duration.max', 30))
+        effective_min = max(6, configured_min)
+        effective_max = min(30, configured_max)
+        if effective_min > effective_max:
+            effective_min, effective_max = 6, 30
+        return max(effective_min, min(effective_max, int(duration)))
+
     def chat_completion(
         self,
         model: str,
@@ -279,12 +289,8 @@ class LLMService:
 
         url = f"{self.base_url}/contents/generations/tasks"
 
-        # seedance-2.5 支持 6-30 秒视频
-        # 确保时长在有效范围内
-        if duration < 6:
-            duration = 6
-        elif duration > 30:
-            duration = 30
+        # 模型支持 6-30 秒，这里进一步收口到项目配置的分镜时长范围。
+        duration = self._normalize_video_duration(duration)
 
         ratio = aspect_ratio or "9:16"
         logger.info(f"Video generation: duration={duration}s, resolution={resolution}, ratio={ratio}")
@@ -405,11 +411,8 @@ class LLMService:
         """
         url = f"{self.base_url}/contents/generations/tasks"
 
-        # seedance-2.5 支持 6-30 秒视频
-        if duration < 6:
-            duration = 6
-        elif duration > 30:
-            duration = 30
+        # 模型支持 6-30 秒，这里进一步收口到项目配置的分镜时长范围。
+        duration = self._normalize_video_duration(duration)
 
         normalized_resolution = str(resolution).strip().lower() if resolution else ""
         logger.info(

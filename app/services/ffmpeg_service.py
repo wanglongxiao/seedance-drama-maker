@@ -7,9 +7,9 @@ import json
 import shutil
 import subprocess
 import tempfile
-import urllib.request
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional
 from pathlib import Path
+from urllib.parse import urlparse
 from app.config import config
 from app.utils.logger import get_logger
 
@@ -110,10 +110,15 @@ class FFmpegService:
         if temporary_edge_trim_enabled and len(local_paths) >= 2:
             processed_paths = self._prepare_trimmed_segments(local_paths, work_path)
 
+        # 归一化每个片段的音视频参数（编码/采样率/声道/像素格式/帧率），
+        # 避免不同片段的 AAC 采样率或 profile 不一致导致 concat -c copy 后
+        # 播放到后段时解码器报错（Web 播放中断、后半段无声音）。
+        normalized_paths = self._normalize_segments_for_concat(processed_paths, work_path)
+
         # 创建concat文件列表
         concat_file = work_path / "concat_list.txt"
         with open(concat_file, 'w') as f:
-            for path in processed_paths:
+            for path in normalized_paths:
                 f.write(f"file '{path}'\n")
         
         # 输出文件路径
@@ -148,10 +153,144 @@ class FFmpegService:
             logger.error(f"FFmpeg error: {e.stderr}")
             raise Exception(f"视频合成失败: {e.stderr}")
 
+    def _normalize_segments_for_concat(self, local_paths: List[str], work_path: Path) -> List[str]:
+        """
+        将各片段统一转码为一致的音视频参数，保证 concat -c copy 后的成片
+        在整段范围内可连续解码播放。
+
+        关键点：不同分镜片段的 AAC 采样率 / profile 可能不一致，直接 concat 复制流
+        会让容器只声明首段参数，播放到后段时解码器报 "Sample rate index ... does not
+        match" / "Prediction is not allowed in AAC-LC"，表现为 Web 播放中断、
+        后半段无声。统一重编码为 H.264(yuv420p) + AAC 48kHz 立体声可根治此问题。
+        """
+        target_fps = str(config.get('merge.normalize_fps', 24) or 24)
+        target_sample_rate = str(config.get('merge.normalize_audio_sample_rate', 48000) or 48000)
+        normalized_paths: List[str] = []
+
+        for index, input_path in enumerate(local_paths):
+            output_path = work_path / f"scene_normalized_{index:03d}.mp4"
+            cmd = [
+                self._require_binary("ffmpeg"),
+                "-y",
+                "-i", input_path,
+                "-map", "0:v:0",
+                "-map", "0:a:0?",
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-r", target_fps,
+                "-video_track_timescale", "12288",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-ar", target_sample_rate,
+                "-ac", "2",
+                "-vsync", "cfr",
+                str(output_path),
+            ]
+
+            try:
+                logger.info(
+                    f"Normalizing segment {Path(input_path).name} for concat "
+                    f"(fps={target_fps}, audio={target_sample_rate}Hz/stereo)"
+                )
+                subprocess.run(cmd, capture_output=True, text=True, check=True)
+                normalized_paths.append(str(output_path))
+            except subprocess.CalledProcessError as e:
+                logger.error(f"FFmpeg normalize error: {e.stderr}")
+                raise Exception(f"视频片段归一化失败: {e.stderr}")
+
+        return normalized_paths
+
+    def convert_to_mp4(
+        self,
+        source: str,
+        output_filename: str,
+        work_dir: str = None,
+    ) -> str:
+        """
+        将本地或远程视频（如 seedance 输出的 mov）转封装为 mp4。
+
+        优先尝试无损转封装（stream copy，H.264/AAC 直接换 mp4 容器）；
+        若源编码不兼容 mp4 容器则回退到重编码。
+
+        Args:
+            source: 本地文件路径（可含 file:// 前缀）或远程 URL
+            output_filename: 目标 mp4 文件名（应以 .mp4 结尾）
+            work_dir: 工作目录
+
+        Returns:
+            转换后的 mp4 本地路径
+        """
+        work_path = self._ensure_work_dir(work_dir)
+
+        # 准备本地输入文件
+        local_source = str(source or "").strip()
+        parsed = urlparse(local_source)
+        if parsed.scheme in {"http", "https"}:
+            download_path = work_path / f"convert_source.{self._video_suffix()}"
+            self._download_file(local_source, str(download_path))
+            local_source = str(download_path)
+        elif local_source.startswith("file://"):
+            local_source = local_source[7:]
+
+        if not Path(local_source).exists():
+            raise FileNotFoundError(f"待转换视频不存在: {local_source}")
+
+        output_path = work_path / output_filename
+
+        # 若输入输出为同一路径，避免 ffmpeg 就地覆盖出错
+        if Path(local_source).resolve() == output_path.resolve():
+            renamed_source = work_path / f"convert_source_orig.{self._video_suffix()}"
+            shutil.copy2(local_source, renamed_source)
+            local_source = str(renamed_source)
+
+        # 方法1：无损转封装（H.264/AAC -> mp4 容器）
+        copy_cmd = [
+            self._require_binary("ffmpeg"),
+            "-y",
+            "-i", local_source,
+            "-c", "copy",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+
+        try:
+            logger.info(f"Converting to mp4 (stream copy): {output_path}")
+            subprocess.run(copy_cmd, capture_output=True, text=True, check=True)
+            logger.info(f"MP4 stream-copy conversion successful: {output_path}")
+            return str(output_path)
+        except subprocess.CalledProcessError as e:
+            logger.warning(
+                f"MP4 stream-copy failed, falling back to re-encode: {e.stderr}"
+            )
+
+        # 方法2：重编码为 H.264/AAC 的 mp4
+        encode_cmd = [
+            self._require_binary("ffmpeg"),
+            "-y",
+            "-i", local_source,
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "18",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+
+        try:
+            logger.info(f"Converting to mp4 (re-encode): {output_path}")
+            subprocess.run(encode_cmd, capture_output=True, text=True, check=True)
+            logger.info(f"MP4 re-encode conversion successful: {output_path}")
+            return str(output_path)
+        except subprocess.CalledProcessError as e:
+            logger.error(f"FFmpeg mp4 conversion error: {e.stderr}")
+            raise Exception(f"视频转 MP4 失败: {e.stderr}")
+
     def _prepare_trimmed_segments(self, local_paths: List[str], work_path: Path) -> List[str]:
         """按配置对各拼接点两侧片段执行临时裁帧。"""
         trim_previous_end_frames = max(0, int(config.get('merge.trim_previous_end_frames', 6)))
-        trim_next_start_frames = max(0, int(config.get('merge.trim_next_start_frames', 1)))
+        trim_next_start_frames = max(0, int(config.get('merge.trim_next_start_frames', 2)))
 
         if trim_previous_end_frames == 0 and trim_next_start_frames == 0:
             return local_paths
@@ -408,518 +547,6 @@ class FFmpegService:
         
         logger.debug(f"Downloaded to: {local_path}")
 
-    def extract_last_frame_from_video_url(
-        self,
-        video_url: str,
-        output_filename: str,
-        work_dir: str = None,
-        blackout_faces: bool = False,
-    ) -> str:
-        """
-        下载远程视频并截取最后一帧图片。
-
-        Args:
-            video_url: 远程视频 URL
-            output_filename: 输出图片文件名
-            work_dir: 工作目录
-
-        Returns:
-            截取出的最后一帧图片本地路径
-        """
-        work_path = self._ensure_work_dir(work_dir)
-        local_video_path = work_path / f"{Path(output_filename).stem}.{self._video_suffix()}"
-        output_path = work_path / output_filename
-
-        self._download_file(video_url, str(local_video_path))
-        info = self._get_video_stream_info(str(local_video_path))
-        fps = max(info.get("fps", 0.0), 1.0)
-        duration = max(info.get("duration", 0.0), 0.0)
-        candidate_offsets = [
-            max(1.0 / fps, 0.001),
-            0.05,
-            0.2,
-            0.5,
-            1.0,
-            min(2.0, duration if duration > 0 else 2.0),
-        ]
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        last_error = ""
-        attempt_modes = ["preseek", "sseof"]
-        for mode in attempt_modes:
-            for offset in candidate_offsets:
-                if output_path.exists():
-                    output_path.unlink()
-
-                timestamp = max(duration - offset, 0.0)
-                if mode == "preseek":
-                    cmd = [
-                        self._require_binary("ffmpeg"),
-                        "-y",
-                        "-ss", f"{timestamp:.3f}",
-                        "-i", str(local_video_path),
-                        "-frames:v", "1",
-                        str(output_path),
-                    ]
-                    log_message = f"Extracting last frame from previous video at {timestamp:.3f}s"
-                else:
-                    cmd = [
-                        self._require_binary("ffmpeg"),
-                        "-y",
-                        "-sseof", f"-{max(offset, 0.001):.3f}",
-                        "-i", str(local_video_path),
-                        "-frames:v", "1",
-                        str(output_path),
-                    ]
-                    log_message = f"Extracting last frame from previous video using sseof -{max(offset, 0.001):.3f}s"
-
-                try:
-                    logger.info(f"{log_message} -> {output_path.name}")
-                    subprocess.run(cmd, capture_output=True, text=True, check=True)
-                    if output_path.exists() and output_path.stat().st_size > 0:
-                        if blackout_faces:
-                            self.blackout_faces_in_image(str(output_path))
-                        return str(output_path)
-                    last_error = f"ffmpeg completed but output file not created at {output_path}"
-                    logger.warning(last_error)
-                except subprocess.CalledProcessError as e:
-                    last_error = e.stderr
-                    logger.warning(
-                        f"FFmpeg extract last frame attempt failed ({mode}) at offset {offset:.3f}s: {e.stderr}"
-                    )
-
-        raise Exception(f"截取上一分镜最后一帧失败: {last_error}")
-
-    def blackout_faces_in_image(self, image_path: str) -> str:
-        """
-        使用 MediaPipe 检测图片中的正脸和侧脸，并用纯黑矩形完全遮挡。
-        """
-        try:
-            import numpy as np
-            from PIL import Image, ImageDraw
-        except ImportError as exc:
-            raise RuntimeError(
-                "Face blackout dependencies are missing. Please install Pillow and numpy."
-            ) from exc
-
-        original_image = Image.open(image_path).convert("RGB")
-        width, height = original_image.size
-        image_np = np.array(original_image)
-        detected_boxes = self._detect_faces_with_mediapipe(image_np, width, height)
-        if not detected_boxes:
-            logger.warning("MediaPipe face detection unavailable or found no faces; falling back to OpenCV face detection")
-            detected_boxes = self._detect_faces_with_opencv(image_np, width, height)
-
-        merged_boxes = self._merge_face_boxes(detected_boxes, width, height)
-        if not merged_boxes:
-            logger.warning(f"No faces detected for blackout in image: {image_path}")
-            return image_path
-
-        draw = ImageDraw.Draw(original_image)
-        for box in merged_boxes:
-            draw.rectangle(box, fill=(0, 0, 0))
-
-        original_image.save(image_path)
-        logger.info(f"Applied black face blackout to {len(merged_boxes)} face region(s): {Path(image_path).name}")
-        return image_path
-
-    def _detect_faces_with_mediapipe(
-        self,
-        image_np,
-        image_width: int,
-        image_height: int,
-    ) -> List[Tuple[int, int, int, int]]:
-        try:
-            import mediapipe as mp
-            from mediapipe.tasks.python.core.base_options import BaseOptions
-            from mediapipe.tasks.python.vision import FaceDetector, FaceDetectorOptions
-        except Exception as exc:
-            logger.warning(f"MediaPipe import unavailable for face blackout: {exc}")
-            return []
-
-        detected_boxes: List[Tuple[int, int, int, int]] = []
-        try:
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_np)
-            for model_name, model_file in self._ensure_mediapipe_face_detector_models():
-                options = FaceDetectorOptions(
-                    base_options=BaseOptions(model_asset_path=str(model_file)),
-                    min_detection_confidence=0.25,
-                )
-                with FaceDetector.create_from_options(options) as detector:
-                    result = detector.detect(mp_image)
-
-                for detection in getattr(result, "detections", []) or []:
-                    bbox = getattr(detection, "bounding_box", None)
-                    if not bbox:
-                        continue
-                    box = self._rect_to_padded_box(
-                        origin_x=int(getattr(bbox, "origin_x", 0)),
-                        origin_y=int(getattr(bbox, "origin_y", 0)),
-                        width=int(getattr(bbox, "width", 0)),
-                        height=int(getattr(bbox, "height", 0)),
-                        image_width=image_width,
-                        image_height=image_height,
-                    )
-                    if box:
-                        detected_boxes.append(box)
-
-                if detected_boxes:
-                    break
-        except Exception as exc:
-            logger.warning(f"MediaPipe face detection failed: {exc}")
-            return []
-        return detected_boxes
-
-    def _ensure_mediapipe_face_detector_models(self) -> List[Tuple[str, Path]]:
-        configured_dir = config.get("video_generation.face_detection.model_cache_dir", "/tmp/aw-videobot-sd2/mediapipe-models")
-        model_dir = Path(str(configured_dir)).expanduser()
-        if not model_dir.is_absolute():
-            model_dir = Path(__file__).resolve().parents[2] / model_dir
-        model_dir.mkdir(parents=True, exist_ok=True)
-
-        model_specs = [
-            (
-                "short-range",
-                model_dir / "blaze_face_short_range.tflite",
-                "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
-            ),
-            (
-                "full-range",
-                model_dir / "blaze_face_full_range.tflite",
-                "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_full_range/float16/1/blaze_face_full_range.tflite",
-            ),
-        ]
-
-        available_models: List[Tuple[str, Path]] = []
-        for model_name, model_path, model_url in model_specs:
-            if not model_path.exists() or model_path.stat().st_size == 0:
-                logger.info(f"Downloading MediaPipe face detector model {model_name}: {model_url}")
-                urllib.request.urlretrieve(model_url, str(model_path))
-            available_models.append((model_name, model_path))
-
-        return available_models
-
-    def _detect_faces_with_opencv(
-        self,
-        image_np,
-        image_width: int,
-        image_height: int,
-    ) -> List[Tuple[int, int, int, int]]:
-        try:
-            import cv2
-        except Exception as exc:
-            logger.warning(f"OpenCV import unavailable for fallback face blackout: {exc}")
-            return []
-
-        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-        cascade_specs = [
-            ("frontal_default", Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"),
-            ("frontal_alt", Path(cv2.data.haarcascades) / "haarcascade_frontalface_alt.xml"),
-            ("frontal_alt2", Path(cv2.data.haarcascades) / "haarcascade_frontalface_alt2.xml"),
-            ("profile", Path(cv2.data.haarcascades) / "haarcascade_profileface.xml"),
-        ]
-        available_cascades = [(name, path) for name, path in cascade_specs if path.exists()]
-        if not available_cascades:
-            logger.warning("OpenCV face cascade files are missing")
-            return []
-
-        raw_candidates: List[Dict[str, Union[int, str]]] = []
-        mirrored_gray = cv2.flip(gray, 1)
-        parameter_sets = [
-            {"scaleFactor": 1.03, "minNeighbors": 3, "minSize": (16, 16)},
-            {"scaleFactor": 1.06, "minNeighbors": 4, "minSize": (20, 20)},
-        ]
-        for cascade_name, cascade_path in available_cascades:
-            detector = cv2.CascadeClassifier(str(cascade_path))
-            for params in parameter_sets:
-                for working_gray, mirrored in ((gray, False), (mirrored_gray, True)):
-                    faces = detector.detectMultiScale(working_gray, **params)
-                    for x, y, w, h in faces:
-                        if mirrored:
-                            x = image_width - (x + w)
-                        raw_candidates.append({
-                            "cascade": cascade_name,
-                            "x": int(x),
-                            "y": int(y),
-                            "w": int(w),
-                            "h": int(h),
-                        })
-            if raw_candidates:
-                logger.info(
-                    f"OpenCV face blackout detector matched {len(raw_candidates)} raw candidate box(es) after cascade {cascade_name}"
-                )
-        body_hints = self._detect_body_head_hints_with_opencv(image_np, image_width, image_height)
-        return self._filter_opencv_face_candidates(raw_candidates, body_hints, image_np, image_width, image_height)
-
-    def _detect_body_head_hints_with_opencv(
-        self,
-        image_np,
-        image_width: int,
-        image_height: int,
-    ) -> List[Tuple[int, int, int, int]]:
-        try:
-            import cv2
-        except Exception:
-            return []
-
-        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-        cascade_specs = [
-            ("upperbody", Path(cv2.data.haarcascades) / "haarcascade_upperbody.xml"),
-            ("fullbody", Path(cv2.data.haarcascades) / "haarcascade_fullbody.xml"),
-        ]
-        hints: List[Tuple[int, int, int, int]] = []
-        for cascade_name, cascade_path in cascade_specs:
-            if not cascade_path.exists():
-                continue
-            detector = cv2.CascadeClassifier(str(cascade_path))
-            rects = detector.detectMultiScale(
-                gray,
-                scaleFactor=1.03,
-                minNeighbors=3,
-                minSize=(30, 30),
-            )
-            for x, y, w, h in rects:
-                if cascade_name == "upperbody":
-                    head_x = x + int(w * 0.28)
-                    head_y = max(0, y - int(h * 0.20))
-                    head_w = max(24, int(w * 0.42))
-                    head_h = max(24, int(h * 0.40))
-                else:
-                    head_x = x + int(w * 0.18)
-                    head_y = max(0, y - int(h * 0.08))
-                    head_w = max(24, int(w * 0.64))
-                    head_h = max(24, int(h * 0.34))
-
-                box = self._rect_to_padded_box(
-                    origin_x=head_x,
-                    origin_y=head_y,
-                    width=head_w,
-                    height=head_h,
-                    image_width=image_width,
-                    image_height=image_height,
-                )
-                if box:
-                    hints.append(box)
-        return hints
-
-    def _filter_opencv_face_candidates(
-        self,
-        candidates: List[Dict[str, Union[int, str]]],
-        body_hints: List[Tuple[int, int, int, int]],
-        image_np,
-        image_width: int,
-        image_height: int,
-    ) -> List[Tuple[int, int, int, int]]:
-        if not candidates:
-            return []
-
-        clusters: List[List[Dict[str, Union[int, str]]]] = []
-        for candidate in candidates:
-            assigned = False
-            cx = int(candidate["x"]) + int(candidate["w"]) / 2.0
-            cy = int(candidate["y"]) + int(candidate["h"]) / 2.0
-            for cluster in clusters:
-                anchor = cluster[0]
-                ax = int(anchor["x"]) + int(anchor["w"]) / 2.0
-                ay = int(anchor["y"]) + int(anchor["h"]) / 2.0
-                distance_x = abs(cx - ax)
-                distance_y = abs(cy - ay)
-                threshold_x = max(int(candidate["w"]), int(anchor["w"])) * 1.2
-                threshold_y = max(int(candidate["h"]), int(anchor["h"])) * 1.2
-                if distance_x <= threshold_x and distance_y <= threshold_y:
-                    cluster.append(candidate)
-                    assigned = True
-                    break
-            if not assigned:
-                clusters.append([candidate])
-
-        filtered_boxes: List[Tuple[int, int, int, int]] = []
-        for cluster in clusters:
-            widths = [int(item["w"]) for item in cluster]
-            heights = [int(item["h"]) for item in cluster]
-            avg_size = (sum(widths) / len(widths) + sum(heights) / len(heights)) / 2.0
-            unique_cascades = {str(item["cascade"]) for item in cluster}
-            has_default_support = "frontal_default" in unique_cascades
-            x1 = min(int(item["x"]) for item in cluster)
-            y1 = min(int(item["y"]) for item in cluster)
-            x2 = max(int(item["x"]) + int(item["w"]) for item in cluster)
-            y2 = max(int(item["y"]) + int(item["h"]) for item in cluster)
-            raw_box = (x1, y1, x2, y2)
-            overlaps_body_hint = any(self._boxes_overlap(raw_box, hint) for hint in body_hints)
-
-            keep_cluster = (
-                has_default_support
-                and (
-                    (len(cluster) >= 2 and avg_size >= 36)
-                    or (len(unique_cascades) >= 2 and avg_size >= 28)
-                )
-            )
-            if not keep_cluster and overlaps_body_hint and avg_size >= 28:
-                keep_cluster = True
-            if not keep_cluster and unique_cascades == {"profile"} and avg_size >= 120 and y1 < int(image_height * 0.85):
-                keep_cluster = True
-            if not keep_cluster:
-                continue
-
-            skin_ratio = self._estimate_skin_ratio(image_np, x1, y1, x2, y2)
-            if skin_ratio < 0.02 and not overlaps_body_hint:
-                continue
-
-            box = self._rect_to_padded_box(
-                origin_x=x1,
-                origin_y=y1,
-                width=x2 - x1,
-                height=y2 - y1,
-                image_width=image_width,
-                image_height=image_height,
-            )
-            if box:
-                filtered_boxes.append(box)
-
-        logger.info(
-            f"OpenCV face blackout detector kept {len(filtered_boxes)} filtered face box(es) from {len(candidates)} raw candidate(s)"
-        )
-        return filtered_boxes
-
-    def _estimate_skin_ratio(
-        self,
-        image_np,
-        x1: int,
-        y1: int,
-        x2: int,
-        y2: int,
-    ) -> float:
-        try:
-            import cv2
-            import numpy as np
-        except Exception:
-            return 0.0
-
-        region = image_np[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
-        if region.size == 0:
-            return 0.0
-
-        ycrcb = cv2.cvtColor(region, cv2.COLOR_RGB2YCrCb)
-        lower = np.array([0, 133, 77], dtype=np.uint8)
-        upper = np.array([255, 173, 127], dtype=np.uint8)
-        mask = cv2.inRange(ycrcb, lower, upper)
-        return float(mask.mean() / 255.0)
-
-    def _rect_to_padded_box(
-        self,
-        origin_x: int,
-        origin_y: int,
-        width: int,
-        height: int,
-        image_width: int,
-        image_height: int,
-    ) -> Optional[Tuple[int, int, int, int]]:
-        if width <= 0 or height <= 0:
-            return None
-
-        x1 = origin_x
-        y1 = origin_y
-        x2 = origin_x + width
-        y2 = origin_y + height
-
-        pad_x = max(8, int(width * 0.22))
-        pad_y = max(8, int(height * 0.30))
-        x1 = max(0, x1 - pad_x)
-        y1 = max(0, y1 - pad_y)
-        x2 = min(image_width, x2 + pad_x)
-        y2 = min(image_height, y2 + pad_y)
-        if x2 <= x1 or y2 <= y1:
-            return None
-        return (x1, y1, x2, y2)
-
-    def _relative_face_box_to_pixels(
-        self,
-        xmin: float,
-        ymin: float,
-        box_width: float,
-        box_height: float,
-        image_width: int,
-        image_height: int,
-        mirrored: bool = False,
-    ) -> Optional[Tuple[int, int, int, int]]:
-        left = max(0.0, float(xmin))
-        top = max(0.0, float(ymin))
-        width = max(0.0, float(box_width))
-        height = max(0.0, float(box_height))
-
-        if width <= 0 or height <= 0:
-            return None
-
-        x1 = int(left * image_width)
-        y1 = int(top * image_height)
-        x2 = int((left + width) * image_width)
-        y2 = int((top + height) * image_height)
-
-        if mirrored:
-            mirrored_x1 = image_width - x2
-            mirrored_x2 = image_width - x1
-            x1, x2 = mirrored_x1, mirrored_x2
-
-        pad_x = max(8, int((x2 - x1) * 0.22))
-        pad_y = max(8, int((y2 - y1) * 0.30))
-
-        x1 = max(0, x1 - pad_x)
-        y1 = max(0, y1 - pad_y)
-        x2 = min(image_width, x2 + pad_x)
-        y2 = min(image_height, y2 + pad_y)
-
-        if x2 <= x1 or y2 <= y1:
-            return None
-        return (x1, y1, x2, y2)
-
-    def _merge_face_boxes(
-        self,
-        boxes: List[Tuple[int, int, int, int]],
-        image_width: int,
-        image_height: int,
-    ) -> List[Tuple[int, int, int, int]]:
-        if not boxes:
-            return []
-
-        merged: List[Tuple[int, int, int, int]] = []
-        for box in boxes:
-            current = box
-            updated: List[Tuple[int, int, int, int]] = []
-            for existing in merged:
-                if self._boxes_overlap(current, existing):
-                    current = (
-                        min(current[0], existing[0]),
-                        min(current[1], existing[1]),
-                        max(current[2], existing[2]),
-                        max(current[3], existing[3]),
-                    )
-                else:
-                    updated.append(existing)
-            updated.append(current)
-            merged = updated
-
-        normalized: List[Tuple[int, int, int, int]] = []
-        for x1, y1, x2, y2 in merged:
-            normalized.append((
-                max(0, min(image_width, x1)),
-                max(0, min(image_height, y1)),
-                max(0, min(image_width, x2)),
-                max(0, min(image_height, y2)),
-            ))
-        return normalized
-
-    def _boxes_overlap(
-        self,
-        first: Tuple[int, int, int, int],
-        second: Tuple[int, int, int, int],
-    ) -> bool:
-        return not (
-            first[2] < second[0]
-            or second[2] < first[0]
-            or first[3] < second[1]
-            or second[3] < first[1]
-        )
-    
     def add_audio_to_video(
         self,
         video_path: str,

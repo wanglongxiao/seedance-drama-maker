@@ -8,8 +8,6 @@ requests==2.31.0
 python-multipart==0.0.6
 aiofiles==23.2.0
 byteplus-sdk==1.0.53
-numpy>=1.24.0
 Pillow>=10.0.0
-mediapipe>=0.10.14
 # BytePlus TOS SDK
 tos>=2.0.0

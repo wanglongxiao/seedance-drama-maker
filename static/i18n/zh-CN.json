@@ -3,9 +3,12 @@
     "pageTitle": "AI 视频生成助手"
   },
   "app": {
-    "title": "AI 视频生成助手",
-    "subtitle": "告诉我你想创作的视频内容",
+    "title": "AI 视频助手",
+    "subtitle": "告诉我你想创作的内容",
     "language": "语言",
+    "videoModeLabel": "视频生成模式",
+    "videoModeParallel": "并行",
+    "videoModeExtend": "延长",
     "welcome": "你好！我是你的AI视频生成助手。请告诉我你想创作什么样的视频？",
     "youCan": "你可以：",
     "welcomeText": "直接输入文字描述",
@@ -63,7 +66,9 @@
     "videoReview": "视频审核",
     "processing": "生成中",
     "review": "审核",
-    "video": "视频"
+    "video": "视频",
+    "storyboardImage": "故事版",
+    "storyboardImageTitle": "🧩 分镜故事版"
   },
   "status": {
     "processing": "正在处理...",
@@ -83,6 +88,7 @@
   "loading": {
     "script": "正在生成剧本...",
     "referenceImage": "正在生成参考图库",
+    "storyboardImage": "正在生成分镜故事版...",
     "videos": "正在生成分镜视频...",
     "merge": "正在合成最终视频..."
   },
@@ -165,6 +171,15 @@
     "referenceNameSceneDefault": "场景{index}",
     "referenceLibraryCharacters": "人物/角色参考图库",
     "referenceLibraryScenes": "布景参考图库",
+    "storyboardImage": "分镜故事版",
+    "storyboardLibrary": "🎞️ 各分镜故事版",
+    "generatedStoryboardImages": "🧩 分镜故事版",
+    "storyboardImageRegeneratingText": "正在重新生成分镜故事版...",
+    "variantAssetsLibrary": "🎭 各分镜-角色装扮-场景状态",
+    "variantOutfits": "角色装扮图",
+    "variantSceneStates": "场景状态图",
+    "variantTypeCharacterOutfit": "角色装扮",
+    "variantTypeSceneState": "场景状态",
     "sceneSettings": "🏞️ 布景设定 ({count}个)",
     "sceneUsage": "🏷️ 使用布景:",
     "referenceLibraryUnified": "🎨 统一参考图库"
@@ -203,6 +218,7 @@
     "exitAutoRunStatus": "已退出自动模式，请在聊天区输入指令继续",
     "scriptComplete": "📖 剧本生成已完成！\n\n请在聊天区输入：\n• \"继续\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"开始\" - 进行下一步：🎨 参考图生成\n• \"重新生成\" / \"重做\" / \"regen\" - 重新制作📖 剧本生成",
     "referenceComplete": "🎨 参考图库生成已完成！\n\n请在聊天区输入：\n• \"继续\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"开始\" - 进行下一步：🎬 视频生成（新流程：逐个生成+审核）\n• \"重新生成\" / \"重做\" / \"regen\" - 重新制作🎨 参考图库",
+    "storyboardComplete": "🧩 分镜故事版生成已完成！\n\n请在聊天区输入：\n• \"继续\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"开始\" - 进行下一步：🎬 视频生成（新流程：逐个生成+审核）\n• \"重新生成\" / \"重做\" / \"regen\" - 重新制作🧩 分镜故事版",
     "videosComplete": "🎬 视频生成已完成！\n\n请在聊天区输入：\n• \"继续\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"开始\" - 进行下一步：🎥 视频合成\n• \"重新生成\" / \"重做\" / \"regen\" - 重新制作🎬 视频生成",
     "itemRegeneratedSuccess": "✅ {label}已重新生成！",
     "createProjectFailedRetry": "❌ 项目创建失败，请重试",
@@ -218,6 +234,7 @@
     "genericStepCompleteStatus": "{step}已完成！请在聊天区输入\"继续\"或\"下一步\"进行{nextStep}，或输入\"重新生成\"、\"重做\"或\"regen\"重新制作",
     "genericStepComplete": "{step}已完成！\n\n请在聊天区输入：\n• \"继续\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"开始\" - 进行下一步：{nextStep}\n• \"重新生成\" / \"重做\" / \"regen\" - 重新制作{step}",
     "referenceAssetRegeneratedSuccess": "✅ 参考图“{name}”已重新生成！",
+    "storyboardRegeneratedSuccess": "✅ 分镜 {scene} 的故事版已重新生成！",
     "httpErrorStatus": "HTTP 请求失败，状态码：{status}",
     "referenceNameRequired": "请先为每张上传的人物/角色图片和布景图片填写名称。",
     "projectEndConfirm": "结束项目后，将删除本项目在 TOS 中的临时文件、虚拟素材库素材与素材资产组。确认结束吗？",

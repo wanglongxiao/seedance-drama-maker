@@ -80,6 +80,15 @@ models:
     temperature: 0.3
     max_tokens: 30000
 
+  # 故事版审核模型：用于分镜故事版（6宫格白描）图像理解审核
+  # 对应代码：app/agents/storyboard_review_agent.py
+  # 未单独配置 STORYBOARD_REVIEW_ENDPOINT 时，自动回落复用 video_review 的多模态端点
+  storyboard_review:
+    endpoint: "${STORYBOARD_REVIEW_ENDPOINT:-}"
+    api_key: "${STORYBOARD_REVIEW_API_KEY:-}"
+    temperature: 0.3
+    max_tokens: 2000
+
   # ASR 资源配置：用于音频转文字
   # 对应代码：app/services/asr_service.py
   asr:
@@ -102,13 +111,13 @@ tos:
 
 # 视频生成配置
 video_generation:
-  # 视频总时长（秒）- 默认值 60，最大值 600
+  # 视频总时长（秒）- 默认值 60，最大值 1200
   total_duration: 60
-  total_duration_min: 20
-  total_duration_max: 600
-  # 每个分镜时长范围（秒）- 最短 6，最长 30（适配 seedance-2.5）
+  total_duration_min: 30
+  total_duration_max: 1200
+  # 每个分镜时长范围（秒）- 最短 10，最长 30（适配 seedance-2.5）
   scene_duration:
-    min: 6
+    min: 10
     max: 30
   # 视频输出格式（seedance-2.5 支持 mov / mp4），统一使用 mov
   output_format: "mov"
@@ -121,16 +130,18 @@ video_generation:
     - "720p"
   # 参考图片配置
   reference_images:
-    max_count: 60  # 最多支持60张参考图片（人物/角色最多20张 + 布景最多40张）
-    character_max_count: 20  # 人物/角色参考图最多20张
-    scene_max_count: 40      # 布景参考图最多40张
-    upload_max_count: 30  # 前端用户一次最多上传30张参考图
-    upload_character_max_count: 10  # 前端用户一次最多上传10张人物/角色参考图
+    max_count: 60  # 最多支持60张参考图片（人物/角色最多30张 + 布景最多30张）
+    character_max_count: 30  # 人物/角色参考图最多30张
+    scene_max_count: 30      # 布景参考图最多30张
+    upload_max_count: 40  # 前端用户一次最多上传40张参考图
+    upload_character_max_count: 20  # 前端用户一次最多上传20张人物/角色参考图
     upload_scene_max_count: 20      # 前端用户一次最多上传20张布景参考图
-    max_concurrency: 8      # 统一参考图库生成最大并发数
+    max_concurrency: 10      # 统一参考图库生成最大并发数
     auto_retry_count: 2     # 整套参考图库自动重试次数上限（首次失败后的自动重生成次数）
   # 分镜视频生成/重新生成的并行上限（仅对可并行的批处理入口生效）
-  scene_max_concurrency: 8
+  scene_max_concurrency: 10
+  # 视频生成模式：extend=延长（串行，参考前一分镜视频）, parallel=并行（默认，各分镜独立并行）
+  default_generation_mode: "parallel"
   default_resolution: "480p"
   # 每个分镜视频的总生成次数上限（首次生成 + 自动重生成 + 人工点击重新生成合计）
   scene_total_generate_limit: 3
@@ -151,10 +162,23 @@ video_review:
     physical-laws: 0.30                # 物理世界规律
     script_semantic_consistency: 0.30  # 与分镜脚本意义上一致
 
+# 故事版审核配置（6宫格白描图片审核）
+# 对应代码：app/agents/storyboard_review_agent.py + main_agent._generate_storyboard_with_review
+storyboard_review:
+  # 是否启用故事版自动审核
+  enabled: true
+  # 默认审核模式：auto=审核不通过自动重生成, manual=不自动审核
+  default_mode: "auto"
+  # 审核不通过时的最大重生成次数（总生成次数 = 首次 + max_retries）
+  max_retries: 2
+  # 审核请求本身的失败重试次数与间隔（针对限流/网络错误）
+  request_retry_count: 2
+  request_retry_delay_seconds: 2
+
 # 剧本生成约束
 script_generation:
   max_characters: 30         # 剧本中的主要人物/角色最多 30 人
-  max_setting_definitions: 40  # 剧本中的布景设定最多 40 个
+  max_setting_definitions: 30  # 剧本中的布景设定最多 30 个
   max_storyboard_scenes: 50  # 剧本分镜数量上限
 
 # 生成策略配置
@@ -162,9 +186,9 @@ generation:
   # 并发配置
   concurrency:
     # 图片生成并发数
-    image_workers: 8
+    image_workers: 10
     # 视频生成并发数
-    video_workers: 8
+    video_workers: 10
     # 是否启用并发（true/false）
     enabled: true
 
@@ -183,11 +207,11 @@ server:
 
 merge:
   # 临时拼接裁帧逻辑开关：on=开启，off=关闭
-  temporary_edge_trim: "off"
+  temporary_edge_trim: "on"
   # 前一段视频末尾裁掉的帧数
-  trim_previous_end_frames: 0
+  trim_previous_end_frames: 2
   # 后一段视频开头裁掉的帧数
-  trim_next_start_frames: 1
+  trim_next_start_frames: 0
 
 # API 限制和超时配置
 limits:

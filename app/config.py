@@ -147,15 +147,15 @@ class Config:
     
     @property
     def video_total_duration(self) -> int:
-        return self.get('video_generation.total_duration', 30)
+        return self.get('video_generation.total_duration', 60)
     
     @property
     def scene_duration_min(self) -> int:
-        return self.get('video_generation.scene_duration.min', 6)
+        return self.get('video_generation.scene_duration.min', 10)
     
     @property
     def scene_duration_max(self) -> int:
-        return self.get('video_generation.scene_duration.max', 15)
+        return self.get('video_generation.scene_duration.max', 30)
     
     @property
     def logging_enabled(self) -> bool:

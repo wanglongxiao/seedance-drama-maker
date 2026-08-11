@@ -90,30 +90,35 @@ body {
 .chat-header-top {
     display: flex;
     align-items: flex-start;
-    justify-content: space-between;
     gap: 12px;
 }
 
 .chat-header-title-group {
     min-width: 0;
+    flex: 0 0 40%;
+    max-width: 40%;
 }
 
 .chat-header h1 {
-    font-size: 20px;
+    font-size: 17px;
+    line-height: 1.3;
     margin-bottom: 4px;
 }
 
 .chat-header p {
     opacity: 0.9;
-    font-size: 12px;
+    font-size: 11px;
+    line-height: 1.3;
 }
 
 .language-switcher {
     display: flex;
     flex-direction: column;
-    align-items: flex-end;
+    align-items: flex-start;
     gap: 4px;
-    min-width: 110px;
+    flex: 0 0 30%;
+    max-width: 30%;
+    min-width: 0;
 }
 
 .language-switcher label {
@@ -122,7 +127,7 @@ body {
 }
 
 .language-select {
-    width: 110px;
+    width: 100%;
     height: 32px;
     border: 1px solid rgba(255, 255, 255, 0.35);
     border-radius: 8px;
@@ -135,6 +140,38 @@ body {
 }
 
 .language-select option {
+    color: #333;
+}
+
+.video-mode-switcher {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    flex: 0 0 30%;
+    max-width: 30%;
+    min-width: 0;
+}
+
+.video-mode-switcher label {
+    font-size: 11px;
+    opacity: 0.95;
+}
+
+.video-mode-select {
+    width: 100%;
+    height: 32px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.14);
+    color: #fff;
+    font-size: 12px;
+    padding: 0 10px;
+    outline: none;
+    cursor: pointer;
+}
+
+.video-mode-select option {
     color: #333;
 }
 
@@ -442,6 +479,17 @@ body {
     gap: 16px;
 }
 
+/* 参考图库 / 各分镜故事版 网格：自适应列数 */
+.reference-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 16px;
+}
+
+.reference-item {
+    min-width: 0;
+}
+
 .image-item {
     position: relative;
     border-radius: 8px;
@@ -631,6 +679,110 @@ body {
 @media (max-width: 600px) {
     .videos-grid {
         grid-template-columns: 1fr;
+    }
+}
+
+/* ===== Mobile 自适应布局 =====
+   desktop：左 30%（聊天）+ 右 70%（展示）
+   mobile：上 60%（展示）+ 下 40%（聊天） */
+@media (max-width: 768px) {
+    body {
+        overflow: hidden;
+    }
+
+    .app-container {
+        flex-direction: column;
+        height: 100vh;
+        height: 100dvh;
+    }
+
+    /* 展示区在上（60%） */
+    .preview-section {
+        order: 1;
+        width: 100%;
+        height: 60%;
+        min-height: 0;
+        border-right: none;
+        border-bottom: 1px solid #e8e8e8;
+    }
+
+    /* 聊天区在下（40%） */
+    .chat-section {
+        order: 2;
+        width: 100%;
+        height: 40%;
+        min-height: 0;
+        border-right: none;
+    }
+
+    /* 头部与文案在小屏上更紧凑 */
+    .chat-header {
+        padding: 10px 12px;
+    }
+
+    .chat-header-top {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .chat-header h1 {
+        font-size: 16px;
+    }
+
+    .chat-header p {
+        font-size: 11px;
+    }
+
+    .language-switcher,
+    .video-mode-switcher {
+        min-width: 0;
+    }
+
+    .language-select,
+    .video-mode-select {
+        width: 100%;
+        height: 28px;
+        font-size: 11px;
+        padding: 0 8px;
+    }
+
+    /* 展示区网格在窄屏下自动收窄 */
+    .reference-grid {
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        gap: 12px;
+    }
+
+    .images-grid {
+        grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+        gap: 12px;
+    }
+
+    .videos-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .content-display {
+        padding: 12px;
+    }
+
+    .content-card {
+        padding: 12px;
+    }
+
+    /* 步骤进度条文字缩短，避免换行拥挤 */
+    .step-progress-label {
+        font-size: 11px;
+    }
+
+    .overall-progress {
+        padding: 10px 12px;
+    }
+}
+
+@media (max-width: 420px) {
+    .reference-grid,
+    .images-grid {
+        grid-template-columns: 1fr 1fr;
     }
 }
 

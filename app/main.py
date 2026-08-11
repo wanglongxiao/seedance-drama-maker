@@ -374,13 +374,16 @@ async def get_frontend_config():
     """返回前端可安全读取的 UI 配置"""
     auto_run_countdown_seconds = config.get('ui.auto_run_countdown_seconds', 10)
     reference_config = config.get('video_generation.reference_images', {}) or {}
+    default_generation_mode = str(config.get('video_generation.default_generation_mode', 'parallel') or 'parallel').strip().lower()
+    default_generation_mode = 'extend' if default_generation_mode == 'extend' else 'parallel'
     return {
         "success": True,
         "config": {
             "auto_run_countdown_seconds": max(0, int(auto_run_countdown_seconds)),
-            "reference_image_max_count": max(1, int(reference_config.get("upload_max_count", 30))),
-            "character_reference_max_count": max(1, int(reference_config.get("upload_character_max_count", 10))),
+            "reference_image_max_count": max(1, int(reference_config.get("upload_max_count", 40))),
+            "character_reference_max_count": max(1, int(reference_config.get("upload_character_max_count", 20))),
             "scene_reference_max_count": max(1, int(reference_config.get("upload_scene_max_count", 20))),
+            "default_video_generation_mode": default_generation_mode,
         }
     }
 
@@ -391,6 +394,7 @@ async def continue_generate_after_reference(
     client_id: str = Form(None),
     ui_language: Optional[str] = Form("zh-CN"),
     review_mode: Optional[str] = Form(None),
+    generation_mode: Optional[str] = Form(None),
 ):
     """用户确认参考图后，开始新流程视频生成（逐个生成+审核）"""
     ui_language = normalize_locale(ui_language)
@@ -413,6 +417,7 @@ async def continue_generate_after_reference(
 
         main_agent.set_project_output_language(project_id, ui_language)
         main_agent.set_project_video_review_mode(project_id, review_mode)
+        main_agent.set_project_video_generation_mode(project_id, generation_mode)
         await continue_generate_after_reference_confirmation(client_id, project_id, review_mode=review_mode)
 
         return {"success": True}
@@ -474,6 +479,54 @@ async def regenerate(
                     return {
                         "success": False,
                         "error": translate(ui_language, "error.reference_asset_target_required")
+                    }
+
+                if normalized_reference_type == "storyboard":
+                    try:
+                        target_scene_number = int(float(normalized_reference_name))
+                    except (TypeError, ValueError):
+                        target_scene_number = 0
+                    new_image = await main_agent.regenerate_storyboard_asset(
+                        project,
+                        scene_number=target_scene_number,
+                        feedback="用户要求重新生成",
+                    )
+                    project.status = "waiting_reference_confirmation"
+                    project.current_step = "waiting_reference_confirmation"
+                    logger.info(
+                        f"Regenerated storyboard for scene {target_scene_number}: {new_image.url}"
+                    )
+                    return {
+                        "success": True,
+                        "url": new_image.url,
+                        "reference_type": getattr(new_image, "reference_type", None),
+                        "reference_name": getattr(new_image, "name", None),
+                        "reference_output": main_agent._build_reference_output(project, translate(ui_language, "message.reference.regenerated_confirm_prompt")),
+                        "type": "image",
+                        "scene_number": scene_number
+                    }
+
+                if normalized_reference_type in {"character_outfit", "scene_state"}:
+                    new_image = await main_agent.regenerate_variant_asset(
+                        project,
+                        reference_type=normalized_reference_type,
+                        variant_key=normalized_reference_name,
+                        feedback="用户要求重新生成",
+                    )
+                    project.status = "waiting_reference_confirmation"
+                    project.current_step = "waiting_reference_confirmation"
+                    logger.info(
+                        f"Regenerated {normalized_reference_type} variant {normalized_reference_name}: {new_image.url}"
+                    )
+                    return {
+                        "success": True,
+                        "url": new_image.url,
+                        "reference_type": getattr(new_image, "reference_type", None),
+                        "reference_name": getattr(new_image, "name", None),
+                        "variant_key": getattr(new_image, "variant_key", None),
+                        "reference_output": main_agent._build_reference_output(project, translate(ui_language, "message.reference.regenerated_confirm_prompt")),
+                        "type": "image",
+                        "scene_number": scene_number
                     }
 
                 existing_reference_images = (
@@ -570,7 +623,13 @@ async def regenerate(
             review_mode = getattr(project, "video_review_mode", "manual")
             scene_state = main_agent._get_scene_state(project, scene_number)
             total_generation_limit = max(1, int(config.get('video_generation.scene_total_generate_limit', 3)))
-            previous_video_url = main_agent._get_previous_video_url(project, scene_number - 1)
+            # 仅延长模式参考前一分镜视频；并行模式各分镜独立生成，不引用上一分镜视频。
+            generation_mode = main_agent._normalize_generation_mode(getattr(project, "video_generation_mode", None))
+            previous_video_url = (
+                main_agent._get_previous_video_url(project, scene_number - 1)
+                if generation_mode == "extend"
+                else None
+            )
             project_language = normalize_locale(getattr(project, "output_language", "zh-CN"))
             manual_request_attempt = 0
             while True:
@@ -1020,10 +1079,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 step = data.get("step")
                 ui_language = data.get("ui_language")
                 review_mode = data.get("review_mode")
+                generation_mode = data.get("generation_mode")
                 
                 if project_id and step:
                     main_agent.set_project_output_language(project_id, ui_language)
                     main_agent.set_project_video_review_mode(project_id, review_mode)
+                    main_agent.set_project_video_generation_mode(project_id, generation_mode)
                     asyncio.create_task(
                         execute_step_with_websocket(client_id, project_id, step, review_mode=review_mode)
                     )
@@ -1047,6 +1108,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # 用户确认参考图库
                 confirmed = data.get("confirmed", True)
                 project_id = data.get("project_id")
+                generation_mode = data.get("generation_mode")
                 
                 if confirmed:
                     # 设置确认事件，继续生成分镜图片
@@ -1054,6 +1116,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     # 异步执行分镜图片生成
                     if project_id:
+                        main_agent.set_project_video_generation_mode(project_id, generation_mode)
                         asyncio.create_task(
                             continue_generate_after_reference_confirmation(client_id, project_id)
                         )

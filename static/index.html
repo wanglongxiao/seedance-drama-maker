@@ -13,7 +13,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AI 视频生成助手</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260810b">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260811c">
 </head>
 <body>
 
@@ -23,8 +23,8 @@
             <div class="chat-header">
                 <div class="chat-header-top">
                     <div class="chat-header-title-group">
-                        <h1 id="appTitle">🎬 AI 视频生成助手</h1>
-                        <p id="appSubtitle">告诉我你想创作的视频内容</p>
+                        <h1 id="appTitle">🎬 AI 视频助手</h1>
+                        <p id="appSubtitle">告诉我你想创作的内容</p>
                     </div>
                     <div class="language-switcher">
                         <label for="languageSelect" id="languageLabel">语言</label>
@@ -34,6 +34,13 @@
                             <option value="zh-TW">繁體中文</option>
                             <option value="ja">日本語</option>
                             <option value="es">Español</option>
+                        </select>
+                    </div>
+                    <div class="video-mode-switcher">
+                        <label for="videoModeSelect" id="videoModeLabel">视频生成模式</label>
+                        <select id="videoModeSelect" class="video-mode-select">
+                            <option value="parallel" selected>并行</option>
+                            <option value="extend">延长</option>
                         </select>
                     </div>
                 </div>
@@ -135,6 +142,6 @@
         </div>
     </div>
     
-    <script src="/static/js/app.js?v=20260810b"></script>
+    <script src="/static/js/app.js?v=20260811c"></script>
 </body>
 </html>

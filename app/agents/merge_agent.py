@@ -88,30 +88,42 @@ class MergeAgent:
             "Temporary edge trim is %s (trim_previous_end_frames=%s, trim_next_start_frames=%s)",
             "enabled" if temporary_edge_trim_enabled else "disabled",
             config.get('merge.trim_previous_end_frames', 6),
-            config.get('merge.trim_next_start_frames', 1),
+            config.get('merge.trim_next_start_frames', 2),
         )
         
-        # 生成输出文件名（输出格式与生成模型保持一致，默认 mov）
+        # 生成输出文件名：FFmpeg 合成阶段沿用生成模型输出格式（默认 mov），
+        # 随后统一转封装为 mp4 供 Web 前端播放。
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         video_ext = str(config.get('video_generation.output_format', 'mov')).strip().lstrip('.').lower() or "mov"
-        output_filename = f"final_video_{project_id}_{timestamp}.{video_ext}"
+        merge_filename = f"merged_{project_id}_{timestamp}.{video_ext}"
+        mp4_filename = f"final_video_{project_id}_{timestamp}.mp4"
         
         try:
             merge_temp_dir = ensure_project_temp_subdir(project_id, "merge")
             # 使用FFmpeg合并视频
             local_path = ffmpeg_service.merge_videos(
                 video_urls=video_urls,
-                output_filename=output_filename,
+                output_filename=merge_filename,
                 temporary_edge_trim_enabled=temporary_edge_trim_enabled,
                 work_dir=str(merge_temp_dir),
             )
             
             logger.info(f"Video merged locally: {local_path}")
             
-            # 上传到TOS；单分镜时 merge_videos 可能直接返回远程场景 URL
-            final_url = self._upload_or_copy_merged_output(
+            # 将合成结果（mov）转封装为 mp4；单分镜时 local_path 可能为远程场景 URL，
+            # convert_to_mp4 会自动下载后再转换。
+            mp4_local_path = ffmpeg_service.convert_to_mp4(
                 source=local_path,
-                output_filename=output_filename,
+                output_filename=mp4_filename,
+                work_dir=str(merge_temp_dir),
+            )
+            
+            logger.info(f"Video converted to mp4: {mp4_local_path}")
+            
+            # 上传 mp4 到 TOS
+            final_url = self._upload_or_copy_merged_output(
+                source=mp4_local_path,
+                output_filename=mp4_filename,
                 project_id=project_id,
             )
             
@@ -196,9 +208,8 @@ class MergeAgent:
         Returns:
             视频信息字典
         """
-        # 这里可以实现获取视频时长、分辨率等信息
-        # 暂时返回基本信息
+        # 最终成片统一为 mp4
         return {
             "url": video_url,
-            "format": str(config.get('video_generation.output_format', 'mov')).strip().lstrip('.').lower() or "mov"
+            "format": "mp4"
         }

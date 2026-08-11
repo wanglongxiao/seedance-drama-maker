@@ -24,7 +24,7 @@ class ImageAgent:
         self.default_aspect_ratio = "16:9"
         # 并发配置
         self.concurrency_enabled = config.get('generation.concurrency.enabled', True)
-        self.max_workers = config.get('generation.concurrency.image_workers', 5)
+        self.max_workers = config.get('generation.concurrency.image_workers', 10)
 
     def _should_apply_japanese_manga_live_action_style(self, user_style_info: str, script: Script) -> bool:
         """未指定明确风格，或指定真人/写实时，参考图默认回落到写实漫画风格。"""
@@ -224,6 +224,9 @@ class ImageAgent:
         aspect_ratio: str = None,
         user_reference_images: List[str] = None,
         variation_requirements: str = None,
+        scene_features: Optional[List[str]] = None,
+        time_of_day: Optional[str] = None,
+        weather: Optional[str] = None,
     ) -> GeneratedImage:
         if not aspect_ratio:
             aspect_ratio = self.default_aspect_ratio
@@ -242,7 +245,14 @@ class ImageAgent:
 
         prompt_parts.append(f"[SCENE REFERENCE] {scene_name}")
         prompt_parts.append(f"Backdrop definition: {scene_description}")
-        prompt_parts.extend(self._infer_scene_time_guidance(scene_name, scene_description))
+        if time_of_day:
+            prompt_parts.append(f"Time of day: {time_of_day}")
+        if weather:
+            prompt_parts.append(f"Weather: {weather}")
+        if scene_features:
+            prompt_parts.append(f"Scene features: {', '.join([str(item).strip() for item in scene_features if str(item).strip()])}")
+        if not time_of_day:
+            prompt_parts.extend(self._infer_scene_time_guidance(scene_name, scene_description))
         if user_reference_images:
             prompt_parts.append("[CRITICAL] Preserve the major environment layout and landmark details from uploaded images.")
         prompt_parts.append("[CRITICAL] Environment-only scene board. Do not show any person, face, body, crowd, character silhouette, or creature.")
@@ -267,6 +277,357 @@ class ImageAgent:
             is_reference=True,
             name=self._normalize_asset_name(scene_name, "Scene"),
             reference_type="scene",
+        )
+
+    def generate_character_outfit_image(
+        self,
+        character: Character,
+        outfit: str,
+        base_reference_image: GeneratedImage,
+        script: Script,
+        user_style_info: str = None,
+        aspect_ratio: str = None,
+    ) -> GeneratedImage:
+        """基于角色主图 + 分镜中的特殊装扮信息，生成该角色的装扮参考图。"""
+        if not aspect_ratio:
+            aspect_ratio = self.default_aspect_ratio
+
+        prompt_parts: List[str] = [f"Aspect ratio: {aspect_ratio}"]
+        reference_style_info = self._extract_reference_prompt_style(user_style_info)
+        self._append_reference_style_guidance(prompt_parts, reference_style_info, script)
+        if reference_style_info:
+            prompt_parts.append("[REFERENCE STYLE REQUIREMENTS]")
+            prompt_parts.append(reference_style_info)
+
+        prompt_parts.append(f"[CHARACTER OUTFIT VARIANT] {character.name}")
+        prompt_parts.append("[CRITICAL] Keep the SAME person as the reference image: preserve face, hairstyle, facial features, skin tone and identity exactly.")
+        prompt_parts.append(f"Name: {character.name}")
+        prompt_parts.append(f"Profile: {character.age} {character.gender}")
+        prompt_parts.append(f"Face features: {character.face_features}")
+        prompt_parts.append(f"Skin tone: {character.skin_tone}")
+        prompt_parts.append(f"[OUTFIT REQUIREMENT] Change ONLY the clothing/outfit to: {outfit}")
+        prompt_parts.append("[CRITICAL] The new outfit must fully replace the previous clothing while keeping the same character identity.")
+        prompt_parts.append("Front view, facing camera, clear facial features")
+        prompt_parts.append("Large half-body portrait above the knees, face occupying a significant portion of the frame")
+        prompt_parts.append("Crop above the knees and keep the face details prominent")
+        prompt_parts.append("Pure white background, no scenery, no props")
+        prompt_parts.append("High quality character outfit reference image for consistent video generation")
+
+        prompt = "\n".join(prompt_parts)
+        base_url = getattr(base_reference_image, "url", None)
+        response = llm_service.generate_image(
+            prompt=prompt,
+            model=self.model,
+            size=self.size,
+            image_urls=[base_url] if base_url else None,
+            ratio=aspect_ratio,
+        )
+        return GeneratedImage(
+            scene_number=0,
+            url=response["data"][0]["url"],
+            prompt=prompt,
+            is_reference=True,
+            name=self._normalize_asset_name(f"{character.name} - {outfit}", "Outfit"),
+            reference_type="character_outfit",
+        )
+
+    def generate_scene_state_image(
+        self,
+        scene_name: str,
+        base_reference_image: GeneratedImage,
+        script: Script,
+        time_of_day: str = None,
+        weather: str = None,
+        scene_description: str = None,
+        user_style_info: str = None,
+        aspect_ratio: str = None,
+    ) -> GeneratedImage:
+        """基于场景主图 + 分镜中的时间/天气状态信息，生成该场景的状态参考图。"""
+        if not aspect_ratio:
+            aspect_ratio = self.default_aspect_ratio
+
+        prompt_parts: List[str] = [f"Aspect ratio: {aspect_ratio}"]
+        reference_style_info = self._extract_reference_prompt_style(user_style_info)
+        if reference_style_info:
+            prompt_parts.append("[REFERENCE STYLE REQUIREMENTS]")
+            prompt_parts.append(reference_style_info)
+        else:
+            prompt_parts.append(f"Story style: {script.style}")
+
+        prompt_parts.append(f"[SCENE STATE VARIANT] {scene_name}")
+        prompt_parts.append("[CRITICAL] Keep the SAME location as the reference image: preserve environment layout, architecture, landmarks and spatial composition exactly.")
+        if scene_description:
+            prompt_parts.append(f"Backdrop definition: {scene_description}")
+        state_parts: List[str] = []
+        if time_of_day:
+            state_parts.append(f"time of day = {time_of_day}")
+        if weather:
+            state_parts.append(f"weather = {weather}")
+        if state_parts:
+            prompt_parts.append(f"[STATE REQUIREMENT] Adjust ONLY the lighting/atmosphere to reflect: {', '.join(state_parts)}")
+        prompt_parts.append("[CRITICAL] Change only lighting, sky, weather and atmosphere; do not change the environment structure or layout.")
+        prompt_parts.append("[CRITICAL] Environment-only scene board. Do not show any person, face, body, crowd, character silhouette, or creature.")
+        prompt_parts.append("Wide cinematic environment composition")
+        prompt_parts.append("Empty environment, no humans, no characters, no foreground person")
+        prompt_parts.append("No subtitles, no text overlay, no street sign text")
+        prompt_parts.append("High quality scene state reference image for consistent video generation")
+
+        prompt = "\n".join(prompt_parts)
+        base_url = getattr(base_reference_image, "url", None)
+        response = llm_service.generate_image(
+            prompt=prompt,
+            model=self.model,
+            size=self.size,
+            image_urls=[base_url] if base_url else None,
+            ratio=aspect_ratio,
+        )
+        state_suffix = " ".join(part for part in [time_of_day or "", weather or ""] if part).strip() or "state"
+        return GeneratedImage(
+            scene_number=0,
+            url=response["data"][0]["url"],
+            prompt=prompt,
+            is_reference=True,
+            name=self._normalize_asset_name(f"{scene_name} - {state_suffix}", "SceneState"),
+            reference_type="scene_state",
+        )
+
+    def _build_scene_asset_name(self, scene, suffix: str) -> str:
+        scene_number = max(1, int(getattr(scene, "scene_number", 1) or 1))
+        scene_name = self._normalize_asset_name(getattr(scene, "scene_name", ""), f"Scene {scene_number}")
+        return f"Scene {scene_number:02d} {suffix} - {scene_name}"[:64]
+
+    def _normalize_lookup_key(self, value: Any) -> str:
+        normalized = re.sub(r"\s+", "", str(value or "").strip().lower())
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff_-]+", "", normalized)
+
+    def _split_scene_names(self, value: Any) -> List[str]:
+        return [
+            part.strip()
+            for part in re.split(r"[、,，/|]+", str(value or ""))
+            if part.strip()
+        ]
+
+    def _resolve_scene_definition_context(self, scene_name: Any, script: Script) -> Dict[str, Any]:
+        name_keys = {
+            self._normalize_lookup_key(name)
+            for name in self._split_scene_names(scene_name)
+            if self._normalize_lookup_key(name)
+        }
+        matched_definitions = []
+        for item in getattr(script, "scene_definitions", None) or []:
+            if self._normalize_lookup_key(getattr(item, "name", "")) in name_keys:
+                matched_definitions.append(item)
+
+        descriptions: List[str] = []
+        scene_features: List[str] = []
+        seen_descriptions = set()
+        seen_features = set()
+        time_of_day = ""
+        weather = ""
+        for item in matched_definitions:
+            description = str(getattr(item, "description", "") or "").strip()
+            if description and description not in seen_descriptions:
+                seen_descriptions.add(description)
+                descriptions.append(description)
+            for feature in getattr(item, "scene_features", None) or []:
+                normalized_feature = str(feature or "").strip()
+                if normalized_feature and normalized_feature not in seen_features:
+                    seen_features.add(normalized_feature)
+                    scene_features.append(normalized_feature)
+            if not time_of_day:
+                time_of_day = str(getattr(item, "time_of_day", "") or "").strip()
+            if not weather:
+                weather = str(getattr(item, "weather", "") or "").strip()
+
+        return {
+            "descriptions": descriptions,
+            "scene_features": scene_features,
+            "time_of_day": time_of_day,
+            "weather": weather,
+        }
+
+    def _build_scene_character_context(self, scene, script: Script) -> List[str]:
+        lines: List[str] = []
+        character_names = [
+            str(name or "").strip()
+            for name in (getattr(scene, "characters_present", None) or [])
+            if str(name or "").strip()
+        ]
+        if not character_names:
+            return lines
+
+        lines.append("[SCENE CHARACTER DEFINITIONS]")
+        character_map = {
+            self._normalize_lookup_key(getattr(character, "name", "")): character
+            for character in getattr(script, "characters", None) or []
+        }
+        for name in character_names:
+            character = character_map.get(self._normalize_lookup_key(name))
+            if character is None:
+                lines.append(f"- {name}")
+                continue
+            summary = [
+                f"- {character.name}",
+                f"age={character.age}",
+                f"gender={character.gender}",
+                f"face={character.face_features}",
+                f"skin={character.skin_tone}",
+            ]
+            if getattr(character, "clothing", None):
+                summary.append(f"clothing={character.clothing}")
+            lines.append(", ".join(summary))
+        return lines
+
+    def _build_storyboard_cast_constraints(self, scene, script: Script) -> List[str]:
+        """构建故事版专用的角色数量/性别/防重复约束。
+
+        故事版偶发同一角色在一个画面里重复出现、或性别画错，
+        因此显式列出本分镜的角色清单（数量 + 性别），并强约束：
+        每个角色在每个分格中最多出现一次、严格遵守性别。
+        """
+        character_names = [
+            str(name or "").strip()
+            for name in (getattr(scene, "characters_present", None) or [])
+            if str(name or "").strip()
+        ]
+        if not character_names:
+            return []
+
+        character_map = {
+            self._normalize_lookup_key(getattr(character, "name", "")): character
+            for character in getattr(script, "characters", None) or []
+        }
+        # 去重，保持出场顺序
+        seen_keys = set()
+        roster: List[str] = []
+        for name in character_names:
+            key = self._normalize_lookup_key(name)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            character = character_map.get(key)
+            gender = str(getattr(character, "gender", "") or "").strip() if character else ""
+            if gender:
+                roster.append(f"{name} (gender={gender})")
+            else:
+                roster.append(name)
+
+        distinct_count = len(roster)
+        lines: List[str] = ["[CAST CONSTRAINTS]"]
+        lines.append(
+            f"This scene has EXACTLY {distinct_count} distinct main character(s): "
+            + "; ".join(roster)
+        )
+        lines.append(
+            "[CRITICAL] Draw exactly these characters. Do NOT invent extra people and do NOT drop any of them."
+        )
+        lines.append(
+            "[CRITICAL] Each character is ONE unique person. The SAME character must NEVER appear more than once within a single panel (no duplicated/cloned faces of the same person in one cell)."
+        )
+        lines.append(
+            "[CRITICAL] Strictly respect each character's gender exactly as listed above; never swap or mistake a character's gender."
+        )
+        lines.append(
+            "[CRITICAL] Keep the total number of distinct people consistent with the cast list across all panels."
+        )
+        return lines
+
+    def _build_scene_reference_context(self, reference_images: Optional[List[GeneratedImage]]) -> List[str]:
+        prompt_parts: List[str] = []
+        if not reference_images:
+            return prompt_parts
+
+        prompt_parts.append("[REFERENCE ASSETS]")
+        for index, image in enumerate(reference_images, start=1):
+            reference_type = str(getattr(image, "reference_type", "") or "").strip().lower() or "reference"
+            if reference_type == "character":
+                label = "character reference"
+            elif reference_type == "character_outfit":
+                label = "character outfit reference"
+            elif reference_type == "scene":
+                label = "scene reference"
+            elif reference_type == "scene_state":
+                label = "scene state reference"
+            elif reference_type == "storyboard":
+                label = "6-panel storyboard"
+            else:
+                label = reference_type
+            prompt_parts.append(f"- Image {index}: {getattr(image, 'name', f'Reference {index}')} ({label})")
+        return prompt_parts
+
+    def generate_scene_storyboard_image(
+        self,
+        scene,
+        script: Script,
+        reference_images: Optional[List[GeneratedImage]] = None,
+        user_style_info: str = None,
+        aspect_ratio: str = None,
+    ) -> GeneratedImage:
+        if not aspect_ratio:
+            aspect_ratio = self.default_aspect_ratio
+
+        prompt_parts: List[str] = [f"Aspect ratio: {aspect_ratio}"]
+
+        # 故事版必须是白描 6 宫格：把强制样式约束放在最前且最显著，
+        # 且刻意不注入用户的彩色/写实/电影感风格要求（会与白描线稿冲突，
+        # 曾导致模型偶发输出单张彩色写实图而非 6 宫格白描）。
+        prompt_parts.append("[OUTPUT TYPE] Black-and-white six-panel storyboard sheet (line-art sketch), NOT a finished color illustration.")
+        prompt_parts.append("[CRITICAL] Generate exactly ONE image containing SIX panels arranged in 2 columns x 3 rows (six equal storyboard cells).")
+        prompt_parts.append("[CRITICAL] Style MUST be monochrome black-and-white pencil/line drawing (whiteboard storyboard sketch). Absolutely NO color, NO photorealistic rendering, NO single full portrait.")
+        prompt_parts.append("[CRITICAL] Ignore any color, lighting or photoreal styling from the reference images; use references ONLY for character identity, faces, costumes and scene layout.")
+
+        scene_context = self._resolve_scene_definition_context(getattr(scene, "scene_name", ""), script)
+        reference_context = self._build_scene_reference_context(reference_images)
+        if reference_context:
+            prompt_parts.extend(reference_context)
+            prompt_parts.append("[REFERENCE USAGE] The reference images above are content/identity references only. Do NOT copy their coloring or realistic finish — redraw everything as black-and-white line art.")
+        prompt_parts.extend(self._build_scene_character_context(scene, script))
+        prompt_parts.extend(self._build_storyboard_cast_constraints(scene, script))
+        prompt_parts.append("[STORYBOARD SHEET]")
+        prompt_parts.append(f"Scene name: {getattr(scene, 'scene_name', '')}")
+        if scene_context["descriptions"]:
+            prompt_parts.append(f"Scene backdrop definition: {'; '.join(scene_context['descriptions'])}")
+        prompt_parts.append(f"Scene description: {getattr(scene, 'description', '')}")
+        resolved_time_of_day = str(getattr(scene, "time_of_day", "") or scene_context["time_of_day"]).strip()
+        resolved_weather = str(getattr(scene, "weather", "") or scene_context["weather"]).strip()
+        if resolved_time_of_day:
+            prompt_parts.append(f"Time of day: {resolved_time_of_day}")
+        if resolved_weather:
+            prompt_parts.append(f"Weather: {resolved_weather}")
+        resolved_scene_features = list(scene_context["scene_features"])
+        if resolved_scene_features:
+            prompt_parts.append(f"Scene features: {', '.join(resolved_scene_features)}")
+        prompt_parts.append(f"Dialogue or narration: {getattr(scene, 'dialogue', '') or '无'}")
+        prompt_parts.append(f"Character action: {getattr(scene, 'character_description', '')}")
+        prompt_parts.append(f"Mood: {getattr(scene, 'mood', '')}")
+        if getattr(scene, "voice_description", None):
+            prompt_parts.append(f"Voice description: {scene.voice_description}")
+        if getattr(scene, "camera_angle", None):
+            prompt_parts.append(f"Camera angle: {scene.camera_angle}")
+        if getattr(scene, "characters_present", None):
+            prompt_parts.append(f"Characters present: {', '.join(scene.characters_present)}")
+        prompt_parts.append("[CRITICAL] Generate ONE six-panel storyboard sheet for this exact scene.")
+        prompt_parts.append("[CRITICAL] Layout: 2 columns x 3 rows, six equal storyboard panels in a single image.")
+        prompt_parts.append("[CRITICAL] Style: black-and-white line drawing, whiteboard sketch, storyboard pencil art.")
+        prompt_parts.append("[CRITICAL] Show the key beats, camera blocking, action flow, and emotional progression of the same scene.")
+        prompt_parts.append("[CRITICAL] No color, no subtitles, no text labels, no speech bubbles.")
+        prompt_parts.append("Professional production storyboard sheet for live-action shot planning.")
+
+        prompt = "\n".join(prompt_parts)
+        response = llm_service.generate_image(
+            prompt=prompt,
+            model=self.model,
+            size=self.size,
+            image_urls=[image.url for image in (reference_images or [])] or None,
+            ratio=aspect_ratio,
+        )
+        return GeneratedImage(
+            scene_number=max(1, int(getattr(scene, "scene_number", 1) or 1)),
+            url=response["data"][0]["url"],
+            prompt=prompt,
+            name=self._build_scene_asset_name(scene, "Storyboard"),
+            reference_type="storyboard",
+            is_reference=True,
         )
 
     def generate_reference_image(

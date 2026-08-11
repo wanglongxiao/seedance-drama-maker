@@ -6,6 +6,7 @@ import uuid
 import asyncio
 import re
 import time
+from collections import OrderedDict
 from typing import Dict, List, Optional, Any, Callable, Awaitable
 from fastapi.encoders import jsonable_encoder
 from app.config import config
@@ -18,6 +19,7 @@ from app.agents.script_agent import ScriptAgent
 from app.agents.image_agent import ImageAgent
 from app.agents.video_agent import VideoAgent
 from app.agents.video_review_agent import VideoReviewAgent
+from app.agents.storyboard_review_agent import StoryboardReviewAgent
 from app.agents.merge_agent import MergeAgent
 from app.services.asset_library_service import asset_library_service, AssetLibraryError
 from app.services.tos_service import tos_service
@@ -179,6 +181,7 @@ class MainAgent:
         self.image_agent = ImageAgent()
         self.video_agent = VideoAgent()
         self.video_review_agent = VideoReviewAgent()
+        self.storyboard_review_agent = StoryboardReviewAgent()
         self.merge_agent = MergeAgent()
         self.projects: Dict[str, VideoProject] = {}
         self._reference_generation_slots: Dict[str, Dict[str, List[Optional[GeneratedImage]]]] = {}
@@ -254,31 +257,30 @@ class MainAgent:
             raise AssetLibraryError(f"Asset group id is missing for project {project.project_id}")
         return group
 
-    def _register_uploaded_portrait_assets(self, project: VideoProject) -> None:
+    def _register_uploaded_reference_assets(self, project: VideoProject) -> None:
         self._ensure_project_asset_group(project)
         for asset in getattr(project, "uploaded_reference_images", []) or []:
-            if getattr(asset, "reference_type", None) != "character":
-                continue
             if getattr(asset, "asset_id", None):
                 continue
             asset_info = asset_library_service.register_image_asset(
                 group_id=project.asset_group_id,
                 url=asset.url,
-                name=asset.name or f"character-{project.project_id}",
+                name=asset.name or f"{getattr(asset, 'reference_type', 'reference')}-{project.project_id}",
                 project_name=project.asset_project_name,
             )
             asset.asset_id = str(asset_info.get("Id") or "").strip() or None
             asset.asset_status = str(asset_info.get("Status") or "").strip() or None
 
-    def _find_uploaded_character_asset(
+    def _find_uploaded_reference_asset(
         self,
         project: VideoProject,
         asset_name: str,
         source_url: str,
+        reference_type: Optional[str] = None,
     ) -> Optional[UploadedReferenceImage]:
         normalized_name = self._normalize_name_key(asset_name)
         for item in getattr(project, "uploaded_reference_images", []) or []:
-            if getattr(item, "reference_type", None) != "character":
+            if reference_type and getattr(item, "reference_type", None) != reference_type:
                 continue
             if source_url and str(getattr(item, "url", "") or "").strip() == source_url:
                 return item
@@ -286,7 +288,7 @@ class MainAgent:
                 return item
         return None
 
-    def _register_generated_portrait_asset(
+    def _register_generated_reference_asset(
         self,
         project: VideoProject,
         image: GeneratedImage,
@@ -384,7 +386,7 @@ class MainAgent:
 
         self.projects[project_id] = project
         await asyncio.to_thread(self._ensure_project_asset_group, project)
-        await asyncio.to_thread(self._register_uploaded_portrait_assets, project)
+        await asyncio.to_thread(self._register_uploaded_reference_assets, project)
 
         logger.info(f"Project created with combined_input: {combined_input[:200]}...")
 
@@ -398,8 +400,8 @@ class MainAgent:
     ) -> List[UploadedReferenceImage]:
         normalized: List[UploadedReferenceImage] = []
         locale = normalize_locale(output_language)
-        upload_total_limit = max(1, int(config.get("video_generation.reference_images.upload_max_count", 30)))
-        upload_character_limit = max(1, int(config.get("video_generation.reference_images.upload_character_max_count", 10)))
+        upload_total_limit = max(1, int(config.get("video_generation.reference_images.upload_max_count", 40)))
+        upload_character_limit = max(1, int(config.get("video_generation.reference_images.upload_character_max_count", 20)))
         upload_scene_limit = max(1, int(config.get("video_generation.reference_images.upload_scene_max_count", 20)))
         for index, item in enumerate(uploaded_reference_images or [], start=1):
             url = str((item or {}).get("url") or "").strip()
@@ -454,18 +456,31 @@ class MainAgent:
         normalized = re.sub(r"[^0-9a-z\u4e00-\u9fff_-]+", "", normalized)
         return normalized
 
-    def _extract_scene_reference_definitions(self, script: Script, limit: int) -> List[Dict[str, str]]:
-        definitions: List[Dict[str, str]] = []
+    def _extract_scene_reference_definitions(self, script: Script, limit: int) -> List[Dict[str, Any]]:
+        definitions: List[Dict[str, Any]] = []
         seen = set()
 
         for index, item in enumerate(getattr(script, "scene_definitions", []) or [], start=1):
             name = str(getattr(item, "name", "") or "").strip()[:24] or f"Scene {index}"
             description = str(getattr(item, "description", "") or "").strip() or name
+            time_of_day = str(getattr(item, "time_of_day", "") or "").strip()
+            weather = str(getattr(item, "weather", "") or "").strip()
+            scene_features = [
+                str(feature or "").strip()
+                for feature in (getattr(item, "scene_features", None) or [])
+                if str(feature or "").strip()
+            ]
             key = self._normalize_name_key(name)
             if not key or key in seen:
                 continue
             seen.add(key)
-            definitions.append({"name": name, "description": description})
+            definitions.append({
+                "name": name,
+                "description": description,
+                "time_of_day": time_of_day,
+                "weather": weather,
+                "scene_features": scene_features,
+            })
             if len(definitions) >= limit:
                 break
 
@@ -543,15 +558,19 @@ class MainAgent:
         image.is_reference = True
         image.source = "uploaded_original" if used_original else "generated"
 
-        if category == "character":
-            uploaded_asset = self._find_uploaded_character_asset(project, asset_name, source_url)
-            if uploaded_asset and getattr(uploaded_asset, "asset_id", None):
-                image.asset_id = uploaded_asset.asset_id
-                image.asset_status = uploaded_asset.asset_status or "Active"
-            elif getattr(image, "asset_id", None):
-                image.asset_status = image.asset_status or "Active"
-            else:
-                self._register_generated_portrait_asset(project, image, asset_name)
+        uploaded_asset = self._find_uploaded_reference_asset(
+            project,
+            asset_name,
+            source_url,
+            reference_type=category if category in {"character", "scene"} else None,
+        )
+        if uploaded_asset and getattr(uploaded_asset, "asset_id", None):
+            image.asset_id = uploaded_asset.asset_id
+            image.asset_status = uploaded_asset.asset_status or "Active"
+        elif getattr(image, "asset_id", None):
+            image.asset_status = image.asset_status or "Active"
+        else:
+            self._register_generated_reference_asset(project, image, asset_name)
         return image
 
     async def _store_reference_asset_async(
@@ -574,29 +593,44 @@ class MainAgent:
         )
 
     def _expected_reference_counts(self, project: VideoProject) -> Dict[str, int]:
-        character_limit = max(1, int(config.get("video_generation.reference_images.character_max_count", 20)))
-        scene_limit = max(1, int(config.get("video_generation.reference_images.scene_max_count", 40)))
+        character_limit = max(1, int(config.get("video_generation.reference_images.character_max_count", 30)))
+        scene_limit = max(1, int(config.get("video_generation.reference_images.scene_max_count", 30)))
         character_count = len(list((getattr(getattr(project, "script", None), "characters", None) or [])[:character_limit]))
         scene_count = len(self._extract_scene_reference_definitions(getattr(project, "script", None), scene_limit))
+        scene_story_count = len(getattr(getattr(project, "script", None), "scenes", None) or [])
+        variant_plan = self._plan_scene_variant_assets(project) if getattr(project, "script", None) else {"outfits": [], "scene_states": []}
+        outfit_count = len(variant_plan.get("outfits", []))
+        scene_state_count = len(variant_plan.get("scene_states", []))
         return {
             "characters": character_count,
             "scenes": scene_count,
-            "total": character_count + scene_count,
+            "character_outfits": outfit_count,
+            "scene_states": scene_state_count,
+            "storyboards": scene_story_count,
+            "total": character_count + scene_count + outfit_count + scene_state_count + scene_story_count,
         }
 
     def _is_reference_library_ready_for_confirmation(self, project: VideoProject) -> bool:
         session_slots = self._get_reference_generation_session(project)
         if session_slots is not None:
-            return all(image is not None for image in session_slots.get("characters", [])) and all(
-                image is not None for image in session_slots.get("scenes", [])
+            return all(
+                image is not None
+                for key in ("characters", "scenes", "character_outfits", "scene_states", "storyboards")
+                for image in session_slots.get(key, [])
             )
 
         expected = self._expected_reference_counts(project)
         actual_character_count = len(getattr(project, "character_reference_images", []) or [])
         actual_scene_count = len(getattr(project, "scene_reference_images", []) or [])
+        actual_outfit_count = len(getattr(project, "character_outfit_images", []) or [])
+        actual_scene_state_count = len(getattr(project, "scene_state_images", []) or [])
+        actual_storyboard_count = len(getattr(project, "storyboard_images", []) or [])
         return (
             actual_character_count >= expected["characters"]
             and actual_scene_count >= expected["scenes"]
+            and actual_outfit_count >= expected["character_outfits"]
+            and actual_scene_state_count >= expected["scene_states"]
+            and actual_storyboard_count >= expected["storyboards"]
         )
 
     def _serialize_reference_images(
@@ -607,15 +641,78 @@ class MainAgent:
     ) -> List[Dict[str, Any]]:
         serialized: List[Dict[str, Any]] = []
         for fallback_index, image in enumerate(images):
-            item = image.dict()
-            slot_index = self._get_reference_slot_index(
-                project,
-                reference_type,
-                getattr(image, "name", ""),
-            )
+            item = image.model_dump()
+            if reference_type == "storyboard":
+                slot_index = max(0, int(getattr(image, "scene_number", 1) or 1) - 1)
+            elif reference_type in ("character_outfit", "scene_state"):
+                # 装扮图/场景状态图为去重复用列表，直接按顺序索引
+                slot_index = fallback_index
+            else:
+                slot_index = self._get_reference_slot_index(
+                    project,
+                    reference_type,
+                    getattr(image, "name", ""),
+                )
             item["slot_index"] = slot_index if slot_index >= 0 else fallback_index
             serialized.append(item)
         return serialized
+
+    def _build_scene_reference_mappings(self, project: VideoProject) -> Dict[int, Dict[str, Any]]:
+        mappings: Dict[int, Dict[str, Any]] = {}
+        scene_definitions = self._extract_scene_reference_definitions(
+            getattr(project, "script", None),
+            max(1, int(config.get("video_generation.reference_images.scene_max_count", 30))),
+        )
+        scene_definition_map = {
+            self._normalize_name_key(item["name"]): item
+            for item in scene_definitions
+            if self._normalize_name_key(item["name"])
+        }
+        for scene in getattr(getattr(project, "script", None), "scenes", None) or []:
+            scene_number = max(1, int(getattr(scene, "scene_number", 1) or 1))
+            base_assets = self._select_base_reference_assets_for_scene(project, scene)
+            storyboard = next(
+                (
+                    image for image in (getattr(project, "storyboard_images", []) or [])
+                    if int(getattr(image, "scene_number", 0) or 0) == scene_number
+                ),
+                None,
+            )
+            scene_feature_names: List[str] = []
+            seen_scene_feature_keys = set()
+            for part in re.split(r"[、,，/|]+", str(getattr(scene, "scene_name", "") or "")):
+                definition = scene_definition_map.get(self._normalize_name_key(part))
+                if not definition:
+                    continue
+                for feature in definition.get("scene_features", []) or []:
+                    feature_text = str(feature or "").strip()
+                    feature_key = self._normalize_name_key(feature_text)
+                    if not feature_key or feature_key in seen_scene_feature_keys:
+                        continue
+                    seen_scene_feature_keys.add(feature_key)
+                    scene_feature_names.append(feature_text)
+            mappings[scene_number] = {
+                "scene_name": getattr(scene, "scene_name", ""),
+                "time_of_day": getattr(scene, "time_of_day", ""),
+                "weather": getattr(scene, "weather", ""),
+                "scene_features": scene_feature_names,
+                "character_outfits": dict(getattr(scene, "character_outfits", None) or {}),
+                "character_assets": [
+                    {"name": image.name, "asset_id": image.asset_id, "url": image.url}
+                    for image in base_assets
+                    if getattr(image, "reference_type", None) in ("character", "character_outfit")
+                ],
+                "scene_assets": [
+                    {"name": image.name, "asset_id": image.asset_id, "url": image.url}
+                    for image in base_assets
+                    if getattr(image, "reference_type", None) in ("scene", "scene_state")
+                ],
+                "storyboard": (
+                    {"name": storyboard.name, "asset_id": storyboard.asset_id, "url": storyboard.url}
+                    if storyboard else None
+                ),
+            }
+        return mappings
 
     def _build_reference_output(
         self,
@@ -625,9 +722,15 @@ class MainAgent:
     ) -> Dict[str, Any]:
         character_images = list(getattr(project, "character_reference_images", []) or [])
         scene_images = list(getattr(project, "scene_reference_images", []) or [])
-        images = character_images + scene_images
+        outfit_images = list(getattr(project, "character_outfit_images", []) or [])
+        scene_state_images = list(getattr(project, "scene_state_images", []) or [])
+        storyboard_images = list(getattr(project, "storyboard_images", []) or [])
+        images = character_images + scene_images + outfit_images + scene_state_images + storyboard_images
         serialized_character_images = self._serialize_reference_images(project, character_images, "character")
         serialized_scene_images = self._serialize_reference_images(project, scene_images, "scene")
+        serialized_outfit_images = self._serialize_reference_images(project, outfit_images, "character_outfit")
+        serialized_scene_state_images = self._serialize_reference_images(project, scene_state_images, "scene_state")
+        serialized_storyboard_images = self._serialize_reference_images(project, storyboard_images, "storyboard")
         expected_counts = self._expected_reference_counts(project)
         resolved_message = message
         if resolved_message is None and include_default_message:
@@ -636,17 +739,33 @@ class MainAgent:
             "step": "reference_image",
             "count": len(images),
             "urls": [image.url for image in images],
-            "images": serialized_character_images + serialized_scene_images,
+            "images": (
+                serialized_character_images
+                + serialized_scene_images
+                + serialized_outfit_images
+                + serialized_scene_state_images
+                + serialized_storyboard_images
+            ),
             "character_images": serialized_character_images,
             "scene_images": serialized_scene_images,
+            "character_outfit_images": serialized_outfit_images,
+            "scene_state_images": serialized_scene_state_images,
+            "storyboard_images": serialized_storyboard_images,
             "library": {
                 "characters": serialized_character_images,
                 "scenes": serialized_scene_images,
+                "character_outfits": serialized_outfit_images,
+                "scene_states": serialized_scene_state_images,
+                "storyboards": serialized_storyboard_images,
             },
+            "scene_reference_mappings": self._build_scene_reference_mappings(project),
             "ready_for_confirmation": self._is_reference_library_ready_for_confirmation(project),
             "expected_count": expected_counts["total"],
             "expected_character_count": expected_counts["characters"],
             "expected_scene_count": expected_counts["scenes"],
+            "expected_character_outfit_count": expected_counts["character_outfits"],
+            "expected_scene_state_count": expected_counts["scene_states"],
+            "expected_storyboard_count": expected_counts["storyboards"],
             "message": resolved_message,
         }
 
@@ -655,20 +774,43 @@ class MainAgent:
         project: VideoProject,
         character_images: List[Optional[GeneratedImage]],
         scene_images: List[Optional[GeneratedImage]],
+        storyboard_images: List[Optional[GeneratedImage]],
+        outfit_images: Optional[List[Optional[GeneratedImage]]] = None,
+        scene_state_images: Optional[List[Optional[GeneratedImage]]] = None,
     ) -> None:
         completed_character_images = [image for image in character_images if image is not None]
         completed_scene_images = [image for image in scene_images if image is not None]
+        completed_storyboards = [image for image in storyboard_images if image is not None]
+        completed_outfit_images = [image for image in (outfit_images or []) if image is not None]
+        completed_scene_state_images = [image for image in (scene_state_images or []) if image is not None]
         project.character_reference_images = completed_character_images
         project.scene_reference_images = completed_scene_images
+        project.character_outfit_images = completed_outfit_images
+        project.scene_state_images = completed_scene_state_images
+        project.storyboard_images = completed_storyboards
         project.reference_image_library = {
             "characters": completed_character_images,
             "scenes": completed_scene_images,
+            "character_outfits": completed_outfit_images,
+            "scene_states": completed_scene_state_images,
+            "storyboards": completed_storyboards,
         }
-        project.images = completed_character_images + completed_scene_images
+        project.scene_reference_mappings = self._build_scene_reference_mappings(project)
+        project.images = (
+            completed_character_images
+            + completed_scene_images
+            + completed_outfit_images
+            + completed_scene_state_images
+            + completed_storyboards
+        )
         project.reference_image = (
             project.character_reference_images[0]
             if project.character_reference_images
-            else (project.scene_reference_images[0] if project.scene_reference_images else None)
+            else (
+                project.scene_reference_images[0]
+                if project.scene_reference_images
+                else (project.storyboard_images[0] if project.storyboard_images else None)
+            )
         )
 
     def _start_reference_generation_session(
@@ -676,10 +818,16 @@ class MainAgent:
         project: VideoProject,
         character_count: int,
         scene_count: int,
+        storyboard_count: int,
+        outfit_count: int = 0,
+        scene_state_count: int = 0,
     ) -> Dict[str, List[Optional[GeneratedImage]]]:
         slots = {
             "characters": [None] * max(0, character_count),
             "scenes": [None] * max(0, scene_count),
+            "character_outfits": [None] * max(0, outfit_count),
+            "scene_states": [None] * max(0, scene_state_count),
+            "storyboards": [None] * max(0, storyboard_count),
         }
         self._reference_generation_slots[project.project_id] = slots
         return slots
@@ -703,7 +851,7 @@ class MainAgent:
         if reference_type == "character":
             targets = [getattr(character, "name", "") for character in (getattr(project.script, "characters", None) or [])]
         else:
-            scene_limit = max(1, int(config.get("video_generation.reference_images.scene_max_count", 40)))
+            scene_limit = max(1, int(config.get("video_generation.reference_images.scene_max_count", 30)))
             targets = [item["name"] for item in self._extract_scene_reference_definitions(project.script, scene_limit)]
 
         for index, name in enumerate(targets):
@@ -714,8 +862,126 @@ class MainAgent:
     def _build_reference_asset_task_key(self, project_id: str, reference_type: str, asset_name: str) -> str:
         return f"{project_id}:{reference_type}:{self._normalize_name_key(asset_name)}"
 
-    def _select_reference_assets_for_scene(self, project: VideoProject, scene) -> List[GeneratedImage]:
+    def _plan_scene_variant_assets(
+        self,
+        project: VideoProject,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """基于剧本分镜规划需要生成的角色装扮图与场景状态图（已去重）。
+
+        去重复用（用户确认）：
+        - 角色装扮图按 (角色名, 装扮) 去重，相同组合只生成一次。
+        - 场景状态图按 (场景名, time_of_day, weather) 去重，相同组合只生成一次。
+        触发判定（用户确认）：
+        - 角色装扮图仅当分镜装扮 != 该角色默认 clothing 时才生成。
+        - 场景状态图仅当分镜的 time_of_day/weather != 该场景定义的默认值时才生成。
+        计数仅依赖剧本，可在生成主图前提前得知；base 主图在执行时再查找。
+        """
+        script = getattr(project, "script", None)
+        scene_limit = max(1, int(config.get("video_generation.reference_images.scene_max_count", 30)))
+        character_map = {
+            self._normalize_name_key(getattr(character, "name", "")): character
+            for character in (getattr(script, "characters", None) or [])
+        }
+        scene_definition_map = {
+            self._normalize_name_key(item["name"]): item
+            for item in self._extract_scene_reference_definitions(script, scene_limit)
+        }
+
+        outfit_tasks: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        scene_state_tasks: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+
+        for scene in getattr(script, "scenes", None) or []:
+            scene_number = max(1, int(getattr(scene, "scene_number", 1) or 1))
+            outfits = getattr(scene, "character_outfits", None) or {}
+            for character_name, outfit in outfits.items():
+                outfit_desc = str(outfit or "").strip()
+                if not outfit_desc:
+                    continue
+                character_key = self._normalize_name_key(character_name)
+                character = character_map.get(character_key)
+                if character is None:
+                    continue
+                default_clothing = self._normalize_name_key(getattr(character, "clothing", "") or "")
+                if self._normalize_name_key(outfit_desc) == default_clothing and default_clothing:
+                    continue
+                dedup_key = f"{character_key}::{self._normalize_name_key(outfit_desc)}"
+                if dedup_key in outfit_tasks:
+                    continue
+                outfit_tasks[dedup_key] = {
+                    "dedup_key": dedup_key,
+                    "character": character,
+                    "character_key": character_key,
+                    "outfit": outfit_desc,
+                    "scene_number": scene_number,
+                }
+
+            scene_tod = str(getattr(scene, "time_of_day", "") or "").strip()
+            scene_weather = str(getattr(scene, "weather", "") or "").strip()
+            if not scene_tod and not scene_weather:
+                continue
+            for part in re.split(r"[、,，/|]+", str(getattr(scene, "scene_name", "") or "")):
+                scene_key = self._normalize_name_key(part)
+                definition = scene_definition_map.get(scene_key)
+                if not definition:
+                    continue
+                default_tod = self._normalize_name_key(definition.get("time_of_day", "") or "")
+                default_weather = self._normalize_name_key(definition.get("weather", "") or "")
+                if (
+                    self._normalize_name_key(scene_tod) == default_tod
+                    and self._normalize_name_key(scene_weather) == default_weather
+                ):
+                    continue
+                dedup_key = f"{scene_key}::{self._normalize_name_key(scene_tod)}::{self._normalize_name_key(scene_weather)}"
+                if dedup_key in scene_state_tasks:
+                    continue
+                scene_state_tasks[dedup_key] = {
+                    "dedup_key": dedup_key,
+                    "scene_name": str(definition.get("name") or part).strip(),
+                    "scene_key": scene_key,
+                    "scene_description": definition.get("description", ""),
+                    "time_of_day": scene_tod,
+                    "weather": scene_weather,
+                    "scene_number": scene_number,
+                }
+
+        return {
+            "outfits": list(outfit_tasks.values()),
+            "scene_states": list(scene_state_tasks.values()),
+        }
+
+    def _find_outfit_asset_for_scene(
+        self,
+        project: VideoProject,
+        character_key: str,
+        outfit_desc: str,
+    ) -> Optional[GeneratedImage]:
+        dedup_key = f"{character_key}::{self._normalize_name_key(outfit_desc)}"
+        for image in getattr(project, "character_outfit_images", []) or []:
+            if getattr(image, "variant_key", None) == dedup_key:
+                return image
+        return None
+
+    def _find_scene_state_asset(
+        self,
+        project: VideoProject,
+        scene_key: str,
+        time_of_day: str,
+        weather: str,
+    ) -> Optional[GeneratedImage]:
+        dedup_key = f"{scene_key}::{self._normalize_name_key(time_of_day)}::{self._normalize_name_key(weather)}"
+        for image in getattr(project, "scene_state_images", []) or []:
+            if getattr(image, "variant_key", None) == dedup_key:
+                return image
+        return None
+
+    def _select_base_reference_assets_for_scene(self, project: VideoProject, scene) -> List[GeneratedImage]:
         selected: List[GeneratedImage] = []
+        outfits = getattr(scene, "character_outfits", None) or {}
+        outfit_key_by_char = {
+            self._normalize_name_key(name): str(outfit or "").strip()
+            for name, outfit in outfits.items()
+            if str(outfit or "").strip()
+        }
         present_characters = [
             self._normalize_name_key(name)
             for name in (getattr(scene, "characters_present", None) or [])
@@ -724,7 +990,13 @@ class MainAgent:
         for image in getattr(project, "character_reference_images", []) or []:
             image_name = self._normalize_name_key(getattr(image, "name", ""))
             if present_characters and image_name in present_characters:
-                selected.append(image)
+                # 若该角色在本分镜有装扮图，则优先使用装扮图代替主图
+                outfit_desc = outfit_key_by_char.get(image_name)
+                outfit_image = (
+                    self._find_outfit_asset_for_scene(project, image_name, outfit_desc)
+                    if outfit_desc else None
+                )
+                selected.append(outfit_image if outfit_image is not None else image)
 
         raw_scene_name = str(getattr(scene, "scene_name", "") or "")
         scene_name_keys = [
@@ -732,11 +1004,15 @@ class MainAgent:
             for part in re.split(r"[、,，/|]+", raw_scene_name)
             if str(part).strip()
         ]
+        scene_tod = str(getattr(scene, "time_of_day", "") or "").strip()
+        scene_weather = str(getattr(scene, "weather", "") or "").strip()
         matched_scene_images = []
         for image in getattr(project, "scene_reference_images", []) or []:
             image_name = self._normalize_name_key(getattr(image, "name", ""))
             if scene_name_keys and image_name in scene_name_keys:
-                matched_scene_images.append(image)
+                # 若该场景在本分镜有状态图，则优先使用状态图代替主图
+                state_image = self._find_scene_state_asset(project, image_name, scene_tod, scene_weather)
+                matched_scene_images.append(state_image if state_image is not None else image)
         if matched_scene_images:
             selected.extend(matched_scene_images[: max(1, len(scene_name_keys))])
 
@@ -745,12 +1021,32 @@ class MainAgent:
         if not selected and getattr(project, "character_reference_images", None):
             selected.extend(project.character_reference_images[:2])
 
+        return selected
+
+    def _get_scene_level_reference_asset(
+        self,
+        project: VideoProject,
+        scene_number: int,
+    ) -> Optional[GeneratedImage]:
+        for image in getattr(project, "storyboard_images", []) or []:
+            if int(getattr(image, "scene_number", 0) or 0) == scene_number:
+                return image
+        return None
+
+    def _select_reference_assets_for_scene(self, project: VideoProject, scene) -> List[GeneratedImage]:
+        selected = self._select_base_reference_assets_for_scene(project, scene)
+        scene_number = max(1, int(getattr(scene, "scene_number", 1) or 1))
+        scene_level_image = self._get_scene_level_reference_asset(project, scene_number)
+        if scene_level_image is not None:
+            selected.append(scene_level_image)
+
         deduped: List[GeneratedImage] = []
-        seen_urls = set()
+        seen_keys = set()
         for image in selected:
-            if image.url in seen_urls:
+            unique_key = str(getattr(image, "asset_id", "") or getattr(image, "url", "") or "")
+            if not unique_key or unique_key in seen_keys:
                 continue
-            seen_urls.add(image.url)
+            seen_keys.add(unique_key)
             deduped.append(image)
         return deduped
 
@@ -810,6 +1106,11 @@ class MainAgent:
         if project:
             project.video_review_mode = self._normalize_review_mode(review_mode)
 
+    def set_project_video_generation_mode(self, project_id: str, generation_mode: Optional[str]) -> None:
+        project = self.projects.get(project_id)
+        if project and generation_mode is not None:
+            project.video_generation_mode = self._normalize_generation_mode(generation_mode)
+
     def _project_language(self, project: Optional[VideoProject], fallback: str = "zh-CN") -> str:
         return normalize_locale(getattr(project, "output_language", fallback))
 
@@ -818,6 +1119,17 @@ class MainAgent:
 
     def _normalize_review_mode(self, review_mode: Optional[str]) -> str:
         return "auto" if str(review_mode or "").strip().lower() == "auto" else "manual"
+
+    def _normalize_generation_mode(self, generation_mode: Optional[str]) -> str:
+        """归一化视频生成模式：extend=延长（串行），parallel=并行（默认）。"""
+        default_mode = str(config.get("video_generation.default_generation_mode", "parallel") or "parallel").strip().lower()
+        default_mode = "extend" if default_mode == "extend" else "parallel"
+        value = str(generation_mode or "").strip().lower()
+        if value in ("extend", "延长", "serial", "sequential"):
+            return "extend"
+        if value in ("parallel", "并行", "concurrent"):
+            return "parallel"
+        return default_mode
 
     def _ensure_video_flow_state(self, project: VideoProject, review_mode: str, reset: bool = False) -> None:
         if reset:
@@ -976,7 +1288,11 @@ class MainAgent:
             return False
         if getattr(project, "video_review_mode", "manual") != "manual":
             return False
-        if getattr(project, "character_reference_images", None) or getattr(project, "scene_reference_images", None):
+        if (
+            getattr(project, "character_reference_images", None)
+            or getattr(project, "scene_reference_images", None)
+            or getattr(project, "storyboard_images", None)
+        ):
             return False
         return getattr(project, "current_step", "") == "script_generated"
 
@@ -1110,7 +1426,11 @@ class MainAgent:
 
         try:
             # 保存参考图到项目
-            project.images = list(getattr(project, "character_reference_images", []) or []) + list(getattr(project, "scene_reference_images", []) or [])
+            project.images = (
+                list(getattr(project, "character_reference_images", []) or [])
+                + list(getattr(project, "scene_reference_images", []) or [])
+                + list(getattr(project, "storyboard_images", []) or [])
+            )
             project.current_step = "images_generated"
             self._ensure_video_flow_state(project, review_mode=review_mode, reset=not resume)
 
@@ -1133,6 +1453,34 @@ class MainAgent:
                     return project
 
             scene_index = min(project.next_scene_index, len(project.script.scenes))
+
+            generation_mode = self._normalize_generation_mode(getattr(project, "video_generation_mode", None))
+            project.video_generation_mode = generation_mode
+            logger.info(f"[FLOW] Video generation mode: {generation_mode}")
+
+            # 并行模式（默认）：各分镜互不依赖前一分镜视频，按视频生成并发数并行生成。
+            # 生成完成后 next_scene_index 推进到末尾，使下方串行 while 循环成为空操作，
+            # 直接进入统一的合成/收尾逻辑。
+            # 注意：手动审核模式需要逐个分镜暂停等待用户确认，与批量并行不兼容，
+            # 因此并行仅在自动审核模式下生效；手动模式仍走下方串行逐个分镜流程。
+            if (
+                generation_mode == "parallel"
+                and review_mode != "manual"
+                and scene_index < len(project.script.scenes)
+            ):
+                await self._run_parallel_video_generation(
+                    project=project,
+                    start_scene_index=scene_index,
+                    websocket=websocket,
+                    review_mode=review_mode,
+                    num_scenes=len(project.script.scenes),
+                    max_retries=max_auto_retries,
+                    pass_threshold=pass_threshold,
+                    max_total_generations=max_total_generations,
+                )
+                project.next_scene_index = len(project.script.scenes)
+                scene_index = len(project.script.scenes)
+
             while scene_index < len(project.script.scenes):
                 self._raise_if_project_ended(project)
                 num_scenes = len(project.script.scenes)
@@ -1155,6 +1503,7 @@ class MainAgent:
                         max_retries=max_auto_retries,
                         pass_threshold=pass_threshold,
                         max_total_generations=max_total_generations,
+                        use_previous_video=generation_mode != "parallel",
                     )
                 except SceneSkippedError:
                     if review_mode == "manual":
@@ -1253,6 +1602,80 @@ class MainAgent:
 
         return project
 
+    async def _run_parallel_video_generation(
+        self,
+        project: VideoProject,
+        start_scene_index: int,
+        websocket,
+        review_mode: str,
+        num_scenes: int,
+        max_retries: int,
+        pass_threshold: int,
+        max_total_generations: int,
+    ) -> None:
+        """并行模式：从 start_scene_index 起的所有分镜互不依赖前一分镜视频，
+        按视频生成并发数并行生成+审核，全部完成后返回。
+
+        每个分镜仍复用 `_generate_and_review_video_with_retries`，但传入
+        `use_previous_video=False`，因此参考素材只包含角色图 + 场景图 + 该分镜 storyboard，
+        不再串联前一分镜视频，从而可以并行生成以提高速度。
+        """
+        video_workers = int(config.get("generation.concurrency.video_workers", 0) or 0)
+        scene_max_concurrency = int(config.get("video_generation.scene_max_concurrency", 10) or 10)
+        if video_workers <= 0:
+            video_workers = scene_max_concurrency
+        if not config.get("generation.concurrency.enabled", True):
+            video_workers = 1
+        video_workers = max(1, video_workers)
+
+        pending_indexes = list(range(start_scene_index, num_scenes))
+        logger.info(
+            f"[FLOW] Parallel video generation: {len(pending_indexes)} scenes, "
+            f"video_workers={video_workers}"
+        )
+
+        semaphore = asyncio.Semaphore(video_workers)
+        results_lock = asyncio.Lock()
+
+        async def generate_one(scene_index: int) -> None:
+            self._raise_if_project_ended(project)
+            scene = project.script.scenes[scene_index]
+            scene_number = scene_index + 1
+            progress_base = 50 + (scene_index / max(1, num_scenes)) * 40
+            async with semaphore:
+                try:
+                    video, final_approved, _, final_score = await self._generate_and_review_video_with_retries(
+                        project=project,
+                        scene=scene,
+                        scene_number=scene_number,
+                        previous_video_url=None,
+                        websocket=websocket,
+                        review_mode=review_mode,
+                        progress_base=progress_base,
+                        num_scenes=num_scenes,
+                        max_retries=max_retries,
+                        pass_threshold=pass_threshold,
+                        max_total_generations=max_total_generations,
+                        use_previous_video=False,
+                    )
+                except SceneSkippedError:
+                    logger.warning(f"[FLOW] Parallel mode: scene {scene_number} skipped")
+                    return
+
+            async with results_lock:
+                self._upsert_project_video(project, video)
+                scene_state = self._get_scene_state(project, scene_number)
+                scene_state.completed = True
+                scene_state.approved = bool(final_approved)
+                logger.info(
+                    f"[FLOW] Scene {scene_number} completed (parallel). "
+                    f"Approved: {final_approved}, Score: {final_score}"
+                )
+
+        tasks = [asyncio.create_task(generate_one(index)) for index in pending_indexes]
+        if tasks:
+            await asyncio.gather(*tasks)
+
     async def _generate_and_review_video_with_retries(
         self,
         project: VideoProject,
@@ -1266,6 +1689,7 @@ class MainAgent:
         max_retries: int,
         pass_threshold: int,
         max_total_generations: int,
+        use_previous_video: bool = True,
     ) -> tuple:
         """
         带重试机制的视频审核
@@ -1360,8 +1784,18 @@ class MainAgent:
             )
             if scene_number == 1 and not previous_video_url:
                 logger.info("[FLOW] First scene: using reference image only")
+            elif not use_previous_video:
+                logger.info("[FLOW] Parallel mode: using reference images only (no previous-scene video)")
             else:
                 logger.info("[FLOW] Extension scene: using previous-scene last-frame image + reference images")
+
+            # 并行模式下不参考前一分镜视频，effective_previous_* 置空
+            effective_previous_video_url = previous_video_url if use_previous_video else None
+            effective_previous_scene = (
+                project.script.scenes[scene_number - 2]
+                if (use_previous_video and scene_number > 1)
+                else None
+            )
 
             try:
                 scene_state.total_generation_count = attempt_number
@@ -1373,12 +1807,16 @@ class MainAgent:
                     project_id=project.project_id,
                     reference_image=project.reference_image,
                     reference_images=self._select_reference_assets_for_scene(project, scene),
-                    previous_video_url=previous_video_url,
+                    previous_video_url=effective_previous_video_url,
                     user_style_info=getattr(project.script, "style", None) if getattr(project, "script", None) else None,
                     user_requirement_text=getattr(project, "combined_input", None),
                     resolution=getattr(project, "video_resolution", None),
                     aspect_ratio=getattr(project, "aspect_ratio", None),
-                    previous_scene=project.script.scenes[scene_number - 2] if scene_number > 1 else None,
+                    previous_scene=effective_previous_scene,
+                    characters=getattr(project.script, "characters", None),
+                    scene_definitions=getattr(project.script, "scene_definitions", None),
+                    asset_group_id=project.asset_group_id,
+                    asset_project_name=project.asset_project_name,
                 )
                 current_video = await self.archive_scene_video_async(
                     project,
@@ -1583,7 +2021,7 @@ class MainAgent:
                 self.video_review_agent.review_video,
                 script_scene_description=scene.description,
                 video_url=current_video.url,
-                previous_video_url=previous_video_url,
+                previous_video_url=effective_previous_video_url,
                 reference_image_url=project.reference_image.url,
                 output_language=project_language,
             )
@@ -1783,7 +2221,9 @@ class MainAgent:
         project.images = []
         project.character_reference_images = []
         project.scene_reference_images = []
+        project.storyboard_images = []
         project.reference_image_library = {}
+        project.scene_reference_mappings = {}
         project.videos = []
         project.final_video_url = None
         project.next_scene_index = 0
@@ -1805,9 +2245,9 @@ class MainAgent:
         character_assets = [asset for asset in uploaded_assets if asset.reference_type == "character"]
         scene_assets = [asset for asset in uploaded_assets if asset.reference_type == "scene"]
 
-        character_limit = max(1, int(config.get("video_generation.reference_images.character_max_count", 20)))
-        scene_limit = max(1, int(config.get("video_generation.reference_images.scene_max_count", 40)))
-        reference_max_concurrency = max(1, int(config.get("video_generation.reference_images.max_concurrency", 5)))
+        character_limit = max(1, int(config.get("video_generation.reference_images.character_max_count", 30)))
+        scene_limit = max(1, int(config.get("video_generation.reference_images.scene_max_count", 30)))
+        reference_max_concurrency = max(1, int(config.get("video_generation.reference_images.max_concurrency", 10)))
         if not config.get("generation.concurrency.enabled", True):
             reference_max_concurrency = 1
         target_characters = list((getattr(project.script, "characters", None) or [])[:character_limit])
@@ -1821,9 +2261,14 @@ class MainAgent:
             [item["name"] for item in scene_definitions],
         )
 
+        variant_plan = self._plan_scene_variant_assets(project)
+        outfit_tasks_plan = variant_plan["outfits"]
+        scene_state_tasks_plan = variant_plan["scene_states"]
+
         logger.info(
             f"Reference library target for project {project.project_id}: "
             f"{len(target_characters)} character refs, {len(scene_definitions)} scene refs, "
+            f"{len(outfit_tasks_plan)} outfit refs, {len(scene_state_tasks_plan)} scene-state refs, "
             f"max_concurrency={reference_max_concurrency}"
         )
 
@@ -1831,11 +2276,27 @@ class MainAgent:
             project,
             character_count=len(target_characters),
             scene_count=len(scene_definitions),
+            storyboard_count=len(getattr(project.script, "scenes", None) or []),
+            outfit_count=len(outfit_tasks_plan),
+            scene_state_count=len(scene_state_tasks_plan),
         )
         generated_character_images = session_slots["characters"]
         generated_scene_images = session_slots["scenes"]
+        generated_outfit_images = session_slots["character_outfits"]
+        generated_scene_state_images = session_slots["scene_states"]
+        generated_storyboard_images = session_slots["storyboards"]
         semaphore = asyncio.Semaphore(reference_max_concurrency)
         progress_lock = asyncio.Lock()
+
+        def _sync_all() -> None:
+            self._sync_reference_library_state(
+                project,
+                generated_character_images,
+                generated_scene_images,
+                generated_storyboard_images,
+                outfit_images=generated_outfit_images,
+                scene_state_images=generated_scene_state_images,
+            )
 
         async def finalize_generated_image(
             category: str,
@@ -1846,9 +2307,15 @@ class MainAgent:
             async with progress_lock:
                 if category == "character":
                     generated_character_images[index] = stored_image
-                else:
+                elif category == "scene":
                     generated_scene_images[index] = stored_image
-                self._sync_reference_library_state(project, generated_character_images, generated_scene_images)
+                elif category == "character_outfit":
+                    generated_outfit_images[index] = stored_image
+                elif category == "scene_state":
+                    generated_scene_state_images[index] = stored_image
+                else:
+                    generated_storyboard_images[index] = stored_image
+                _sync_all()
                 if progress_callback:
                     await progress_callback(project)
 
@@ -1910,9 +2377,99 @@ class MainAgent:
                         user_style_info=user_style_info,
                         aspect_ratio=aspect_ratio,
                         user_reference_images=matched_urls or None,
+                        scene_features=scene_definition.get("scene_features"),
+                        time_of_day=scene_definition.get("time_of_day"),
+                        weather=scene_definition.get("weather"),
                     )
                     stored = await self._store_reference_asset_async(project, generated, "scene", scene_name, index)
             await finalize_generated_image("scene", index, stored)
+
+        def _find_character_base_image(character_key: str) -> Optional[GeneratedImage]:
+            for image in generated_character_images:
+                if image is not None and self._normalize_name_key(getattr(image, "name", "")) == character_key:
+                    return image
+            return None
+
+        def _find_scene_base_image(scene_key: str) -> Optional[GeneratedImage]:
+            for image in generated_scene_images:
+                if image is not None and self._normalize_name_key(getattr(image, "name", "")) == scene_key:
+                    return image
+            return None
+
+        async def generate_outfit_job(index: int, task: Dict[str, Any]) -> None:
+            self._raise_if_project_ended(project)
+            base_image = _find_character_base_image(task["character_key"])
+            if base_image is None:
+                logger.warning(
+                    "No base character image found for outfit variant %s; skipping",
+                    task["dedup_key"],
+                )
+                return
+            async with semaphore:
+                generated = await asyncio.to_thread(
+                    self.image_agent.generate_character_outfit_image,
+                    character=task["character"],
+                    outfit=task["outfit"],
+                    base_reference_image=base_image,
+                    script=project.script,
+                    user_style_info=user_style_info,
+                    aspect_ratio=aspect_ratio,
+                )
+                generated.variant_key = task["dedup_key"]
+                stored = await self._store_reference_asset_async(
+                    project, generated, "character_outfit", generated.name or f"outfit_{index + 1:02d}", index
+                )
+                stored.variant_key = task["dedup_key"]
+            await finalize_generated_image("character_outfit", index, stored)
+
+        async def generate_scene_state_job(index: int, task: Dict[str, Any]) -> None:
+            self._raise_if_project_ended(project)
+            base_image = _find_scene_base_image(task["scene_key"])
+            if base_image is None:
+                logger.warning(
+                    "No base scene image found for scene-state variant %s; skipping",
+                    task["dedup_key"],
+                )
+                return
+            async with semaphore:
+                generated = await asyncio.to_thread(
+                    self.image_agent.generate_scene_state_image,
+                    scene_name=task["scene_name"],
+                    base_reference_image=base_image,
+                    script=project.script,
+                    time_of_day=task.get("time_of_day"),
+                    weather=task.get("weather"),
+                    scene_description=task.get("scene_description"),
+                    user_style_info=user_style_info,
+                    aspect_ratio=aspect_ratio,
+                )
+                generated.variant_key = task["dedup_key"]
+                stored = await self._store_reference_asset_async(
+                    project, generated, "scene_state", generated.name or f"scene_state_{index + 1:02d}", index
+                )
+                stored.variant_key = task["dedup_key"]
+            await finalize_generated_image("scene_state", index, stored)
+
+        async def generate_storyboard_job(index: int, scene) -> None:
+            self._raise_if_project_ended(project)
+            base_reference_images = self._select_base_reference_assets_for_scene(project, scene)
+            async with semaphore:
+                storyboard = await self._generate_storyboard_with_review(
+                    project=project,
+                    scene=scene,
+                    reference_images=base_reference_images,
+                    user_style_info=user_style_info,
+                    aspect_ratio=aspect_ratio,
+                    scene_number=index + 1,
+                )
+                stored_storyboard = await self._store_reference_asset_async(
+                    project,
+                    storyboard,
+                    "storyboard",
+                    storyboard.name or f"scene_{index + 1:02d}_storyboard",
+                    index,
+                )
+            await finalize_generated_image("storyboard", index, stored_storyboard)
 
         tasks = [
             asyncio.create_task(generate_character_job(index, character))
@@ -1926,10 +2483,34 @@ class MainAgent:
             if tasks:
                 await asyncio.gather(*tasks)
 
-            self._sync_reference_library_state(project, generated_character_images, generated_scene_images)
+            _sync_all()
 
             if not project.reference_image:
                 raise RuntimeError("No reference images were generated")
+
+            # 所有角色主图 + 场景主图生成完成后，再按每个分镜的角色装扮 / 场景状态信息，
+            # 生成角色装扮图与场景状态图（已去重复用）。并行生成，受 max_concurrency 控制。
+            variant_tasks = [
+                asyncio.create_task(generate_outfit_job(index, task))
+                for index, task in enumerate(outfit_tasks_plan)
+            ] + [
+                asyncio.create_task(generate_scene_state_job(index, task))
+                for index, task in enumerate(scene_state_tasks_plan)
+            ]
+            if variant_tasks:
+                await asyncio.gather(*variant_tasks)
+                _sync_all()
+
+            # 所有角色图（含装扮图）+ 场景图（含状态图）生成完成后，再逐个分镜生成 6 宫格 storyboard。
+            # 多个分镜的 storyboard 并行生成，并发数由参考图库配置的 max_concurrency（semaphore）控制。
+            storyboard_tasks = [
+                asyncio.create_task(generate_storyboard_job(index, scene))
+                for index, scene in enumerate(getattr(project.script, "scenes", None) or [])
+            ]
+            if storyboard_tasks:
+                await asyncio.gather(*storyboard_tasks)
+
+            _sync_all()
 
             return project.reference_image
         finally:
@@ -1938,7 +2519,11 @@ class MainAgent:
     def _reset_reference_library_state(self, project: VideoProject) -> None:
         project.character_reference_images = []
         project.scene_reference_images = []
+        project.character_outfit_images = []
+        project.scene_state_images = []
+        project.storyboard_images = []
         project.reference_image_library = {}
+        project.scene_reference_mappings = {}
         project.images = []
         project.reference_image = None
 
@@ -2090,7 +2675,7 @@ class MainAgent:
                     (
                         item for item in self._extract_scene_reference_definitions(
                             project.script,
-                            max(1, int(config.get("video_generation.reference_images.scene_max_count", 40))),
+                            max(1, int(config.get("video_generation.reference_images.scene_max_count", 30))),
                         )
                         if self._normalize_name_key(item["name"]) == self._normalize_name_key(normalized_name)
                     ),
@@ -2126,24 +2711,362 @@ class MainAgent:
                 else:
                     if slot_index < len(session_slots["scenes"]):
                         session_slots["scenes"][slot_index] = stored
-                self._sync_reference_library_state(project, session_slots["characters"], session_slots["scenes"])
+                self._sync_reference_library_state(
+                    project,
+                    session_slots["characters"],
+                    session_slots["scenes"],
+                    session_slots.get("storyboards", []),
+                    outfit_images=session_slots.get("character_outfits", []),
+                    scene_state_images=session_slots.get("scene_states", []),
+                )
             else:
                 image_list[image_index] = stored
                 if reference_type == "character":
                     project.reference_image_library["characters"] = project.character_reference_images
                 else:
                     project.reference_image_library["scenes"] = project.scene_reference_images
-                project.images = list(getattr(project, "character_reference_images", []) or []) + list(getattr(project, "scene_reference_images", []) or [])
+                project.scene_reference_mappings = self._build_scene_reference_mappings(project)
+                project.images = (
+                    list(getattr(project, "character_reference_images", []) or [])
+                    + list(getattr(project, "scene_reference_images", []) or [])
+                    + list(getattr(project, "character_outfit_images", []) or [])
+                    + list(getattr(project, "scene_state_images", []) or [])
+                    + list(getattr(project, "storyboard_images", []) or [])
+                )
                 project.reference_image = (
                     project.character_reference_images[0]
                     if project.character_reference_images
-                    else (project.scene_reference_images[0] if project.scene_reference_images else None)
+                    else (
+                        project.scene_reference_images[0]
+                        if project.scene_reference_images
+                        else (project.storyboard_images[0] if project.storyboard_images else None)
+                    )
                 )
             return stored
 
         regeneration_task = asyncio.create_task(
             run_regeneration(),
             name=f"reference-regeneration:{task_key}",
+        )
+        self._reference_asset_regeneration_tasks[task_key] = regeneration_task
+        try:
+            return await asyncio.shield(regeneration_task)
+        finally:
+            if self._reference_asset_regeneration_tasks.get(task_key) is regeneration_task:
+                self._reference_asset_regeneration_tasks.pop(task_key, None)
+
+    async def regenerate_variant_asset(
+        self,
+        project: VideoProject,
+        reference_type: str,
+        variant_key: str,
+        feedback: str = "用户要求重新生成",
+    ) -> GeneratedImage:
+        """重新生成指定的角色装扮图或场景状态图（按 variant_key 定位并保留去重复用）。"""
+        self._raise_if_project_ended(project)
+        reference_type = str(reference_type or "").strip().lower()
+        variant_key = str(variant_key or "").strip()
+        if reference_type not in {"character_outfit", "scene_state"}:
+            raise ValueError(self._t(project, "error.unsupported_reference_type", reference_type=reference_type or "unknown"))
+        if not variant_key:
+            raise ValueError(self._t(project, "error.reference_asset_name_required"))
+
+        image_list = (
+            project.character_outfit_images
+            if reference_type == "character_outfit"
+            else project.scene_state_images
+        )
+        target_index = next(
+            (
+                index for index, image in enumerate(image_list)
+                if getattr(image, "variant_key", None) == variant_key
+            ),
+            -1,
+        )
+        if target_index < 0:
+            raise ValueError(
+                self._t(
+                    project,
+                    "error.reference_asset_not_found",
+                    reference_type=reference_type,
+                    name=variant_key,
+                )
+            )
+
+        task_key = self._build_reference_asset_task_key(project.project_id, reference_type, variant_key)
+        active_task = self._reference_asset_regeneration_tasks.get(task_key)
+        if active_task and not active_task.done():
+            return await asyncio.shield(active_task)
+
+        async def run_regeneration() -> GeneratedImage:
+            self._raise_if_project_ended(project)
+            user_style_info = getattr(project, "combined_input", None)
+            aspect_ratio = getattr(project, "aspect_ratio", None)
+            variant_plan = self._plan_scene_variant_assets(project)
+
+            if reference_type == "character_outfit":
+                task = next(
+                    (item for item in variant_plan.get("outfits", []) if item["dedup_key"] == variant_key),
+                    None,
+                )
+                if task is None:
+                    raise ValueError(
+                        self._t(project, "error.reference_asset_not_found", reference_type=reference_type, name=variant_key)
+                    )
+                base_image = next(
+                    (
+                        image for image in (getattr(project, "character_reference_images", []) or [])
+                        if self._normalize_name_key(getattr(image, "name", "")) == task["character_key"]
+                    ),
+                    None,
+                )
+                if base_image is None:
+                    raise ValueError(self._t(project, "error.reference_character_not_found", name=variant_key))
+                generated = await asyncio.to_thread(
+                    self.image_agent.generate_character_outfit_image,
+                    character=task["character"],
+                    outfit=task["outfit"],
+                    base_reference_image=base_image,
+                    script=project.script,
+                    user_style_info=user_style_info,
+                    aspect_ratio=aspect_ratio,
+                )
+                generated.variant_key = variant_key
+                stored = await self._store_reference_asset_async(
+                    project, generated, "character_outfit", generated.name or f"outfit_{target_index + 1:02d}", target_index
+                )
+            else:
+                task = next(
+                    (item for item in variant_plan.get("scene_states", []) if item["dedup_key"] == variant_key),
+                    None,
+                )
+                if task is None:
+                    raise ValueError(
+                        self._t(project, "error.reference_asset_not_found", reference_type=reference_type, name=variant_key)
+                    )
+                base_image = next(
+                    (
+                        image for image in (getattr(project, "scene_reference_images", []) or [])
+                        if self._normalize_name_key(getattr(image, "name", "")) == task["scene_key"]
+                    ),
+                    None,
+                )
+                if base_image is None:
+                    raise ValueError(self._t(project, "error.reference_scene_not_found", name=variant_key))
+                generated = await asyncio.to_thread(
+                    self.image_agent.generate_scene_state_image,
+                    scene_name=task["scene_name"],
+                    base_reference_image=base_image,
+                    script=project.script,
+                    time_of_day=task.get("time_of_day"),
+                    weather=task.get("weather"),
+                    scene_description=task.get("scene_description"),
+                    user_style_info=user_style_info,
+                    aspect_ratio=aspect_ratio,
+                )
+                generated.variant_key = variant_key
+                stored = await self._store_reference_asset_async(
+                    project, generated, "scene_state", generated.name or f"scene_state_{target_index + 1:02d}", target_index
+                )
+            stored.variant_key = variant_key
+
+            if reference_type == "character_outfit":
+                outfit_images = list(getattr(project, "character_outfit_images", []) or [])
+                if 0 <= target_index < len(outfit_images):
+                    outfit_images[target_index] = stored
+                scene_state_images = list(getattr(project, "scene_state_images", []) or [])
+            else:
+                scene_state_images = list(getattr(project, "scene_state_images", []) or [])
+                if 0 <= target_index < len(scene_state_images):
+                    scene_state_images[target_index] = stored
+                outfit_images = list(getattr(project, "character_outfit_images", []) or [])
+
+            self._sync_reference_library_state(
+                project,
+                list(getattr(project, "character_reference_images", []) or []),
+                list(getattr(project, "scene_reference_images", []) or []),
+                list(getattr(project, "storyboard_images", []) or []),
+                outfit_images=outfit_images,
+                scene_state_images=scene_state_images,
+            )
+            return stored
+
+        regeneration_task = asyncio.create_task(
+            run_regeneration(),
+            name=f"variant-regeneration:{task_key}",
+        )
+        self._reference_asset_regeneration_tasks[task_key] = regeneration_task
+        try:
+            return await asyncio.shield(regeneration_task)
+        finally:
+            if self._reference_asset_regeneration_tasks.get(task_key) is regeneration_task:
+                self._reference_asset_regeneration_tasks.pop(task_key, None)
+
+    def _build_character_gender_map(self, project: VideoProject) -> Dict[str, str]:
+        """构建 角色名 -> 性别 映射，供故事版审核判断性别是否画错。"""
+        gender_map: Dict[str, str] = {}
+        for character in getattr(getattr(project, "script", None), "characters", None) or []:
+            name = str(getattr(character, "name", "") or "").strip()
+            gender = str(getattr(character, "gender", "") or "").strip()
+            if name:
+                gender_map[name] = gender
+        return gender_map
+
+    async def _generate_storyboard_with_review(
+        self,
+        project: VideoProject,
+        scene,
+        reference_images: List[GeneratedImage],
+        user_style_info: Optional[str],
+        aspect_ratio: Optional[str],
+        websocket=None,
+        scene_number: Optional[int] = None,
+    ) -> GeneratedImage:
+        """生成单个分镜的 6 宫格故事版，并按 3 条件自动审核 + 自动重生成。
+
+        审核 3 条件（任一不满足即重生成）：白描 6 宫格 / 同一角色不重复 / 性别正确。
+        重生成次数上限参考视频重试逻辑，由 `storyboard_review.max_retries` 控制。
+        """
+        review_enabled = bool(config.get('storyboard_review.enabled', True))
+        review_mode = str(config.get('storyboard_review.default_mode', 'auto') or 'auto').strip().lower()
+        max_retries = max(0, int(config.get('storyboard_review.max_retries', 2)))
+        # 总生成次数 = 首次 + 最多 max_retries 次重生成
+        max_attempts = max_retries + 1
+
+        project_language = self._project_language(project)
+        gender_map = self._build_character_gender_map(project)
+        characters_present = list(getattr(scene, "characters_present", None) or [])
+        scene_desc = str(getattr(scene, "description", "") or "")
+        scene_no = int(scene_number if scene_number is not None else (getattr(scene, "scene_number", 0) or 0))
+
+        generated: Optional[GeneratedImage] = None
+        for attempt in range(1, max_attempts + 1):
+            self._raise_if_project_ended(project)
+            generated = await asyncio.to_thread(
+                self.image_agent.generate_scene_storyboard_image,
+                scene=scene,
+                script=project.script,
+                reference_images=reference_images,
+                user_style_info=user_style_info,
+                aspect_ratio=aspect_ratio,
+            )
+
+            if not review_enabled or review_mode != "auto":
+                return generated
+
+            self._raise_if_project_ended(project)
+            approved, feedback = await asyncio.to_thread(
+                self.storyboard_review_agent.review_storyboard,
+                image_url=generated.url,
+                scene_description=scene_desc,
+                characters_present=characters_present,
+                character_gender_map=gender_map,
+                output_language=project_language,
+            )
+            logger.info(
+                f"[SB_REVIEW] Scene {scene_no} storyboard review attempt {attempt}/{max_attempts}: "
+                f"approved={approved}"
+            )
+            if websocket is not None:
+                await self._send_agent_output(websocket, "storyboard_review_agent", {
+                    "scene_number": scene_no,
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "approved": bool(approved),
+                    "feedback": feedback,
+                })
+
+            if approved or attempt >= max_attempts:
+                if not approved:
+                    logger.warning(
+                        f"[SB_REVIEW] Scene {scene_no} storyboard still not approved after "
+                        f"{max_attempts} attempts, keeping last result"
+                    )
+                return generated
+            logger.info(f"[SB_REVIEW] Scene {scene_no} storyboard rejected, regenerating (attempt {attempt + 1})")
+
+        return generated
+
+    async def regenerate_storyboard_asset(
+        self,
+        project: VideoProject,
+        scene_number: int,
+        feedback: str = "用户要求重新生成",
+    ) -> GeneratedImage:
+        """重新生成指定分镜的 6 宫格故事版图片（参考该分镜的角色图 + 场景图 + 分镜内容）。"""
+        self._raise_if_project_ended(project)
+        scene_number = int(scene_number or 0)
+        scenes = list(getattr(getattr(project, "script", None), "scenes", None) or [])
+        target_scene = next(
+            (
+                scene for scene in scenes
+                if int(getattr(scene, "scene_number", 0) or 0) == scene_number
+            ),
+            None,
+        )
+        if target_scene is None and 1 <= scene_number <= len(scenes):
+            target_scene = scenes[scene_number - 1]
+        if target_scene is None:
+            raise ValueError(
+                self._t(
+                    project,
+                    "error.reference_asset_not_found",
+                    reference_type="storyboard",
+                    name=str(scene_number),
+                )
+            )
+
+        task_key = self._build_reference_asset_task_key(project.project_id, "storyboard", str(scene_number))
+        active_task = self._reference_asset_regeneration_tasks.get(task_key)
+        if active_task and not active_task.done():
+            return await asyncio.shield(active_task)
+
+        async def run_regeneration() -> GeneratedImage:
+            self._raise_if_project_ended(project)
+            index = scene_number - 1 if scene_number >= 1 else 0
+            base_reference_images = self._select_base_reference_assets_for_scene(project, target_scene)
+            user_style_info = getattr(project, "combined_input", None)
+            aspect_ratio = getattr(project, "aspect_ratio", None)
+
+            generated = await self._generate_storyboard_with_review(
+                project=project,
+                scene=target_scene,
+                reference_images=base_reference_images,
+                user_style_info=user_style_info,
+                aspect_ratio=aspect_ratio,
+                scene_number=scene_number,
+            )
+            stored = await self._store_reference_asset_async(
+                project,
+                generated,
+                "storyboard",
+                generated.name or f"scene_{index + 1:02d}_storyboard",
+                index,
+            )
+
+            # 用新故事版替换现有列表中同分镜的条目。
+            storyboards = list(getattr(project, "storyboard_images", []) or [])
+            replaced = False
+            for i, image in enumerate(storyboards):
+                if int(getattr(image, "scene_number", 0) or 0) == scene_number:
+                    storyboards[i] = stored
+                    replaced = True
+                    break
+            if not replaced:
+                storyboards.append(stored)
+            self._sync_reference_library_state(
+                project,
+                list(getattr(project, "character_reference_images", []) or []),
+                list(getattr(project, "scene_reference_images", []) or []),
+                storyboards,
+                outfit_images=list(getattr(project, "character_outfit_images", []) or []),
+                scene_state_images=list(getattr(project, "scene_state_images", []) or []),
+            )
+            return stored
+
+        regeneration_task = asyncio.create_task(
+            run_regeneration(),
+            name=f"storyboard-regeneration:{task_key}",
         )
         self._reference_asset_regeneration_tasks[task_key] = regeneration_task
         try:
@@ -2217,6 +3140,10 @@ class MainAgent:
             user_requirement_text=getattr(project, "combined_input", None),
             resolution=getattr(project, "video_resolution", None),
             aspect_ratio=getattr(project, "aspect_ratio", None),
+            characters=getattr(project.script, "characters", None),
+            scene_definitions=getattr(project.script, "scene_definitions", None),
+            asset_group_id=project.asset_group_id,
+            asset_project_name=project.asset_project_name,
         )
         # 更新项目中的视频
         for i, vid in enumerate(project.videos):

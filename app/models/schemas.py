@@ -42,14 +42,22 @@ class Scene(BaseModel):
     character_description: str
     voice_description: str
     mood: str
+    time_of_day: str = ""
+    weather: str = ""
     camera_angle: Optional[str] = None
     characters_present: Optional[List[str]] = None  # 该分镜中出现的角色列表（可以是多个、单个、空列表）
+    # 每个出场角色在本分镜中的装扮描述，如 {"林晚": "舞会盛装", "陈默": "身穿盔甲"}
+    # 仅当角色装扮与其默认装扮(Character.clothing)不同时才需要给出对应条目
+    character_outfits: Optional[Dict[str, str]] = None
 
 
 class SceneDefinition(BaseModel):
     """布景设定"""
     name: str
     description: str
+    time_of_day: str = ""
+    weather: str = ""
+    scene_features: List[str] = Field(default_factory=list)
 
 
 class Character(BaseModel):
@@ -80,7 +88,8 @@ class GeneratedImage(BaseModel):
     url: str
     prompt: str
     name: Optional[str] = None
-    reference_type: Optional[Literal["character", "scene", "first_frame"]] = None
+    reference_type: Optional[Literal["character", "scene", "character_outfit", "scene_state", "storyboard"]] = None
+    variant_key: Optional[str] = None  # 装扮图/场景状态图去重键，如 "角色key::装扮key" 或 "场景key::时间key::天气key"
     source: str = "generated"
     used_original: bool = False
     is_end_frame: bool = False
@@ -153,7 +162,11 @@ class VideoProject(BaseModel):
     uploaded_reference_images: List[UploadedReferenceImage] = Field(default_factory=list)
     character_reference_images: List[GeneratedImage] = Field(default_factory=list)
     scene_reference_images: List[GeneratedImage] = Field(default_factory=list)
-    reference_image_library: Dict[str, List[GeneratedImage]] = Field(default_factory=dict)
+    character_outfit_images: List[GeneratedImage] = Field(default_factory=list)
+    scene_state_images: List[GeneratedImage] = Field(default_factory=list)
+    storyboard_images: List[GeneratedImage] = Field(default_factory=list)
+    reference_image_library: Dict[str, Any] = Field(default_factory=dict)
+    scene_reference_mappings: Dict[int, Dict[str, Any]] = Field(default_factory=dict)
     task_tos_prefix: Optional[str] = None
     task_temp_dir: Optional[str] = None
     asset_group_id: Optional[str] = None
@@ -164,6 +177,8 @@ class VideoProject(BaseModel):
     # 两步图片生成相关字段
     reference_image: Optional[GeneratedImage] = None  # 参考图库主图
     video_review_mode: str = "manual"
+    # 视频生成模式：extend=延长（串行，参考前一分镜视频），parallel=并行（默认，各分镜独立并行生成）
+    video_generation_mode: str = "parallel"
     next_scene_index: int = 0
     video_scene_states: Dict[int, VideoSceneState] = Field(default_factory=dict)
     generated_video_seeds: List[str] = Field(default_factory=list)

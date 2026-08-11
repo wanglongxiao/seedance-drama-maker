@@ -5,15 +5,11 @@
 import time
 import random
 import re
-import uuid
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.config import config
 from app.services.llm_service import llm_service
-from app.services.ffmpeg_service import ffmpeg_service
-from app.services.tos_service import tos_service
 from app.utils.logger import get_logger
-from app.utils.task_paths import ensure_project_temp_subdir
 from app.models.schemas import Script, GeneratedImage, GeneratedVideo
 
 logger = get_logger("video_agent")
@@ -25,11 +21,11 @@ class VideoAgent:
     def __init__(self):
         self.model = config.get('models.video.endpoint')
         self.poll_interval = config.get('limits.video_poll_interval', 20)
-        # 视频生成最大等待时间：600秒（10分钟）
-        self.max_wait_time = 600
+        # 视频生成最大等待时间：读取配置，默认 900 秒（15分钟）
+        self.max_wait_time = int(config.get('limits.video_max_wait_time', 900))
         # 从 yaml 配置读取分镜时长范围（当无法从剧本解析时使用）
-        self.default_duration_min = config.get('video_generation.scene_duration.min', 8)
-        self.default_duration_max = config.get('video_generation.scene_duration.max', 15)
+        self.default_duration_min = config.get('video_generation.scene_duration.min', 10)
+        self.default_duration_max = config.get('video_generation.scene_duration.max', 30)
         # 视频分辨率 (480p, 720p)，默认使用 480p
         self.default_resolution = config.get('video_generation.default_resolution', '480p')
         self.resolution_options = config.get('video_generation.resolution_options', ['480p', '720p'])
@@ -40,7 +36,7 @@ class VideoAgent:
         self.max_workers = int(
             config.get(
                 'video_generation.scene_max_concurrency',
-                config.get('generation.concurrency.video_workers', 6)
+                config.get('generation.concurrency.video_workers', 10)
             )
         )
         # 参考图URL（用于人物一致性）
@@ -102,7 +98,7 @@ class VideoAgent:
         resolution = (resolution or "").strip().lower() or self._parse_resolution(user_style_info)
 
         # 保存参考图URL用于人物一致性
-        self.reference_image_url = reference_image.url if reference_image else None
+        self.reference_image_url = self._get_generation_reference_url(reference_image)
 
         logger.log_agent_call("VideoAgent", "generate_videos", {
             "num_scenes": len(script.scenes),
@@ -127,6 +123,7 @@ class VideoAgent:
             prompt = self._build_video_prompt(
                 scene=scene,
                 characters=script.characters,
+                scene_definitions=script.scene_definitions,
                 user_style_info=user_style_info,
                 duration=duration,
                 scene_index=i,
@@ -209,6 +206,10 @@ class VideoAgent:
         resolution: str = None,
         aspect_ratio: str = None,
         previous_scene=None,
+        characters=None,
+        scene_definitions=None,
+        asset_group_id: Optional[str] = None,
+        asset_project_name: Optional[str] = None,
     ) -> GeneratedVideo:
         """
         基于前一个视频生成延伸视频
@@ -231,15 +232,7 @@ class VideoAgent:
             生成的视频
         """
         scene_number = scene_index + 1
-        use_previous_last_frame = self._should_use_previous_last_frame(
-            previous_scene=previous_scene,
-            current_scene=scene,
-            previous_video_url=previous_video_url,
-        )
         prepared_reference_images = self._prepare_reference_images_for_generation(
-            project_id=project_id,
-            scene_number=scene_number,
-            previous_video_url=previous_video_url if use_previous_last_frame else None,
             reference_images=reference_images,
             fallback_reference_image=reference_image,
         )
@@ -260,19 +253,20 @@ class VideoAgent:
         # 构建视频生成提示词
         prompt = self._build_video_prompt(
             scene=scene,
-            characters=None,  # 可以从scene获取
+            characters=characters,
+            scene_definitions=scene_definitions,
             reference_images=prepared_reference_images,
-            has_previous_video=use_previous_last_frame,
             user_style_info=user_style_info,
             user_requirement_text=user_requirement_text,
             duration=duration,
             scene_index=scene_index,
             total_scenes=total_scenes,
+            previous_video_url=previous_video_url,
         )
 
         logger.info(
-            f"Scene {scene_number}: Generating video with "
-            f"{'previous last-frame image + reference images' if use_previous_last_frame else 'reference images only'}"
+            f"Scene {scene_number}: Generating video with reference images"
+            f"{' + previous-scene video (extend mode)' if previous_video_url else ''}"
         )
 
         task_id = self._create_video_task_with_references(
@@ -281,6 +275,7 @@ class VideoAgent:
             duration=duration,
             resolution=resolution,
             aspect_ratio=aspect_ratio,
+            previous_video_url=previous_video_url,
         )
 
         logger.info(f"Scene {scene_number}: Created video task, task_id={task_id}")
@@ -315,11 +310,12 @@ class VideoAgent:
     def _get_generation_reference_url(self, image: Optional[GeneratedImage]) -> Optional[str]:
         if image is None:
             return None
-        reference_type = str(getattr(image, "reference_type", "") or "").strip().lower()
         asset_id = str(getattr(image, "asset_id", "") or "").strip()
-        if reference_type == "character" and asset_id:
-            return f"asset://{asset_id}"
-        return getattr(image, "url", None)
+        if not asset_id:
+            reference_type = str(getattr(image, "reference_type", "") or "reference").strip().lower()
+            name = str(getattr(image, "name", "") or getattr(image, "url", "") or reference_type)
+            raise ValueError(f"Reference image is missing asset_id: {reference_type} {name}")
+        return f"asset://{asset_id}"
 
     def _primary_reference_source_url(
         self,
@@ -339,13 +335,23 @@ class VideoAgent:
         duration: int,
         resolution: str,
         aspect_ratio: str,
+        previous_video_url: str = None,
     ) -> str:
         content = [{"type": "text", "text": prompt}]
         for url in reference_image_urls:
+            if not str(url).startswith("asset://"):
+                raise ValueError(f"Video generation only accepts asset references, got: {url}")
             content.append({
                 "type": "image_url",
                 "role": "reference_image",
                 "image_url": {"url": url},
+            })
+        # 延长模式：附加前一分镜的生成视频作为 reference_video，保证画面连续过渡。
+        if previous_video_url:
+            content.append({
+                "type": "video_url",
+                "role": "reference_video",
+                "video_url": {"url": previous_video_url},
             })
         return llm_service.create_video_task_with_content(
             model=self.model,
@@ -357,20 +363,10 @@ class VideoAgent:
 
     def _prepare_reference_images_for_generation(
         self,
-        project_id: str,
-        scene_number: int,
-        previous_video_url: Optional[str],
         reference_images: Optional[List[GeneratedImage]],
         fallback_reference_image: Optional[GeneratedImage] = None,
     ) -> List[GeneratedImage]:
         prepared: List[GeneratedImage] = []
-        if previous_video_url and scene_number > 1:
-            first_frame_image = self._extract_and_upload_previous_last_frame(
-                project_id=project_id,
-                scene_number=scene_number,
-                previous_video_url=previous_video_url,
-            )
-            prepared.append(first_frame_image)
 
         deduped_images = []
         seen_urls = set()
@@ -400,86 +396,6 @@ class VideoAgent:
             keys.append(key)
         return keys
 
-    def _scene_transition_keywords_present(self, text: str) -> bool:
-        normalized = str(text or "").strip().lower()
-        if not normalized:
-            return False
-        keywords = [
-            "随着", "随后", "接着", "紧接着", "下一刻", "片刻后", "与此同时", "此时",
-            "画面切换", "镜头转向", "镜头跟随", "切换至", "转场", "然后", "接下来",
-            "随即", "延续", "继续", "跟着", "the camera", "cut to", "then", "meanwhile",
-            "moments later", "next",
-        ]
-        return any(keyword in normalized for keyword in keywords)
-
-    def _scene_character_keys(self, scene) -> set:
-        keys = set()
-        for name in getattr(scene, "characters_present", None) or []:
-            key = re.sub(r"\s+", "", str(name or "").strip().lower())
-            key = re.sub(r"[^0-9a-z\u4e00-\u9fff_-]+", "", key)
-            if key:
-                keys.add(key)
-        return keys
-
-    def _should_use_previous_last_frame(
-        self,
-        previous_scene,
-        current_scene,
-        previous_video_url: Optional[str],
-    ) -> bool:
-        if not previous_video_url or previous_scene is None or current_scene is None:
-            return False
-
-        previous_scene_keys = set(self._split_scene_name_keys(getattr(previous_scene, "scene_name", "")))
-        current_scene_keys = set(self._split_scene_name_keys(getattr(current_scene, "scene_name", "")))
-        has_shared_backdrop = bool(previous_scene_keys.intersection(current_scene_keys))
-        if not has_shared_backdrop:
-            logger.info("Skip previous-scene last-frame reference: no shared backdrop between adjacent scenes")
-            return False
-
-        previous_description = str(getattr(previous_scene, "description", "") or "")
-        current_description = str(getattr(current_scene, "description", "") or "")
-        previous_has_transition_cue = self._scene_transition_keywords_present(previous_description)
-        current_has_transition_cue = self._scene_transition_keywords_present(current_description)
-        shared_characters = bool(self._scene_character_keys(previous_scene).intersection(self._scene_character_keys(current_scene)))
-        looks_continuous = current_has_transition_cue or (shared_characters and previous_has_transition_cue)
-        if not looks_continuous:
-            logger.info("Skip previous-scene last-frame reference: adjacent scenes do not look continuous enough")
-            return False
-
-        return True
-
-    def _extract_and_upload_previous_last_frame(
-        self,
-        project_id: str,
-        scene_number: int,
-        previous_video_url: str,
-    ) -> GeneratedImage:
-        work_dir = ensure_project_temp_subdir(project_id, "video_first_frames")
-        revision = uuid.uuid4().hex[:8]
-        local_filename = f"scene_{scene_number:02d}_prev_last_frame_{revision}.png"
-        local_path = ffmpeg_service.extract_last_frame_from_video_url(
-            video_url=previous_video_url,
-            output_filename=local_filename,
-            work_dir=str(work_dir),
-            blackout_faces=True,
-        )
-        uploaded_url = tos_service.upload_file(
-            local_path=local_path,
-            custom_filename=local_filename,
-            project_id=project_id,
-            category="references/first_frames",
-        )
-        logger.info(f"Scene {scene_number}: blacked-out previous-scene last-frame reference image URL: {uploaded_url}")
-        return GeneratedImage(
-            scene_number=0,
-            url=uploaded_url,
-            prompt="分镜首帧参考图（来自上一分镜最后一帧并完成黑脸处理）",
-            name="分镜首帧",
-            reference_type="first_frame",
-            source="generated",
-            is_reference=True,
-        )
     def _generate_single_video(self, task: Dict) -> GeneratedVideo:
         """生成单个视频 - 使用 reference_image 保持人物一致性"""
         scene_number = task['scene_number']
@@ -523,12 +439,12 @@ class VideoAgent:
 
         优先从剧本分镜的duration字段获取（由ScriptAgent根据yaml配置生成），
         如果解析不到或无效，则根据yaml配置的分镜时长范围随机生成
-        有效范围：4-12秒（根据yaml配置）
+        有效范围：由配置决定，当前默认 10-30 秒
         """
         try:
             if hasattr(scene, 'duration') and scene.duration is not None:
                 duration = int(scene.duration)
-                # 检查时长是否在有效范围内（4-12秒）
+                # 检查时长是否在有效范围内（由配置决定）
                 if self.default_duration_min <= duration <= self.default_duration_max:
                     logger.info(f"Using scene duration from script: {duration}s")
                     return duration
@@ -547,13 +463,14 @@ class VideoAgent:
         self,
         scene,
         characters,
+        scene_definitions=None,
         reference_images: Optional[List[GeneratedImage]] = None,
-        has_previous_video: bool = False,
         user_style_info: str = None,
         user_requirement_text: str = None,
         duration: int = 12,
         scene_index: int = 0,
         total_scenes: int = 1,
+        previous_video_url: str = None,
     ) -> str:
         """
         构建视频生成提示词 - 整合完整的分镜信息
@@ -561,17 +478,14 @@ class VideoAgent:
         结合用户补充的风格/场景描述信息和剧本分镜的完整文本
         （包括描述、对话、时长、角色动作、声音描述、情绪、镜头角度、出场角色等）
         """
-        # 进一步精简提示词：只保留分镜脚本的核心字段，去掉冗余的段落标题/规则块，避免过分重复。
-        _ = (characters, scene_index, total_scenes, duration)  # keep signature stable; these are intentionally unused in the slim prompt.
         parts = []
 
         reference_specs = self._build_reference_specs(reference_images)
         if reference_specs:
-            first_frame_tag = next((spec["tag"] for spec in reference_specs if spec["reference_type"] == "first_frame"), "")
-            character_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] == "character")
-            scene_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] == "scene")
-            if has_previous_video and first_frame_tag:
-                parts.append(f"参考{first_frame_tag}为本视频的首帧参考图。")
+            # 角色装扮图归入角色组，场景状态图归入场景组
+            character_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] in {"character", "character_outfit"})
+            scene_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] in {"scene", "scene_state"})
+            storyboard_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] == "storyboard")
 
             if character_tags and scene_tags:
                 parts.append(f"结合{character_tags}人物/角色参考图中的出场角色设定与布景设定{scene_tags}生成当前分镜。")
@@ -579,15 +493,18 @@ class VideoAgent:
                 parts.append(f"结合{character_tags}人物/角色参考图中的出场角色设定生成当前分镜。")
             elif scene_tags:
                 parts.append(f"结合布景设定{scene_tags}生成当前分镜。")
+            if storyboard_tags:
+                parts.append(f"严格参考{storyboard_tags}中的6宫格白描 storyboard 节奏、镜头拆分和动作推进。")
             mapping_parts = []
             for spec in reference_specs:
-                if spec["reference_type"] == "first_frame":
-                    mapping_parts.append(f'{spec["tag"]}=分镜首帧')
-                else:
-                    mapping_parts.append(
-                        f'{spec["tag"]}={spec["name"]}（{self._reference_type_label(spec["reference_type"])}）'
-                    )
+                mapping_parts.append(
+                    f'{spec["tag"]}={spec["name"]}（{self._reference_type_label(spec["reference_type"])}）'
+                )
             parts.append(f"从参考图片顺序：{'，'.join(mapping_parts)}")
+
+        # 延长模式：非首分镜参考前一分镜的生成视频，保持人物、场景、动作与运镜的连续过渡。
+        if previous_video_url:
+            parts.append("参考上一分镜的生成视频，衔接其结尾的人物状态、场景与运镜，保持连贯自然的转场，避免跳变。")
 
         if user_style_info:
             parts.append(f"风格：{user_style_info}")
@@ -596,6 +513,15 @@ class VideoAgent:
         if scene_name:
             scene_name_with_tags = self._annotate_scene_names_with_reference_tags(scene_name, reference_specs)
             parts.append(f"使用布景：{scene_name_with_tags}")
+        scene_context = self._build_scene_context(scene, scene_definitions)
+        if scene_context["descriptions"]:
+            parts.append(f"布景定义：{'；'.join(scene_context['descriptions'])}")
+        if scene_context["scene_features"]:
+            parts.append(f"稳定场景特征：{', '.join(scene_context['scene_features'])}")
+        if scene_context["time_of_day"]:
+            parts.append(f"时间信息：{scene_context['time_of_day']}")
+        if scene_context["weather"]:
+            parts.append(f"天气信息：{scene_context['weather']}")
         parts.append(f"场景描述：{getattr(scene, 'description', '')}")
         parts.append("保持无字幕，避免画面生成字幕。不生成街边招牌的文字。限定主要人物/角色在不同分镜视频中的各自音色保持一致。")
 
@@ -609,6 +535,9 @@ class VideoAgent:
         mood = getattr(scene, 'mood', '') or ''
         if mood:
             parts.append(f"情绪氛围：{mood}")
+        voice_description = getattr(scene, 'voice_description', '') or ''
+        if voice_description:
+            parts.append(f"声音状态：{voice_description}")
 
         camera = getattr(scene, 'camera_angle', None) or ''
         if camera:
@@ -617,6 +546,9 @@ class VideoAgent:
         chars_present = getattr(scene, 'characters_present', None) or []
         if isinstance(chars_present, list) and chars_present:
             parts.append(f"出场角色：{self._annotate_character_names_with_reference_tags(chars_present, reference_specs)}")
+            parts.extend(self._build_scene_character_details(chars_present, characters))
+
+        parts.append(f"镜头时长：{duration}秒。当前分镜序号：{scene_index + 1}/{total_scenes}。")
 
         parts.append(self._extract_background_music_instruction(user_requirement_text))
 
@@ -643,11 +575,84 @@ class VideoAgent:
     def _reference_type_label(self, reference_type: str) -> str:
         if reference_type == "character":
             return "人物/角色"
+        if reference_type == "character_outfit":
+            return "人物/角色装扮"
         if reference_type == "scene":
             return "场景"
-        if reference_type == "first_frame":
-            return "首帧参考"
+        if reference_type == "scene_state":
+            return "场景状态"
+        if reference_type == "storyboard":
+            return "6宫格 storyboard"
         return "参考"
+
+    def _build_scene_character_details(self, character_names: List[str], characters) -> List[str]:
+        if not character_names or not characters:
+            return []
+
+        character_map = {
+            self._normalize_name_key(getattr(character, "name", "")): character
+            for character in characters or []
+        }
+        lines: List[str] = []
+        for name in character_names:
+            character = character_map.get(self._normalize_name_key(name))
+            if character is None:
+                continue
+            summary = [
+                f"角色设定：{character.name}",
+                f"年龄={getattr(character, 'age', '')}",
+                f"性别={getattr(character, 'gender', '')}",
+                f"外貌特征={getattr(character, 'face_features', '')}",
+                f"肤色={getattr(character, 'skin_tone', '')}",
+            ]
+            if getattr(character, "clothing", None):
+                summary.append(f"服装={character.clothing}")
+            lines.append("，".join([item for item in summary if item.split('=', 1)[-1]]))
+        return lines
+
+    def _build_scene_context(self, scene, scene_definitions) -> Dict[str, str]:
+        descriptions: List[str] = []
+        scene_features: List[str] = []
+        seen_descriptions = set()
+        seen_features = set()
+        time_of_day = str(getattr(scene, "time_of_day", "") or "").strip()
+        weather = str(getattr(scene, "weather", "") or "").strip()
+        scene_name_keys = set(self._split_scene_name_keys(getattr(scene, "scene_name", "")))
+
+        for item in scene_definitions or []:
+            item_name = getattr(item, "name", None) if not isinstance(item, dict) else item.get("name")
+            if self._normalize_name_key(item_name) not in scene_name_keys:
+                continue
+
+            description = str(
+                getattr(item, "description", None) if not isinstance(item, dict) else item.get("description") or ""
+            ).strip()
+            if description and description not in seen_descriptions:
+                seen_descriptions.add(description)
+                descriptions.append(description)
+
+            features = getattr(item, "scene_features", None) if not isinstance(item, dict) else item.get("scene_features")
+            for feature in features or []:
+                feature_text = str(feature or "").strip()
+                if feature_text and feature_text not in seen_features:
+                    seen_features.add(feature_text)
+                    scene_features.append(feature_text)
+
+            if not time_of_day:
+                time_of_day = str(
+                    getattr(item, "time_of_day", None) if not isinstance(item, dict) else item.get("time_of_day") or ""
+                ).strip()
+            if not weather:
+                weather = str(
+                    getattr(item, "weather", None) if not isinstance(item, dict) else item.get("weather") or ""
+                ).strip()
+
+        return {
+            "descriptions": descriptions,
+            "scene_features": scene_features,
+            "time_of_day": time_of_day,
+            "weather": weather,
+        }
 
     def _build_reference_specs(self, reference_images: Optional[List[GeneratedImage]]) -> List[Dict[str, str]]:
         specs: List[Dict[str, str]] = []
@@ -748,6 +753,10 @@ class VideoAgent:
         user_requirement_text: str = None,
         resolution: str = None,
         aspect_ratio: str = None,
+        characters=None,
+        scene_definitions=None,
+        asset_group_id: Optional[str] = None,
+        asset_project_name: Optional[str] = None,
     ) -> GeneratedVideo:
         """
         根据反馈重新生成某个分镜的视频 - 简化版本
@@ -773,7 +782,6 @@ class VideoAgent:
 
         num_scenes = len(script.scenes)
         scene = script.scenes[scene_number - 1]
-        previous_scene = script.scenes[scene_number - 2] if scene_number > 1 else None
 
         logger.info(f"Regenerating video for scene {scene_number}/{num_scenes}")
         logger.info(f"Using reference image: {reference_image.url if reference_image else 'None'}")
@@ -782,28 +790,22 @@ class VideoAgent:
         duration = self._get_scene_duration(scene)
 
         prepared_reference_images = self._prepare_reference_images_for_generation(
-            project_id=project_id,
-            scene_number=scene_number,
-            previous_video_url=previous_video_url if self._should_use_previous_last_frame(previous_scene, scene, previous_video_url) else None,
             reference_images=reference_images,
             fallback_reference_image=reference_image,
-        )
-        use_previous_last_frame = any(
-            getattr(image, "reference_type", None) == "first_frame"
-            for image in prepared_reference_images
         )
 
         # 构建新的提示词
         prompt = self._build_video_prompt(
             scene=scene,
-            characters=script.characters,
+            characters=characters or script.characters,
+            scene_definitions=scene_definitions or script.scene_definitions,
             reference_images=prepared_reference_images,
-            has_previous_video=use_previous_last_frame,
             user_style_info=user_style_info,
             user_requirement_text=user_requirement_text,
             duration=duration,
             scene_index=scene_number - 1,
             total_scenes=num_scenes,
+            previous_video_url=previous_video_url,
         )
         prompt += f"。修改意见: {feedback}"
 
@@ -821,6 +823,7 @@ class VideoAgent:
             duration=duration,
             resolution=resolution,
             aspect_ratio=aspect_ratio,
+            previous_video_url=previous_video_url,
         )
 
         video_result = self._wait_for_video(task_id)

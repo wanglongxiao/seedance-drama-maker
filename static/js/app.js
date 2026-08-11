@@ -51,8 +51,8 @@ let referenceImageRegenerateLocked = false;
 let projectEnding = false;
 let projectEnded = false;
 let projectEndBeaconSent = false;
-const I18N_VERSION = '20260810b';
-const FRONTEND_CONFIG_VERSION = '20260810b';
+const I18N_VERSION = '20260811c';
+const FRONTEND_CONFIG_VERSION = '20260811c';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
     'zh-cn': 'zh-CN',
@@ -99,6 +99,12 @@ let frontendConfig = {
 
 function getCurrentReviewMode() {
     return isAutoRunMode ? 'auto' : 'manual';
+}
+
+function getCurrentVideoMode() {
+    const select = document.getElementById('videoModeSelect');
+    const value = select ? String(select.value || '').trim().toLowerCase() : '';
+    return value === 'extend' ? 'extend' : 'parallel';
 }
 
 function ensureDraftProjectId() {
@@ -250,10 +256,18 @@ async function loadFrontendConfig() {
                 ...frontendConfig,
                 ...result.config,
             };
+            applyDefaultVideoMode();
         }
     } catch (error) {
         console.error('Failed to load frontend config:', error);
     }
+}
+
+function applyDefaultVideoMode() {
+    const select = document.getElementById('videoModeSelect');
+    if (!select) return;
+    const defaultMode = frontendConfig.default_video_generation_mode === 'extend' ? 'extend' : 'parallel';
+    select.value = defaultMode;
 }
 
 function setDocumentLanguage() {
@@ -293,6 +307,13 @@ function applyStaticTranslations() {
     if (appTitle) appTitle.innerHTML = `🎬 ${t('app.title')}`;
     if (appSubtitle) appSubtitle.textContent = t('app.subtitle');
     if (languageLabel) languageLabel.textContent = t('app.language');
+    const videoModeLabel = document.getElementById('videoModeLabel');
+    if (videoModeLabel) videoModeLabel.textContent = t('app.videoModeLabel');
+    const videoModeSelect = document.getElementById('videoModeSelect');
+    if (videoModeSelect && videoModeSelect.options.length >= 2) {
+        videoModeSelect.options[0].textContent = t('app.videoModeParallel');
+        videoModeSelect.options[1].textContent = t('app.videoModeExtend');
+    }
     if (imageBtn) imageBtn.title = t('input.uploadImage');
     if (micBtn) micBtn.title = isRecording ? t('input.stopRecording') : t('input.holdToRecord');
     if (textInput) textInput.placeholder = t('input.placeholder');
@@ -316,6 +337,8 @@ function rerenderPreviewCards() {
     if (scriptCard) scriptCard.remove();
     const referenceCard = document.getElementById('reference-image-card');
     if (referenceCard) referenceCard.remove();
+    const storyboardCard = document.getElementById('storyboard-card');
+    if (storyboardCard) storyboardCard.remove();
     const imagesCard = document.getElementById('images-card');
     if (imagesCard) imagesCard.remove();
     const videosContainer = document.getElementById('videos-container');
@@ -1602,7 +1625,8 @@ function startStep(step) {
         project_id: currentProjectId,
         step: step,
         ui_language: currentLanguage,
-        review_mode: getCurrentReviewMode()
+        review_mode: getCurrentReviewMode(),
+        generation_mode: getCurrentVideoMode()
     }));
 }
 
@@ -1831,7 +1855,8 @@ function startVideoGenerationAfterReference() {
             project_id: currentProjectId,
             client_id: wsClientId || '',
             ui_language: currentLanguage,
-            review_mode: getCurrentReviewMode()
+            review_mode: getCurrentReviewMode(),
+            generation_mode: getCurrentVideoMode()
         })
     })
     .then(response => response.json())
@@ -2162,6 +2187,10 @@ function handleAgentOutput(agent, output) {
         case 'video_review_agent':
             // 视频审核结果输出
             displayVideoReviewResult(output);
+            break;
+        case 'storyboard_review_agent':
+            // 故事版审核结果（自动重生成，前端仅记录日志，最终以刷新后的故事版为准）
+            console.log('[storyboard_review]', output);
             break;
         case 'merge_agent':
             // 检查是否是合成开始（没有final_video_url）还是合成完成
@@ -2782,12 +2811,291 @@ function displayReferenceImage(output) {
 
     refreshReferenceImageActionState();
 
+    // 在布景参考图库之后渲染“各分镜-角色装扮-场景状态”模块。
+    displayVariantAssets(output);
+    // 在角色装扮/场景状态模块之后、分镜视频之前渲染“各分镜故事版”模块。
+    displayStoryboards(output);
+
     contentDisplay.scrollTop = contentDisplay.scrollHeight;
 
     // 仅在参考图库全部生成完毕后进入确认和倒计时
     if (isReferenceGenerationComplete) {
         isWaitingForConfirm = true;
         pendingStep = 'videos';
+        maybeStartPendingStepCountdown();
+    }
+}
+
+// 渲染“各分镜-角色装扮-场景状态”模块：位于布景参考图库之下，布局参照参考图库。
+function displayVariantAssets(output) {
+    const outfitImages = (output && output.character_outfit_images) || [];
+    const sceneStateImages = (output && output.scene_state_images) || [];
+    const existing = document.getElementById('variant-assets-card');
+
+    if (!outfitImages.length && !sceneStateImages.length) {
+        if (existing) existing.remove();
+        return;
+    }
+
+    let card = existing;
+    if (!card) {
+        card = document.createElement('div');
+        card.className = 'content-card';
+        card.id = 'variant-assets-card';
+    }
+
+    // 保证顺序：参考图库 → 角色装扮/场景状态 → 故事版。插入到参考图库卡片之后。
+    const referenceCard = document.getElementById('reference-image-card');
+    if (referenceCard && referenceCard.parentNode === contentDisplay) {
+        if (referenceCard.nextSibling !== card) {
+            contentDisplay.insertBefore(card, referenceCard.nextSibling);
+        }
+    } else if (card.parentNode !== contentDisplay) {
+        contentDisplay.appendChild(card);
+    }
+
+    const linkAttrs = getExternalLinkAttrs();
+    const renderVariantItems = (items, referenceType) => {
+        return items.map((item) => {
+            const variantKey = item.variant_key || '';
+            const typeLabel = referenceType === 'scene_state'
+                ? t('labels.variantTypeSceneState')
+                : t('labels.variantTypeCharacterOutfit');
+            return `
+                <div class="reference-item" style="display:flex; flex-direction:column; gap:8px; padding: 12px; border: 1px solid #f0f0f0; border-radius: 10px; background: #fff; font-size: 13px; line-height: 1.5;">
+                    <div style="position: relative; width: 100%; cursor: pointer; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.12);" onclick="openMediaModal('image', '${item.url}')">
+                        <img src="${item.url}" alt="${escapeHtml(item.name || typeLabel)}" style="width:100%; height:180px; object-fit:cover; display:block;">
+                        <div style="position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.6); color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px;">
+                            ${t('labels.clickToZoom')}
+                        </div>
+                    </div>
+                    <div style="font-size: 13px; color: #888;">${typeLabel}</div>
+                    <div style="font-size: 16px; font-weight:600; color:#333; line-height: 1.4;">${escapeHtml(item.name || typeLabel)}</div>
+                    <div class="item-actions" style="display:flex; gap:8px; flex-wrap: wrap;">
+                        <button
+                            class="item-btn regenerate reference-regenerate-btn"
+                            data-locked="false"
+                            data-reference-key="${escapeHtml(buildReferenceAssetKey(referenceType, variantKey))}"
+                            onclick="event.stopPropagation(); regenerateVariantAsset('${referenceType}', '${encodeURIComponent(variantKey)}')"
+                            style="background: #faad14; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer;"
+                        >${t('actions.regenerate')}</button>
+                        <a href="${item.url}" ${linkAttrs} class="item-btn download" style="background: #1890ff; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; width: fit-content;">${t('actions.download')}</a>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    };
+
+    card.innerHTML = `
+        <h4 style="margin: 0 0 15px 0; font-size: 18px; font-weight: 600; color: #333; border-bottom: 2px solid #1890ff; padding-bottom: 10px;">${t('labels.variantAssetsLibrary')}</h4>
+        <div class="reference-image-container" style="display: flex; flex-direction: column; gap: 20px; font-size: 14px; color: #333; line-height: 1.6;">
+            ${outfitImages.length > 0 ? `<div><h5 style="margin:0 0 12px 0; font-size: 16px; font-weight: 600; color: #333;">${t('labels.variantOutfits')}</h5><div class="reference-grid">${renderVariantItems(outfitImages, 'character_outfit')}</div></div>` : ''}
+            ${sceneStateImages.length > 0 ? `<div><h5 style="margin:0 0 12px 0; font-size: 16px; font-weight: 600; color: #333;">${t('labels.variantSceneStates')}</h5><div class="reference-grid">${renderVariantItems(sceneStateImages, 'scene_state')}</div></div>` : ''}
+        </div>
+    `;
+
+    refreshVariantAssetsActionState();
+}
+
+// 刷新“各分镜-角色装扮-场景状态”模块内重新生成按钮状态。
+function refreshVariantAssetsActionState() {
+    const card = document.getElementById('variant-assets-card');
+    if (!card) return;
+    const regenerateButtons = card.querySelectorAll('button.reference-regenerate-btn');
+    regenerateButtons.forEach((regenerateBtn) => {
+        const assetKey = regenerateBtn.dataset.referenceKey || '';
+        const enabled = canRegenerateReferenceImage(false, assetKey);
+        regenerateBtn.disabled = !enabled;
+        regenerateBtn.style.opacity = enabled ? '' : '0.65';
+        regenerateBtn.style.cursor = enabled ? 'pointer' : 'not-allowed';
+    });
+}
+
+// 重新生成单张角色装扮图/场景状态图
+async function regenerateVariantAsset(referenceType, encodedVariantKey) {
+    if (!currentProjectId) {
+        alert(t('messages.createProjectFirst'));
+        return;
+    }
+    const variantKey = decodeURIComponent(encodedVariantKey || '');
+    const referenceAssetKey = buildReferenceAssetKey(referenceType, variantKey);
+    if (!canRegenerateReferenceImage(false, referenceAssetKey)) {
+        return;
+    }
+
+    regeneratingReferenceAssetKeys.add(referenceAssetKey);
+    referenceImageRegenerating = regeneratingReferenceAssetKeys.size > 0;
+    cancelAutoRunCountdown();
+    refreshReferenceImageActionState();
+    refreshVariantAssetsActionState();
+    renderStatusBar(t('labels.referenceImageRegeneratingText'), 'loading', t('steps.referenceImageTitle'));
+
+    try {
+        const response = await fetch('/regenerate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: new URLSearchParams({
+                project_id: currentProjectId,
+                type: 'image',
+                scene_number: '0',
+                reference_type: referenceType,
+                reference_name: variantKey,
+                client_id: wsClientId || '',
+                ui_language: currentLanguage
+            })
+        });
+
+        const result = await response.json();
+        if (result.success) {
+            displayReferenceImage(result.reference_output);
+            renderStatusBar(
+                t('messages.referenceAssetRegeneratedSuccess', {
+                    name: result.reference_name || variantKey
+                }),
+                'info',
+                t('steps.referenceImageTitle')
+            );
+            addAgentMessage(t('messages.referenceAssetRegeneratedSuccess', {
+                name: result.reference_name || variantKey
+            }));
+        } else {
+            addAgentMessage(t('messages.regenerateFailedWithError', { error: result.error }));
+        }
+    } catch (error) {
+        console.error('Regenerate variant asset error:', error);
+        addAgentMessage(t('messages.regenerateFailed'));
+    } finally {
+        regeneratingReferenceAssetKeys.delete(referenceAssetKey);
+        referenceImageRegenerating = regeneratingReferenceAssetKeys.size > 0;
+        refreshReferenceImageActionState();
+        refreshVariantAssetsActionState();
+        maybeStartPendingStepCountdown();
+    }
+}
+
+// 渲染“各分镜故事版”模块：位于布景参考图库与分镜视频之间，布局参照参考图库。
+function displayStoryboards(output) {
+    const storyboardImages = (output && output.storyboard_images) || [];
+    const existing = document.getElementById('storyboard-card');
+
+    if (!storyboardImages.length) {
+        if (existing) existing.remove();
+        return;
+    }
+
+    let card = existing;
+    if (!card) {
+        card = document.createElement('div');
+        card.className = 'content-card';
+        card.id = 'storyboard-card';
+    }
+
+    // 保证顺序：参考图库 → 角色装扮/场景状态 → 故事版 → 分镜视频。插入到装扮/状态卡片（若无则参考图库卡片）之后。
+    const anchorCard = document.getElementById('variant-assets-card') || document.getElementById('reference-image-card');
+    if (anchorCard && anchorCard.parentNode === contentDisplay) {
+        if (anchorCard.nextSibling !== card) {
+            contentDisplay.insertBefore(card, anchorCard.nextSibling);
+        }
+    } else if (card.parentNode !== contentDisplay) {
+        contentDisplay.appendChild(card);
+    }
+
+    const linkAttrs = getExternalLinkAttrs();
+    const sortedImages = [...storyboardImages].sort(
+        (a, b) => (Number(a.scene_number) || 0) - (Number(b.scene_number) || 0)
+    );
+
+    const items = sortedImages.map((item) => {
+        const sceneNumber = Number(item.scene_number) || 0;
+        const sceneLabel = t('labels.scene', { scene: sceneNumber });
+        const slotIndex = Number.isFinite(Number(item.slot_index)) ? Number(item.slot_index) : (sceneNumber - 1);
+        return `
+            <div class="reference-item" style="display:flex; flex-direction:column; gap:8px; padding: 12px; border: 1px solid #f0f0f0; border-radius: 10px; background: #fff; font-size: 13px; line-height: 1.5;">
+                <div style="position: relative; width: 100%; cursor: pointer; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.12);" onclick="openMediaModal('image', '${item.url}')">
+                    <img src="${item.url}" alt="${escapeHtml(item.name || sceneLabel)}" style="width:100%; height:180px; object-fit:cover; display:block;">
+                    <div style="position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.6); color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px;">
+                        ${t('labels.clickToZoom')}
+                    </div>
+                </div>
+                <div style="font-size: 13px; color: #888;">${t('labels.storyboardImage')}</div>
+                <div style="font-size: 16px; font-weight:600; color:#333; line-height: 1.4;">${escapeHtml(sceneLabel)}</div>
+                <div class="item-actions" style="display:flex; gap:8px; flex-wrap: wrap;">
+                    <button
+                        class="item-btn regenerate reference-regenerate-btn"
+                        data-locked="false"
+                        onclick="event.stopPropagation(); regenerateStoryboardAsset(${sceneNumber}, ${slotIndex})"
+                        style="background: #faad14; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer;"
+                    >${t('actions.regenerate')}</button>
+                    <a href="${item.url}" ${linkAttrs} class="item-btn download" style="background: #1890ff; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; width: fit-content;">${t('actions.download')}</a>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    card.innerHTML = `
+        <h4 style="margin: 0 0 15px 0; font-size: 18px; font-weight: 600; color: #333; border-bottom: 2px solid #1890ff; padding-bottom: 10px;">${t('labels.storyboardLibrary')}</h4>
+        <div class="reference-grid">${items}</div>
+    `;
+
+    refreshReferenceImageActionState();
+}
+
+// 重新生成单张分镜故事版
+async function regenerateStoryboardAsset(sceneNumber, slotIndex = -1) {
+    if (!currentProjectId) {
+        alert(t('messages.createProjectFirst'));
+        return;
+    }
+    if (!canRegenerateReferenceImage(false)) {
+        return;
+    }
+
+    const referenceAssetKey = `storyboard:${sceneNumber}`;
+    regeneratingReferenceAssetKeys.add(referenceAssetKey);
+    referenceImageRegenerating = regeneratingReferenceAssetKeys.size > 0;
+    cancelAutoRunCountdown();
+    refreshReferenceImageActionState();
+    renderStatusBar(t('labels.referenceImageRegeneratingText'), 'loading', t('steps.referenceImageTitle'));
+
+    try {
+        const response = await fetch('/regenerate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: new URLSearchParams({
+                project_id: currentProjectId,
+                type: 'image',
+                scene_number: '0',
+                reference_type: 'storyboard',
+                reference_name: String(sceneNumber),
+                reference_slot_index: String(Number.isFinite(Number(slotIndex)) ? Number(slotIndex) : -1),
+                client_id: wsClientId || '',
+                ui_language: currentLanguage
+            })
+        });
+
+        const result = await response.json();
+        if (result.success) {
+            displayReferenceImage(result.reference_output);
+            renderStatusBar(
+                t('messages.storyboardRegeneratedSuccess', { scene: sceneNumber }),
+                'info',
+                t('steps.referenceImageTitle')
+            );
+            addAgentMessage(t('messages.storyboardRegeneratedSuccess', { scene: sceneNumber }));
+        } else {
+            addAgentMessage(t('messages.regenerateFailedWithError', { error: result.error }));
+        }
+    } catch (error) {
+        console.error('Regenerate storyboard asset error:', error);
+        addAgentMessage(t('messages.regenerateFailed'));
+    } finally {
+        regeneratingReferenceAssetKeys.delete(referenceAssetKey);
+        referenceImageRegenerating = regeneratingReferenceAssetKeys.size > 0;
+        refreshReferenceImageActionState();
         maybeStartPendingStepCountdown();
     }
 }

@@ -11,11 +11,13 @@ English documentation. Simplified Chinese version: `README.md`
 
 Powered by the **SeeDance 2.5** video model — turn one sentence into a cinematic AI short drama:
 
-- 🎬 **Up to 30-second shots**: each storyboard scene can run up to 30 seconds (6–30s adjustable) for more continuous long-take storytelling, with a final cut up to `600` seconds.
+- 🎬 **Up to 30-second shots**: each storyboard scene can run up to 30 seconds (6–30s adjustable) for more continuous long-take storytelling, with a final cut up to `1200` seconds.
 - 🖼️ **Up to 50 reference inputs**: a single task can fuse up to 50 character / backdrop reference images for highly consistent characters and scenes across shots.
 - 🌍 **14 languages natively supported**: native multilingual dialogue and narration across Chinese, English, Japanese, Spanish, and 14 languages total.
-- 🎞️ **Cinematic audiovisual quality**: native audio-video sync, adaptive aspect ratio, and high-fidelity `MOV` (H.264/AAC) output that streams progressively in the browser.
-- 🤖 **Fully automated multi-agent pipeline**: script → reference library → scene generation → AI review → long-video merge, end to end.
+- 🎞️ **Cinematic audiovisual quality**: native audio-video sync, adaptive aspect ratio, and the final cut is remuxed to high-fidelity `MP4` (H.264/AAC, `+faststart`) that streams progressively in the browser.
+- 🎭 **Character-outfit / scene-state variants**: per scene the system derives character-outfit images and scene time/weather-state images, and references them consistently in storyboards and scene videos.
+- 🧩 **Line-art storyboard + AI review**: line-art multi-panel storyboards are generated first and auto-reviewed (style, no duplicated character and normal limbs, correct gender); failures regenerate automatically.
+- 🤖 **Fully automated multi-agent pipeline**: script → reference library → character-outfit/scene-state variants → storyboards → scene generation & review → long-video merge, end to end.
 
 ## Overview
 
@@ -33,7 +35,7 @@ The system automatically coordinates script writing, character definitions, back
 Current primary workflow:
 
 ```text
-User Input -> Script Generation -> Reference Library Confirmation -> Scene Video Generation And Review -> Final Merge
+User Input -> Script Generation -> Reference Library Confirmation -> Character-Outfit/Scene-State Variants -> Storyboard Generation And Review -> Scene Video Generation And Review -> Final Merge
 ```
 
 The system focuses on:
@@ -81,7 +83,7 @@ Please play: [demo/DemoVideo-3.mp4](./demo/DemoVideo-3.mp4)
 ## BytePlus Products Used
 
 - `TOS`
-  Stores and serves uploaded assets, reference images, scene videos, masked first frames, and final videos.
+  Stores and serves uploaded assets, reference images, scene videos, and final videos.
 - `Seed-Speech`
   Converts voice input into text for the creation workflow.
 - `Seed-2.1-turbo`
@@ -204,12 +206,13 @@ Supported inputs:
 
 Current rules:
 
-- Total video duration limit: `600` seconds
+- Total video duration limit: `1200` seconds
 - Per-scene duration range: `6`–`30` seconds (tuned for `SeeDance-2.5`)
 - Storyboard scene limit: `50`
 - Character definition limit: `30`
-- Backdrop definition limit: `40`
+- Backdrop definition limit: `30`
 - Adjacent scenes must stay continuous without repeating the same narrative beat
+- Per-scene special character outfits go into the character-action field, and scene time/weather state goes into the scene-description field; both are persisted for downstream image/video generation
 - Raw LLM responses are written to backend logs
 
 ### 3. Reference Library Generation
@@ -251,14 +254,34 @@ Authentication notes:
 - Runtime configuration therefore requires both `MODELARK_API_KEY` and `BYTEPLUS_AK/BYTEPLUS_SK`
 - The BytePlus account must also have the virtual asset-library subscription enabled; otherwise `CreateAssetGroup` returns `SubscriptionRequired`
 
+### 3.2 Character-Outfit And Scene-State Images
+
+After all character main images and scene main images are generated, the system derives variant images from each scene:
+
+- Variants are generated only when a scene's character-action field contains an outfit different from the default, or its scene-description field contains a time/weather state different from the backdrop default
+- Character-outfit image = the scene's outfit description + the corresponding character main image
+- Scene-state image = the scene's time/weather state + the corresponding scene main image
+- Variants across scenes are generated in parallel, bounded by the image concurrency setting (`video_generation.reference_images.max_concurrency`)
+- Variants are deduplicated (each `character::outfit` or `scene::time::weather` is generated once) and preferred in storyboards and scene videos
+
+### 3.3 Storyboard Generation And Review
+
+`ImageAgent` generates a line-art multi-panel storyboard per scene, and `StoryboardReviewAgent` uses a multimodal vision model to check 3 hard conditions (any failure triggers auto-regeneration):
+
+1. Line-art (black-and-white sketch) style with `4`–`7` panels (no fixed 2x3 layout required)
+2. The same character does not repeat within a panel, and no character shows more than 2 arms or more than 2 legs
+3. Character gender matches the cast list
+
+Storyboard `Regenerate` logic, UI, and retry cap mirror scene videos, controlled by `storyboard_review.max_retries` (default `2`, total generations = first + retries).
+
 ### 4. Scene Video Generation
 
 `VideoAgent` generates each scene video with:
 
-- Character reference images
-- Backdrop reference images
-- The current storyboard scene script
-- User style requirements
+- Character image (preferring the character-outfit image when the scene has one)
+- Scene image (preferring the scene-state image when the scene has one)
+- The scene's line-art 6-panel storyboard
+- The current scene script and user style requirements
 
 Character references now use `asset://asset-id` URIs in video generation requests whenever an asset is available, for example:
 
@@ -272,12 +295,15 @@ Character references now use `asset://asset-id` URIs in video generation request
 }
 ```
 
+Reference selection differs by video mode:
+
+- **Extend mode**: every scene except scene 1 additionally references the previous scene's generated video as `reference_video`, carrying over the ending character state, scene, and camera movement for a smooth transition
+- **Parallel mode**: each scene references only the character image / scene image / storyboard, without the previous scene's video
+
 Key rules:
 
-- Automatic failure retry counts are controlled by YAML
+- Automatic failure retry counts are controlled by YAML (`video_review.max_retries`, `video_generation.scene_total_generate_limit`)
 - Manual `Regenerate` clicks do not consume the automatic failure budget
-- The last frame of the previous scene is used as the first-frame reference only when backdrop overlap and script continuity both hold
-- Detected faces in that first frame are masked in pure black before uploading to `TOS`
 - The video prompt appends a no-background-music constraint by default unless the user explicitly requests a music style
 
 ### 4.1 Project Ending And Cleanup
@@ -324,9 +350,10 @@ Flow rules:
 
 Current default merge settings:
 
-- Video output format: `MOV` (`video_generation.output_format = mov`)
-- `SeeDance-2.5` generation tasks and reference videos all use `MOV`; `FFmpeg` processes `MOV` directly and outputs a merged `MOV`
-- Merge enables `-movflags +faststart` so the `moov atom` moves to the front for progressive browser playback
+- `SeeDance-2.5` generation tasks and reference videos all use `MOV`; `FFmpeg` concatenates the segments into a `MOV`
+- Before concatenation each scene segment is normalized to uniform parameters (H.264/`yuv420p` + AAC `48kHz` stereo + CFR) to avoid mismatched audio sample rates/codecs causing silent second halves or broken web playback
+- After merging, the output is remuxed to `MP4` (stream-copy `-c copy` first, falling back to `H.264/AAC` re-encode) with `-movflags +faststart` moving the `moov atom` to the front for progressive browser playback
+- The final uploaded and browser-played cut is `MP4`
 - `merge.temporary_edge_trim = off`
 - `trim_previous_end_frames = 0`
 - `trim_next_start_frames = 1`
@@ -369,6 +396,7 @@ FastAPI App
 MainAgent
   |- ScriptAgent
   |- ImageAgent
+  |- StoryboardReviewAgent
   |- VideoAgent
   |- VideoReviewAgent
   |- MergeAgent
@@ -384,7 +412,7 @@ Services
 
 - All sensitive credentials live in `.env`; `config.yaml` keeps only `${VAR}` placeholders injected by `app/config.py` at runtime
 - The UI supports `zh-CN`, `zh-TW`, `en`, `ja`, and `es`; `SeeDance-2.5` video dialogue is natively supported in 14 languages
-- The video pipeline outputs `MOV` end to end, with `TOS` normalizing `Content-Type` for reliable web playback
+- The pipeline generates in `MOV` and remuxes the final cut to `MP4` (`+faststart`), with `TOS` normalizing `Content-Type` for reliable web playback
 - Each project is bound to its browser connection to support isolated multi-tab execution
 - Reference generation, video generation, review, and merge are rendered progressively in the UI
 
