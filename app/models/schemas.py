@@ -71,12 +71,16 @@ class Character(BaseModel):
     voice_type: str
     voice_features: str
     voice_style: str
+    # 角色性格侧写：简要的性格特征，体现真实性与人性复杂性；主角尤其需要
+    personality: Optional[str] = None
 
 class Script(BaseModel):
     """剧本数据模型"""
     title: str
     style: str
     background: str
+    # 剧本背景基调，如 恐怖/爱情/悬疑/爽剧/历史/情欲 等更细分的基调
+    tone: Optional[str] = None
     characters: List[Character]
     scene_definitions: List[SceneDefinition] = Field(default_factory=list)
     scenes: List[Scene]

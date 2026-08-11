@@ -353,6 +353,7 @@ class ScriptAgent:
             title=script_data['title'],
             style=script_data['style'],
             background=script_data['background'],
+            tone=script_data.get('tone'),
             characters=characters,
             scene_definitions=scene_definitions,
             scenes=scenes,
@@ -468,6 +469,7 @@ class ScriptAgent:
             title=script_data['title'],
             style=script_data['style'],
             background=script_data['background'],
+            tone=script_data.get('tone'),
             characters=characters,
             scene_definitions=scene_definitions,
             scenes=scenes,
@@ -580,23 +582,29 @@ class ScriptAgent:
 3. 剧本必须完整包含开端、发展、高潮、结局，剧情连贯、符合客观规律并具有起伏。
 4. 分镜总数不得超过 {self.max_storyboard_scenes} 个。
 
+【基调规则】
+1. 必须输出 tone 字段，明确本剧本的背景基调，例如恐怖、爱情、悬疑、爽剧、历史、情欲等，可使用更细分的组合基调（如“悬疑恐怖”“甜宠爽剧”“历史权谋”）。
+2. tone 要贯穿全篇：剧情节奏、氛围、镜头与对白都必须与该基调保持一致。
+3. 若用户在输入中明确指定了基调/题材，tone 必须尊重用户指定，不得擅自更换。
+
 【角色与布景】
 1. 角色设定最多 {self.max_characters} 个，需包含外貌、声音特征、性格特点。
-2. 只要某个角色会在任一分镜真实出场，就必须出现在 characters 角色设定列表中；characters 必须覆盖 scenes.characters_present 中的出场角色。
-3. characters 与所有分镜里的出场角色总数共享同一个上限，最多 {self.max_characters} 个。
-4. 在“角色设定”之后输出“布景设定”，布景最多 {self.max_setting_definitions} 个。
-5. 布景设定要写清固定环境、时间、天气、空间布局和氛围。
-6. 每个布景设定必须额外输出 time_of_day、weather、scene_features 三个字段；scene_features 必须是数组，列出该场景的稳定视觉特征。
-7. 多角色分镜可同框、单人特写、空镜头、背影或剪影，但必须符合剧情逻辑。
+2. 每个角色都必须输出 personality（性格侧写）字段：用简要文字刻画其性格特征、动机与内在矛盾，体现角色的真实性与人性的复杂性（如优点与缺点并存、立场随剧情动摇）；主角的 personality 尤其要写得立体、可信，避免脸谱化。
+3. 只要某个角色会在任一分镜真实出场，就必须出现在 characters 角色设定列表中；characters 必须覆盖 scenes.characters_present 中的出场角色。
+4. characters 与所有分镜里的出场角色总数共享同一个上限，最多 {self.max_characters} 个。
+5. 在“角色设定”之后输出“布景设定”，布景最多 {self.max_setting_definitions} 个。
+6. 布景设定要写清固定环境、时间、天气、空间布局和氛围。
+7. 每个布景设定必须额外输出 time_of_day、weather、scene_features 三个字段；scene_features 必须是数组，列出该场景的稳定视觉特征。
+8. 多角色分镜可同框、单人特写、空镜头、背影或剪影，但必须符合剧情逻辑。
 
 【分镜要求】
 1. 每个分镜必须包含：scene_number, scene_name, description, dialogue, duration, character_description, voice_description, mood, time_of_day, weather, camera_angle, characters_present。
 2. scene_name 必须引用 scene_definitions 中已有的 name；一个分镜涉及多个布景时可用"、"连接。
-3. 每个分镜都要明确写出 time_of_day（如清晨/白天/中午/黄昏/傍晚/深夜）和 weather（如晴天/小雨/沙尘天/雷暴雨/下雪/有雾），并将该时间/天气等‘场景状态’信息明确写入 description（场景描述部分）中，二者保持一致。
+3. 每个分镜都要明确写出 time_of_day（如清晨/白天/中午/黄昏/傍晚/深夜）和 weather（如晴天/小雨/沙尘天/雷暴雨/下雪/有雾），并将该时间/天气等‘场景状态’信息明确写入 description（场景描述部分）中，二者保持一致。当同一布景在不同分镜出现不同状态时，‘场景状态’必须使用区别明显的文字描述，让不同状态之间可从文字上清晰区分。
 4. 每个分镜都要写足细节：环境、人物、动作、神态、眼神、情绪、心理、语言、镜头信息。
 5. dialogue 要自然、有情感、符合角色性格和当前情绪情境，数量适度地推动剧情发展；不同情绪情境下的语气、用词、节奏要有区分。
 6. description 必须可直接用于后续视频生成，避免空泛总结；并且必须把本分镜的‘场景状态’（时间/天气）描述包含在内。
-7. 当某个出场角色在本分镜中的装扮与其在 characters 中的默认 clothing 不同（例如日常装扮/舞会盛装/衣衫破损/满身血污/穿透视装/正面裸体/只穿内衣/上身全裸/身穿盔甲/制服诱惑/仙人装扮/穿小熊公仔装/头发凌乱/眼神迷离/衣衫不整/酥胸半露等），必须做到两点：(a) 在该分镜的 character_description（角色动作部分）中明确写出该角色的‘角色装扮’描述；(b) 在该分镜的 character_outfits 字段中输出对应条目。若与默认装扮一致或无特殊装扮，则 character_description 无需强调装扮，也不需要在 character_outfits 中列出该角色。
+7. 当某个出场角色在本分镜中的装扮与其在 characters 中的默认 clothing 不同（例如日常装扮/舞会盛装/衣衫破损/满身血污/穿透视装/正面裸体/只穿内衣/上身全裸/身穿盔甲/制服诱惑/仙人装扮/穿小熊公仔装/头发凌乱/眼神迷离/衣衫不整/酥胸半露等），必须做到两点：(a) 在该分镜的 character_description（角色动作部分）中明确写出该角色的‘角色装扮’描述；(b) 在该分镜的 character_outfits 字段中输出对应条目。‘角色装扮’必须使用区别明显的文字描述，使同一角色在不同分镜的不同装扮之间可从文字上清晰区分。若与默认装扮一致或无特殊装扮，则 character_description 无需强调装扮，也不需要在 character_outfits 中列出该角色。
 
 【转场与推进】
 1. 相邻分镜必须顺滑承接，不能跳切成像重新开始一个新故事。
@@ -617,10 +625,12 @@ class ScriptAgent:
 - title: 剧本标题
 - style: 整体风格
 - background: 故事背景设定
-- characters: 角色列表，每个角色包含 name, age, gender, face_features, skin_tone, clothing, voice_type, voice_features, voice_style
+- tone: 剧本背景基调（如恐怖/爱情/悬疑/爽剧/历史/情欲，或更细分的组合基调），必须为非空字符串
+- characters: 角色列表，每个角色包含 name, age, gender, face_features, skin_tone, clothing, voice_type, voice_features, voice_style, personality
   - age 必须是字符串，如"16岁"、"中年"
   - gender 必须明确（如"男"/"女"），age 与 gender 会持久化并应用到后续生图/生视频，须保持前后一致
   - clothing 为该角色的默认装扮，作为角色主图与后续分镜装扮判定的基准
+  - personality 为该角色的性格侧写，须为非空字符串，简要刻画性格特征、动机与内在矛盾，体现真实性与人性复杂性；主角尤其要写得立体可信
 - scene_definitions: 布景设定列表，每项包含 name, description, time_of_day, weather, scene_features
 - scene_features 必须是字符串数组，写清稳定的场景视觉特征，例如灯光、陈设、地貌、材质、色调、标志性物件
 - scenes: 分镜列表
@@ -710,6 +720,9 @@ class ScriptAgent:
         prompt_parts.append("- 即使同一布景同一人物连续出现，也不能复述上一分镜已经写过的动作、对白和画面状态")
         prompt_parts.append(f"- 所有分镜的出场角色总数与角色设定共用同一个上限，最多{self.max_characters}个；凡是出现在 characters_present 的角色，都必须在 characters 中给出设定")
         prompt_parts.append("- 每个布景设定都必须输出 scene_features 数组，写清该场景的稳定特征，例如灯光、陈设、建筑材质、空间布局、环境符号")
+        prompt_parts.append("- 必须输出 tone 字段，明确剧本背景基调（如恐怖/爱情/悬疑/爽剧/历史/情欲，或更细分的组合基调），并让剧情、氛围、镜头与对白贯穿该基调；用户已指定基调/题材时须尊重用户")
+        prompt_parts.append("- 每个角色都必须输出 personality（性格侧写）：简要刻画其性格特征、动机与内在矛盾，体现真实性与人性的复杂性，主角尤其要立体可信、避免脸谱化")
+        prompt_parts.append("- ‘角色装扮’与‘场景状态’都必须使用区别明显的文字描述，使同一角色/同一布景在不同分镜的不同状态之间可从文字上清晰区分")
 
         # 检查用户是否指定了对话/旁白生成方式
         if user_input:
@@ -1104,11 +1117,18 @@ class ScriptAgent:
                         if not data:
                             raise ValueError("无法解析剧本数据")
 
+            # 确保剧本基调(tone)为字符串（模型可能漏字段或输出为数组/对象）
+            if 'tone' in data and data['tone'] is not None:
+                data['tone'] = self._coerce_scene_text_field(data['tone'])
+
             # 确保角色age字段是字符串类型
             if 'characters' in data:
                 for char in data['characters']:
                     if 'age' in char and char['age'] is not None:
                         char['age'] = str(char['age'])
+                    # personality 性格侧写：模型可能输出为数组/对象，统一拍平为字符串
+                    if 'personality' in char and char['personality'] is not None:
+                        char['personality'] = self._coerce_scene_text_field(char['personality'])
 
             duration_adjustments: List[Dict[str, Any]] = []
 
@@ -2101,6 +2121,7 @@ class ScriptAgent:
             title=script_data['title'],
             style=script_data['style'],
             background=script_data['background'],
+            tone=script_data.get('tone'),
             characters=characters,
             scene_definitions=scene_definitions,
             scenes=scenes,
@@ -2374,6 +2395,7 @@ class ScriptAgent:
                 'voice_type': str(item.get('voice_type') or '未知').strip(),
                 'voice_features': str(item.get('voice_features') or '待补充').strip(),
                 'voice_style': str(item.get('voice_style') or '待补充').strip(),
+                'personality': (str(item.get('personality') or '').strip() or None),
             })
             if len(normalized_characters) >= self.max_characters:
                 break

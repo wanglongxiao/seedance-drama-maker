@@ -2615,6 +2615,7 @@ function displayScript(script) {
     // 检查并转换数据格式（处理后端发送的 dict 格式）
     const title = script.title || t('labels.scriptUntitled');
     const style = script.style || t('labels.unspecified');
+    const tone = script.tone || '';
     const total_duration = script.total_duration || 0;
     const characters = script.characters || [];
     const sceneDefinitions = script.scene_definitions || [];
@@ -2654,6 +2655,7 @@ function displayScript(script) {
                         <span style="color: #666; font-size: 12px;">(${char.age || t('labels.unknown')} ${char.gender || ''})</span><br>
                         <span style="font-size: 13px; color: #555;">${char.face_features || ''} ${char.skin_tone || ''}</span>
                         ${char.clothing ? `<br><span style="font-size: 13px; color: #666;">👔 ${char.clothing}</span>` : ''}
+                        ${char.personality ? `<br><span style="font-size: 13px; color: #666;">🧠 ${t('labels.personality')}: ${char.personality}</span>` : ''}
                         ${char.voice_type ? `<br><span style="font-size: 12px; color: #888;">${t('labels.voice')}: ${char.voice_type}</span>` : ''}
                     </div>
                 `).join('')}
@@ -2718,6 +2720,7 @@ function displayScript(script) {
         <div class="script-content">
             <div style="display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 15px;">
                 <p style="margin: 0;"><strong>${t('labels.style')}</strong> <span style="color: #1890ff;">${style}</span></p>
+                ${tone ? `<p style="margin: 0;"><strong>${t('labels.tone')}</strong> <span style="color: #eb2f96;">${tone}</span></p>` : ''}
                 <p style="margin: 0;"><strong>${t('labels.totalDuration')}</strong> <span style="color: #52c41a;">${t('labels.seconds', { count: total_duration })}</span></p>
                 <p style="margin: 0;"><strong>${t('labels.sceneCount')}</strong> <span style="color: #722ed1;">${t('labels.countUnit', { count: scenes.length })}</span></p>
             </div>
