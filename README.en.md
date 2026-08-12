@@ -2,6 +2,7 @@
 
 English documentation. Simplified Chinese version: `README.md`
 
+- 🌐 Live demo: <https://s0sij5su2u6qe1sds1et0.apigateway-ap-southeast-1.apigw-byteplus.com/>
 - Current version: `2.0.0`
 - Stack: `FastAPI`, `WebSocket`, multi-agent orchestration, `FFmpeg`
 - BytePlus products: `TOS`, `Seed-Speech`, `Seed-2.1-turbo`, `SeeDream-5.0-pro`, `SeeDance-2.5`
@@ -68,7 +69,7 @@ The system focuses on:
 
 ### Video Demos
 
-- Fully automated agent demo: [demo/how-to-use.mp4](./demo/how-to-use.mp4)
+- Fully automated agent demo: [demo/how-to-use-en.mp4](./demo/how-to-use-en.mp4)
 - 2-minute live-action drama: [demo/real-drama.mp4](./demo/real-drama.mp4)
 - 2-minute comic-style drama: [demo/comics-drama.mp4](./demo/comics-drama.mp4)
 

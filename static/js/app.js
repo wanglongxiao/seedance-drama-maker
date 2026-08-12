@@ -107,6 +107,134 @@ function getCurrentVideoMode() {
     return value === 'extend' ? 'extend' : 'parallel';
 }
 
+// ===== 自定义下拉框：接管原生 select 的弹层，保证弹出位置贴合触发器、字体清晰、跨端一致 =====
+const customSelectRegistry = new Map();
+
+function enhanceSelect(selectId) {
+    const select = document.getElementById(selectId);
+    if (!select || customSelectRegistry.has(selectId)) return;
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'custom-select';
+
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'custom-select-trigger';
+    trigger.setAttribute('aria-haspopup', 'listbox');
+    trigger.setAttribute('aria-expanded', 'false');
+
+    const valueEl = document.createElement('span');
+    valueEl.className = 'custom-select-value';
+
+    const arrowEl = document.createElement('span');
+    arrowEl.className = 'custom-select-arrow';
+    arrowEl.textContent = '▾';
+
+    trigger.appendChild(valueEl);
+    trigger.appendChild(arrowEl);
+
+    const menu = document.createElement('ul');
+    menu.className = 'custom-select-menu';
+    menu.setAttribute('role', 'listbox');
+    menu.hidden = true;
+
+    // 将原生 select 隐藏（保留在 DOM 中作为状态源），并把自定义 UI 放到其后
+    select.classList.add('native-select-hidden');
+    select.parentNode.insertBefore(wrapper, select.nextSibling);
+    wrapper.appendChild(select);
+    wrapper.appendChild(trigger);
+    wrapper.appendChild(menu);
+
+    const state = { select, wrapper, trigger, valueEl, menu };
+    customSelectRegistry.set(selectId, state);
+
+    const closeMenu = () => {
+        menu.hidden = true;
+        wrapper.classList.remove('open');
+        trigger.setAttribute('aria-expanded', 'false');
+    };
+    const openMenu = () => {
+        // 打开前关闭其它已展开的自定义下拉
+        customSelectRegistry.forEach((s) => {
+            if (s !== state) {
+                s.menu.hidden = true;
+                s.wrapper.classList.remove('open');
+                s.trigger.setAttribute('aria-expanded', 'false');
+            }
+        });
+        rebuildOptions(selectId);
+        menu.hidden = false;
+        wrapper.classList.add('open');
+        trigger.setAttribute('aria-expanded', 'true');
+    };
+
+    trigger.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (menu.hidden) openMenu(); else closeMenu();
+    });
+
+    // 点击页面其它区域关闭
+    document.addEventListener('click', (e) => {
+        if (!wrapper.contains(e.target)) closeMenu();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeMenu();
+    });
+
+    state.closeMenu = closeMenu;
+    rebuildOptions(selectId);
+    syncSelectDisplay(selectId);
+}
+
+function rebuildOptions(selectId) {
+    const state = customSelectRegistry.get(selectId);
+    if (!state) return;
+    const { select, menu } = state;
+    menu.innerHTML = '';
+    Array.from(select.options).forEach((opt) => {
+        const li = document.createElement('li');
+        li.className = 'custom-select-option';
+        li.setAttribute('role', 'option');
+        li.dataset.value = opt.value;
+        li.textContent = opt.textContent;
+        if (opt.value === select.value) li.classList.add('selected');
+        li.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (select.value !== opt.value) {
+                select.value = opt.value;
+                select.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            syncSelectDisplay(selectId);
+            state.closeMenu();
+        });
+        menu.appendChild(li);
+    });
+}
+
+function syncSelectDisplay(selectId) {
+    const state = customSelectRegistry.get(selectId);
+    if (!state) return;
+    const { select, valueEl, menu } = state;
+    const selected = select.options[select.selectedIndex];
+    valueEl.textContent = selected ? selected.textContent : '';
+    menu.querySelectorAll('.custom-select-option').forEach((li) => {
+        li.classList.toggle('selected', li.dataset.value === select.value);
+    });
+}
+
+function initCustomSelects() {
+    enhanceSelect('languageSelect');
+    enhanceSelect('videoModeSelect');
+}
+
+function refreshCustomSelects() {
+    customSelectRegistry.forEach((_, id) => {
+        rebuildOptions(id);
+        syncSelectDisplay(id);
+    });
+}
+
+
 function ensureDraftProjectId() {
     if (currentProjectId) return currentProjectId;
     if (window.crypto && typeof window.crypto.randomUUID === 'function') {
@@ -268,6 +396,9 @@ function applyDefaultVideoMode() {
     if (!select) return;
     const defaultMode = frontendConfig.default_video_generation_mode === 'extend' ? 'extend' : 'parallel';
     select.value = defaultMode;
+    if (typeof syncSelectDisplay === 'function' && customSelectRegistry.has('videoModeSelect')) {
+        syncSelectDisplay('videoModeSelect');
+    }
 }
 
 function setDocumentLanguage() {
@@ -330,6 +461,7 @@ function applyStaticTranslations() {
         statusSection.innerHTML = `<p class="status-text" id="statusText">${t('progress.waiting')}</p>`;
     }
     updateProjectActionState();
+    refreshCustomSelects();
 }
 
 function rerenderPreviewCards() {
@@ -663,6 +795,7 @@ async function init() {
     });
 
     await Promise.all([initI18n(), loadFrontendConfig()]);
+    initCustomSelects();
     renderWelcomeMessage(true);
     updateProjectActionState();
     connectWebSocket();

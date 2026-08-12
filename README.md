@@ -2,6 +2,7 @@
 
 简体中文文档。English version: `README.en.md`
 
+- 🌐 在线体验：<https://s0sij5su2u6qe1sds1et0.apigateway-ap-southeast-1.apigw-byteplus.com/>
 - 当前版本：`2.0.0`
 - 技术栈：`FastAPI`、`WebSocket`、多 Agent 协作、`FFmpeg`
 - 产品能力：`TOS`、`Seed-Speech`、`Seed-2.1-turbo`、`SeeDream-5.0-pro`、`SeeDance-2.5`
@@ -68,7 +69,7 @@
 
 ### 视频演示
 
-- 全自动 Agent 演示：[demo/how-to-use.mp4](./demo/how-to-use.mp4)
+- 全自动 Agent 演示：[demo/how-to-use-cn.mp4](./demo/how-to-use-cn.mp4)
 - 2 分钟真人剧：[demo/real-drama.mp4](./demo/real-drama.mp4)
 - 2 分钟漫剧：[demo/comics-drama.mp4](./demo/comics-drama.mp4)
 

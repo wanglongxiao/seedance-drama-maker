@@ -32,3 +32,9 @@ temp/
 
 # Tests (kept local only, excluded from public repo)
 /tests/
+
+# Deployment artifacts (kept local only, excluded from public repo)
+/scripts/
+/Dockerfile
+/run.sh
+/.dockerignore

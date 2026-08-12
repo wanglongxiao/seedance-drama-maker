@@ -61,6 +61,10 @@ app.add_middleware(
 # 静态文件
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# 云端准入密码中间件：仅当环境变量 ACCESS_PASSWORD 非空时启用（本地默认不设置 => 放行）。
+from app.middleware.access_gate import AccessGateMiddleware
+app.add_middleware(AccessGateMiddleware)
+
 # 存储WebSocket连接和等待状态
 websocket_connections: Dict[str, WebSocket] = {}
 step_confirmations: Dict[str, asyncio.Event] = {}
@@ -1041,6 +1045,11 @@ manager = ConnectionManager()
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket端点 - 支持长链接3600秒"""
     import uuid
+    # 云端准入：当 ACCESS_PASSWORD 启用时，WebSocket 也需携带有效准入 Cookie。
+    from app.middleware.access_gate import ws_authorized
+    if not ws_authorized(websocket):
+        await websocket.close(code=1008)
+        return
     client_id = str(uuid.uuid4())
     await manager.connect(websocket, client_id)
     

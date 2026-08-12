@@ -89,20 +89,21 @@ body {
 
 .chat-header-top {
     display: flex;
-    align-items: flex-start;
-    gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
 }
 
 .chat-header-title-group {
     min-width: 0;
-    flex: 0 0 40%;
-    max-width: 40%;
+    flex: 1 1 100%;
 }
 
 .chat-header h1 {
     font-size: 17px;
     line-height: 1.3;
-    margin-bottom: 4px;
+    margin-bottom: 2px;
+    white-space: nowrap;
 }
 
 .chat-header p {
@@ -113,17 +114,17 @@ body {
 
 .language-switcher {
     display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
-    flex: 0 0 30%;
-    max-width: 30%;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
     min-width: 0;
 }
 
 .language-switcher label {
     font-size: 11px;
     opacity: 0.95;
+    white-space: nowrap;
 }
 
 .language-select {
@@ -145,17 +146,17 @@ body {
 
 .video-mode-switcher {
     display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
-    flex: 0 0 30%;
-    max-width: 30%;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
     min-width: 0;
 }
 
 .video-mode-switcher label {
     font-size: 11px;
     opacity: 0.95;
+    white-space: nowrap;
 }
 
 .video-mode-select {
@@ -173,6 +174,107 @@ body {
 
 .video-mode-select option {
     color: #333;
+}
+
+/* ===== 自定义下拉框（替换原生 select 弹层，保证弹出位置贴合触发器、字体清晰、跨端一致）===== */
+.custom-select {
+    position: relative;
+    flex: 0 0 auto;
+}
+
+/* 原生 select 被自定义 UI 接管后隐藏（仍保留在 DOM 中作为状态源，供既有 JS 读写） */
+.native-select-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.custom-select-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    min-width: 92px;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.14);
+    color: #fff;
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    outline: none;
+    white-space: nowrap;
+}
+
+.custom-select-trigger:hover {
+    background: rgba(255, 255, 255, 0.22);
+}
+
+.custom-select-value {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.custom-select-arrow {
+    font-size: 10px;
+    opacity: 0.9;
+    transition: transform 0.15s ease;
+}
+
+.custom-select.open .custom-select-arrow {
+    transform: rotate(180deg);
+}
+
+.custom-select-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    min-width: 100%;
+    max-height: 260px;
+    overflow-y: auto;
+    margin: 0;
+    padding: 4px;
+    list-style: none;
+    background: #fff;
+    border: 1px solid #e2e2e2;
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+    z-index: 1200;
+}
+
+.custom-select-menu[hidden] {
+    display: none;
+}
+
+.custom-select-option {
+    padding: 8px 12px;
+    border-radius: 6px;
+    color: #333;
+    font-size: 14px;
+    line-height: 1.3;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.custom-select-option:hover {
+    background: #f0f2ff;
+}
+
+.custom-select-option.selected {
+    background: #e8ecff;
+    color: #4a54e1;
+    font-weight: 600;
 }
 
 .chat-messages {
@@ -715,35 +817,62 @@ body {
         border-right: none;
     }
 
-    /* 头部与文案在小屏上更紧凑 */
+    /* 头部与文案在小屏上更紧凑：标题 + 两个选择框压缩到 1 行 */
     .chat-header {
-        padding: 10px 12px;
+        padding: 8px 12px;
     }
 
     .chat-header-top {
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
+        align-items: center;
         gap: 8px;
     }
 
-    .chat-header h1 {
-        font-size: 16px;
+    .chat-header-title-group {
+        flex: 1 1 auto;
+        max-width: none;
+        min-width: 0;
     }
 
-    .chat-header p {
-        font-size: 11px;
+    .chat-header h1 {
+        font-size: 15px;
+        margin-bottom: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    /* 移动端隐藏副标题与选择框文字说明，压缩高度 */
+    .chat-header p,
+    #appSubtitle {
+        display: none;
     }
 
     .language-switcher,
     .video-mode-switcher {
+        flex: 0 0 auto;
+        width: auto;
+        max-width: none;
         min-width: 0;
+        margin-right: 0;
     }
 
-    .language-select,
-    .video-mode-select {
-        width: 100%;
-        height: 28px;
-        font-size: 11px;
+    .language-switcher label,
+    .video-mode-switcher label {
+        display: none;
+    }
+
+    /* 移动端自定义下拉触发器与选项字体放大，便于点击/阅读 */
+    .custom-select-trigger {
+        min-width: 0;
+        height: 32px;
+        font-size: 13px;
         padding: 0 8px;
+    }
+
+    .custom-select-option {
+        font-size: 15px;
+        padding: 10px 12px;
     }
 
     /* 展示区网格在窄屏下自动收窄 */
