@@ -218,7 +218,7 @@ limits:
   # 视频生成轮询间隔（秒）
   video_poll_interval: 20
   # 视频生成最大等待时间（秒）
-  video_max_wait_time: 900
+  video_max_wait_time: 1800
   # ASR 任务轮询间隔（秒）
   asr_poll_interval: 2
   # ASR 任务最大等待时间（秒）
@@ -227,7 +227,7 @@ limits:
   asr_max_file_size: "512MB"
   asr_max_duration: "5 hours"
   # 请求超时
-  request_timeout: 180
+  request_timeout: 300
 
 # 日志配置
 logging:
