@@ -401,6 +401,47 @@ class TOSService:
             logger.error(f"Failed to list objects under prefix {prefix}: {str(e)}")
             return []
 
+    # ==================== 项目状态持久化（跨实例恢复） ====================
+    # 云端 veFaaS 为弹性多实例，进程内内存态会随实例回收/路由到其它实例而丢失。
+    # 这里将项目状态以 JSON 快照写入 TOS（私有对象，仅后端按 key 读写），
+    # 用于在 get_project 未命中内存时回源恢复，避免 "未找到项目"。
+    def build_state_object_key(self, project_id: str) -> str:
+        return f"{self.build_project_prefix(project_id)}/state/project.json"
+
+    def put_project_state_json(self, project_id: str, state_json: str) -> bool:
+        """将项目状态 JSON 快照写入 TOS（私有对象，不设置公共读）。"""
+        if not self.client:
+            logger.warning("TOS SDK not available, skip project state persistence")
+            return False
+        object_key = self.build_state_object_key(project_id)
+        try:
+            self.client.put_object(
+                self.bucket,
+                object_key,
+                content=io.BytesIO(state_json.encode("utf-8")),
+                content_type="application/json",
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to persist project state {project_id}: {str(e)}")
+            return False
+
+    def get_project_state_json(self, project_id: str) -> Optional[str]:
+        """从 TOS 读取项目状态 JSON 快照；不存在或失败返回 None。"""
+        if not self.client:
+            return None
+        object_key = self.build_state_object_key(project_id)
+        try:
+            result = self.client.get_object(self.bucket, object_key)
+            data = result.read()
+            if isinstance(data, bytes):
+                return data.decode("utf-8")
+            return str(data)
+        except Exception as e:
+            # 对象不存在属正常情况（新项目/未持久化），仅在 debug 记录。
+            logger.debug(f"Project state not found in TOS for {project_id}: {str(e)}")
+            return None
+
     def cleanup_project_directory(self, project_id: str, keep_prefixes: Optional[List[str]] = None) -> None:
         project_prefix = self.build_project_prefix(project_id).rstrip("/")
         keep_full_prefixes = [

@@ -198,11 +198,26 @@ async def schedule_disconnect_project_cleanup(client_id: str) -> None:
 
         async def delayed_cleanup(current_project_id: str, current_client_id: str, current_task_key: str) -> None:
             try:
-                await asyncio.sleep(2)
+                # 云端网关在长任务静默期断连后，浏览器通常需要数秒才能重连。
+                # 给足宽限时间（15s），避免把“断连-重连”窗口误判为用户关闭页面。
+                await asyncio.sleep(15)
+                # 稳定 client_id 重连后会重新登记到 websocket_connections，这里即可自愈。
                 if current_client_id in websocket_connections:
                     return
                 if project_client_owners.get(current_project_id) != current_client_id:
                     return
+                # 关键防线：绝不清理仍在生成中的项目。只有已结束/已失败的项目才允许因断连而清理。
+                # 否则会重演“视频生成中断连 -> 项目被删 -> 合成阶段未找到项目”的云端故障。
+                project = main_agent.get_project(current_project_id)
+                if project is not None:
+                    status = getattr(project, "status", "") or ""
+                    is_ended = bool(getattr(project, "is_ended", False))
+                    if not is_ended and status not in {"failed"}:
+                        logger.info(
+                            f"Skip disconnect cleanup for in-progress project "
+                            f"{current_project_id} (status={status})"
+                        )
+                        return
                 await end_project_resources(
                     current_project_id,
                     reason="browser_disconnect",
@@ -240,22 +255,32 @@ async def upload_file(
     try:
         project_temp_dir = ensure_project_temp_dir(project_id or "shared")
         temp_path = str(project_temp_dir / file.filename)
-        with open(temp_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
-        
-        # 上传到TOS
+        content = await file.read()
+
         file_extension = os.path.splitext(file.filename or "")[1].lower()
         file_category = "uploads/audio" if file_extension in {".wav", ".mp3", ".m4a", ".aac", ".ogg"} else "uploads/images"
-        url = tos_service.upload_file(
-            temp_path,
-            project_id=project_id,
-            category=file_category,
-        )
-        
-        # 删除临时文件
-        os.remove(temp_path)
-        
+
+        # 磁盘写入与 TOS 上传均为阻塞式外部 IO。云端单实例在跑生成管线时，
+        # 若在事件循环内同步执行会阻塞整个循环，导致 /upload 请求撞网关超时
+        # （前端表现为 "upstream request timeout" 解析失败 / 发送失败）。
+        # 这里统一放到线程池执行，避免阻塞事件循环。
+        def _write_and_upload() -> str:
+            with open(temp_path, "wb") as f:
+                f.write(content)
+            try:
+                return tos_service.upload_file(
+                    temp_path,
+                    project_id=project_id,
+                    category=file_category,
+                )
+            finally:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+        url = await asyncio.to_thread(_write_and_upload)
+
         return UploadResponse(
             success=True,
             url=url,
@@ -422,7 +447,12 @@ async def continue_generate_after_reference(
         main_agent.set_project_output_language(project_id, ui_language)
         main_agent.set_project_video_review_mode(project_id, review_mode)
         main_agent.set_project_video_generation_mode(project_id, generation_mode)
-        await continue_generate_after_reference_confirmation(client_id, project_id, review_mode=review_mode)
+        # 非阻塞：视频生成为分钟级长任务，若在 HTTP 内 await 会撞 API 网关超时（约60s），
+        # 导致前端误报“启动视频生成失败”。这里改为后台任务执行，立即返回；
+        # 进度与结果统一通过 WebSocket 推送。
+        asyncio.create_task(
+            continue_generate_after_reference_confirmation(client_id, project_id, review_mode=review_mode)
+        )
 
         return {"success": True}
     except Exception as e:
@@ -485,91 +515,64 @@ async def regenerate(
                         "error": translate(ui_language, "error.reference_asset_target_required")
                     }
 
+                # 校验目标是否存在 / 是否被锁定（同步、轻量），实际生成放到后台执行。
                 if normalized_reference_type == "storyboard":
-                    try:
-                        target_scene_number = int(float(normalized_reference_name))
-                    except (TypeError, ValueError):
-                        target_scene_number = 0
-                    new_image = await main_agent.regenerate_storyboard_asset(
-                        project,
-                        scene_number=target_scene_number,
-                        feedback="用户要求重新生成",
+                    pass  # 故事版目标由后台任务按 scene_number 定位
+                elif normalized_reference_type in {"character_outfit", "scene_state"}:
+                    pass  # 装扮/状态目标由后台任务按 variant_key 定位
+                else:
+                    existing_reference_images = (
+                        getattr(project, "character_reference_images", [])
+                        if normalized_reference_type == "character"
+                        else getattr(project, "scene_reference_images", [])
                     )
-                    project.status = "waiting_reference_confirmation"
-                    project.current_step = "waiting_reference_confirmation"
-                    logger.info(
-                        f"Regenerated storyboard for scene {target_scene_number}: {new_image.url}"
+                    target_reference = next(
+                        (
+                            item for item in (existing_reference_images or [])
+                            if str(getattr(item, "name", "") or "").strip() == normalized_reference_name
+                        ),
+                        None
                     )
-                    return {
-                        "success": True,
-                        "url": new_image.url,
-                        "reference_type": getattr(new_image, "reference_type", None),
-                        "reference_name": getattr(new_image, "name", None),
-                        "reference_output": main_agent._build_reference_output(project, translate(ui_language, "message.reference.regenerated_confirm_prompt")),
-                        "type": "image",
-                        "scene_number": scene_number
-                    }
+                    if target_reference and getattr(target_reference, "regenerate_locked", False):
+                        return {
+                            "success": False,
+                            "error": translate(ui_language, "error.reference_regeneration_locked_original")
+                        }
 
-                if normalized_reference_type in {"character_outfit", "scene_state"}:
-                    new_image = await main_agent.regenerate_variant_asset(
-                        project,
+                # 需要有效的 WebSocket 连接以推送最终结果。
+                effective_client_id = client_id
+                if not effective_client_id or effective_client_id not in websocket_connections:
+                    if len(websocket_connections) == 0:
+                        return {"success": False, "error": translate(ui_language, "error.no_active_websocket")}
+                    if effective_client_id and effective_client_id not in websocket_connections:
+                        return {
+                            "success": False,
+                            "error": translate(ui_language, "error.invalid_client_id", client_id=effective_client_id)
+                        }
+                    # 兼容旧前端：未传 client_id 时退化为第一个连接。
+                    effective_client_id = list(websocket_connections.keys())[0]
+                    logger.warning(f"/regenerate: missing client_id, fallback to {effective_client_id}")
+
+                # 非阻塞：单张图片重生成耗时可达 40~60s，云端 API 网关约 60s 超时，
+                # 若在 HTTP 内同步 await 会触发网关断连，前端误报“重新生成失败”。
+                # 改为后台任务执行，立即返回；结果统一通过 WebSocket 推送。
+                asyncio.create_task(
+                    regenerate_reference_asset_background(
+                        client_id=effective_client_id,
+                        project_id=project_id,
+                        ui_language=ui_language,
                         reference_type=normalized_reference_type,
-                        variant_key=normalized_reference_name,
-                        feedback="用户要求重新生成",
+                        reference_name=normalized_reference_name,
+                        reference_slot_index=reference_slot_index,
                     )
-                    project.status = "waiting_reference_confirmation"
-                    project.current_step = "waiting_reference_confirmation"
-                    logger.info(
-                        f"Regenerated {normalized_reference_type} variant {normalized_reference_name}: {new_image.url}"
-                    )
-                    return {
-                        "success": True,
-                        "url": new_image.url,
-                        "reference_type": getattr(new_image, "reference_type", None),
-                        "reference_name": getattr(new_image, "name", None),
-                        "variant_key": getattr(new_image, "variant_key", None),
-                        "reference_output": main_agent._build_reference_output(project, translate(ui_language, "message.reference.regenerated_confirm_prompt")),
-                        "type": "image",
-                        "scene_number": scene_number
-                    }
-
-                existing_reference_images = (
-                    getattr(project, "character_reference_images", [])
-                    if normalized_reference_type == "character"
-                    else getattr(project, "scene_reference_images", [])
                 )
-                target_reference = next(
-                    (
-                        item for item in (existing_reference_images or [])
-                        if str(getattr(item, "name", "") or "").strip() == normalized_reference_name
-                    ),
-                    None
-                )
-                if target_reference and getattr(target_reference, "regenerate_locked", False):
-                    return {
-                        "success": False,
-                        "error": translate(ui_language, "error.reference_regeneration_locked_original")
-                    }
-                new_image = await main_agent.regenerate_reference_asset(
-                    project,
-                    reference_type=normalized_reference_type,
-                    asset_name=normalized_reference_name,
-                    reference_slot_index=reference_slot_index,
-                    feedback="用户要求重新生成",
-                )
-
-                project.status = "waiting_reference_confirmation"
-                project.current_step = "waiting_reference_confirmation"
-                logger.info(f"Updated project.reference_image to new reference image: {new_image.url}")
-
                 return {
                     "success": True,
-                    "url": new_image.url,
-                    "reference_type": getattr(new_image, "reference_type", None),
-                    "reference_name": getattr(new_image, "name", None),
-                    "reference_output": main_agent._build_reference_output(project, translate(ui_language, "message.reference.regenerated_confirm_prompt")),
+                    "async": True,
                     "type": "image",
-                    "scene_number": scene_number
+                    "scene_number": scene_number,
+                    "reference_type": normalized_reference_type,
+                    "reference_name": normalized_reference_name,
                 }
 
             # 获取参考图URL
@@ -972,6 +975,14 @@ class ConnectionManager:
     
     async def connect(self, websocket: WebSocket, client_id: str):
         await websocket.accept()
+        # 若同一 client_id 存在旧连接（网关断连后重连的典型情况），先关闭旧连接，
+        # 再登记新连接。旧连接后续触发的 disconnect 会因对象不一致而被忽略（见 disconnect）。
+        old_ws = self.active_connections.get(client_id)
+        if old_ws is not None and old_ws is not websocket:
+            try:
+                await old_ws.close()
+            except Exception:
+                pass
         self.active_connections[client_id] = websocket
         websocket_connections[client_id] = websocket
         logger.info(f"WebSocket connected. Client: {client_id}, Total: {len(self.active_connections)}")
@@ -984,7 +995,13 @@ class ConnectionManager:
         except Exception as e:
             logger.warning(f"Failed to send connection client_id to {client_id}: {str(e)}")
     
-    def disconnect(self, client_id: str):
+    def disconnect(self, client_id: str, websocket: Optional[WebSocket] = None):
+        # 仅当断开的正是当前登记的连接时才清理，避免“旧连接的延迟断开事件”
+        # 误删同一 client_id 重连后的新连接（会导致新连接静默失效）。
+        current = self.active_connections.get(client_id)
+        if websocket is not None and current is not None and current is not websocket:
+            logger.info(f"Ignore stale disconnect for client {client_id} (superseded by reconnect)")
+            return
         if client_id in self.active_connections:
             del self.active_connections[client_id]
         if client_id in websocket_connections:
@@ -1050,7 +1067,11 @@ async def websocket_endpoint(websocket: WebSocket):
     if not ws_authorized(websocket):
         await websocket.close(code=1008)
         return
-    client_id = str(uuid.uuid4())
+    # 复用前端携带的稳定 client_id：云端网关会在长任务静默期断开 WS，前端自动重连。
+    # 只有沿用同一 client_id，正在后台运行的任务推送的进度/完成消息才能到达重连后的连接，
+    # 避免 UI 卡在“正在生成”以及后续合成阶段的“未找到项目”。
+    requested_client_id = websocket.query_params.get("client_id")
+    client_id = requested_client_id.strip() if requested_client_id and requested_client_id.strip() else str(uuid.uuid4())
     await manager.connect(websocket, client_id)
     
     # 初始化确认事件
@@ -1156,10 +1177,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected normally: {client_id}")
-        manager.disconnect(client_id)
+        manager.disconnect(client_id, websocket)
     except Exception as e:
         logger.error(f"WebSocket error for {client_id}: {str(e)}")
-        manager.disconnect(client_id)
+        manager.disconnect(client_id, websocket)
 
 
 async def execute_step_with_websocket(client_id: str, project_id: str, step: str, review_mode: Optional[str] = None):
@@ -1235,6 +1256,7 @@ async def execute_script_step(client_id: str, project_id: str):
     project.current_step = "script_generated"
     project.status = "script_generated"
     project.progress = max(project.progress, 25)
+    main_agent.save_project_state(project_id)
     
     await manager.send_message(client_id, {
         "type": "progress",
@@ -1300,6 +1322,8 @@ async def execute_images_step(client_id: str, project_id: str):
             "output": main_agent._build_reference_output(project, translate(lang, "message.reference.confirm_prompt"))
         }
     })
+
+    main_agent.save_project_state(project_id)
     
     # 等待用户确认参考图库
     logger.info(f"Waiting for user confirmation of reference library for client {client_id}")
@@ -1385,6 +1409,9 @@ async def execute_reference_image_step(client_id: str, project_id: str):
         }
     })
 
+    # 参考图库完成后持久化，供后续视频/合成步骤跨实例恢复。
+    main_agent.save_project_state(project_id)
+
     # 通知步骤完成
     await manager.send_message(client_id, {
         "type": "step_complete",
@@ -1393,9 +1420,6 @@ async def execute_reference_image_step(client_id: str, project_id: str):
             "message": translate(lang, "step.reference.complete")
         }
     })
-
-
-
 
 
 async def continue_generate_after_reference_confirmation(client_id: str, project_id: str, review_mode: Optional[str] = None):
@@ -1414,7 +1438,7 @@ async def continue_generate_after_reference_confirmation(client_id: str, project
     if not project:
         await manager.send_message(client_id, {
             "type": "error",
-            "data": {"message": translate(lang, "error.project_not_found")}
+            "data": {"message": translate("zh-CN", "error.project_not_found")}
         })
         return
     lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
@@ -1448,6 +1472,98 @@ async def continue_generate_after_reference_confirmation(client_id: str, project
         await manager.send_message(client_id, {
             "type": "error",
             "data": {"message": translate(lang, "error.video_generation_failed", error=str(e))}
+        })
+
+
+async def regenerate_reference_asset_background(
+    client_id: str,
+    project_id: str,
+    ui_language: str,
+    reference_type: str,
+    reference_name: str,
+    reference_slot_index: Optional[int] = None,
+):
+    """后台重新生成单张参考图/角色装扮图/场景状态图/故事版，并通过 WebSocket 推送结果。
+
+    云端 API 网关存在约 60s 超时，而单张图片重生成耗时可达 40~60s，
+    若在 HTTP 请求内同步 await 会触发网关断连，前端 fetch 抛错误报“重新生成失败”。
+    因此改为后台任务执行，立即返回，最终结果统一通过 WebSocket 推送。
+    """
+    ui_language = normalize_locale(ui_language)
+    normalized_reference_type = str(reference_type or "").strip().lower()
+    normalized_reference_name = str(reference_name or "").strip()
+    # 与前端 buildReferenceAssetKey 保持一致（type::name），用于精确解锁对应按钮。
+    reference_asset_key = f"{normalized_reference_type}::{normalized_reference_name}"
+
+    project = main_agent.get_project(project_id)
+    if not project:
+        await manager.send_message(client_id, {
+            "type": "reference_asset_regenerated",
+            "data": {
+                "success": False,
+                "reference_asset_key": reference_asset_key,
+                "error": translate(ui_language, "error.project_not_found"),
+            }
+        })
+        return
+
+    try:
+        if normalized_reference_type == "storyboard":
+            try:
+                target_scene_number = int(float(normalized_reference_name))
+            except (TypeError, ValueError):
+                target_scene_number = 0
+            new_image = await main_agent.regenerate_storyboard_asset(
+                project,
+                scene_number=target_scene_number,
+                feedback="用户要求重新生成",
+            )
+            logger.info(f"Regenerated storyboard for scene {target_scene_number}: {new_image.url}")
+        elif normalized_reference_type in {"character_outfit", "scene_state"}:
+            new_image = await main_agent.regenerate_variant_asset(
+                project,
+                reference_type=normalized_reference_type,
+                variant_key=normalized_reference_name,
+                feedback="用户要求重新生成",
+            )
+            logger.info(
+                f"Regenerated {normalized_reference_type} variant {normalized_reference_name}: {new_image.url}"
+            )
+        else:
+            new_image = await main_agent.regenerate_reference_asset(
+                project,
+                reference_type=normalized_reference_type,
+                asset_name=normalized_reference_name,
+                reference_slot_index=reference_slot_index,
+                feedback="用户要求重新生成",
+            )
+            logger.info(f"Regenerated reference asset {normalized_reference_name}: {new_image.url}")
+
+        project.status = "waiting_reference_confirmation"
+        project.current_step = "waiting_reference_confirmation"
+
+        await manager.send_message(client_id, {
+            "type": "reference_asset_regenerated",
+            "data": {
+                "success": True,
+                "reference_asset_key": reference_asset_key,
+                "reference_type": getattr(new_image, "reference_type", None),
+                "reference_name": getattr(new_image, "name", None),
+                "variant_key": getattr(new_image, "variant_key", None),
+                "reference_output": main_agent._build_reference_output(
+                    project, translate(ui_language, "message.reference.regenerated_confirm_prompt")
+                ),
+            }
+        })
+    except Exception as e:
+        logger.error(f"Background regenerate reference asset failed: {str(e)}")
+        await manager.send_message(client_id, {
+            "type": "reference_asset_regenerated",
+            "data": {
+                "success": False,
+                "reference_asset_key": reference_asset_key,
+                "error": translate(ui_language, "error.generation_failed", error=str(e)),
+            }
         })
 
 
@@ -1586,6 +1702,7 @@ async def execute_merge_step(client_id: str, project_id: str):
     final_url = await main_agent._merge_videos(project)
     project.final_video_url = final_url
     project.status = "completed"
+    main_agent.save_project_state(project_id)
 
     await manager.send_message(client_id, {
         "type": "progress",

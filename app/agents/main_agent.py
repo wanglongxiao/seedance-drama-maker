@@ -188,6 +188,7 @@ class MainAgent:
         self._reference_asset_cache: Dict[str, Dict[str, str]] = {}
         self._reference_generation_tasks: Dict[str, asyncio.Task] = {}
         self._reference_asset_regeneration_tasks: Dict[str, asyncio.Task] = {}
+        self._project_prepare_tasks: Dict[str, asyncio.Task] = {}
 
     def _build_asset_group_name(self, project_id: str) -> str:
         return f"seedance-project-{project_id}"
@@ -230,6 +231,7 @@ class MainAgent:
         self._reference_generation_slots.pop(project_id, None)
         self._reference_asset_cache.pop(project_id, None)
         self._reference_generation_tasks.pop(project_id, None)
+        self._project_prepare_tasks.pop(project_id, None)
         for task_key in list(self._reference_asset_regeneration_tasks.keys()):
             if task_key.startswith(f"{project_id}:"):
                 self._reference_asset_regeneration_tasks.pop(task_key, None)
@@ -385,12 +387,39 @@ class MainAgent:
         )
 
         self.projects[project_id] = project
-        await asyncio.to_thread(self._ensure_project_asset_group, project)
-        await asyncio.to_thread(self._register_uploaded_reference_assets, project)
+
+        # 素材组创建与上传参考图登记涉及外部网络调用，较慢。
+        # 云端若在 /chat 的 HTTP 请求内同步等待，叠加冷启动极易撞 API 网关超时，
+        # 前端表现为“发送失败”。这里改为后台任务执行，create_project 立即返回；
+        # 真正需要 asset_id 的步骤（剧本/参考图生成）会先 await 该准备任务。
+        async def _prepare_project_assets() -> None:
+            await asyncio.to_thread(self._ensure_project_asset_group, project)
+            await asyncio.to_thread(self._register_uploaded_reference_assets, project)
+            self.save_project_state(project_id)
+
+        prep_task = asyncio.create_task(
+            _prepare_project_assets(),
+            name=f"project-prepare:{project_id}",
+        )
+        self._project_prepare_tasks[project_id] = prep_task
 
         logger.info(f"Project created with combined_input: {combined_input[:200]}...")
 
+        # 持久化初始状态，云端多实例场景下可被其它实例回源恢复。
+        self.save_project_state(project_id)
+
         return project
+
+    async def ensure_project_prepared(self, project_id: str) -> None:
+        """等待项目的素材组/上传参考图后台准备任务完成（幂等）。"""
+        task = self._project_prepare_tasks.get(project_id)
+        if task is None:
+            return
+        try:
+            await asyncio.shield(task)
+        finally:
+            if self._project_prepare_tasks.get(project_id) is task:
+                self._project_prepare_tasks.pop(project_id, None)
 
     def _normalize_uploaded_reference_images(
         self,
@@ -1517,6 +1546,9 @@ class MainAgent:
                 scene_state.approved = bool(final_approved)
                 project.next_scene_index = min(scene_index + 1, len(project.script.scenes))
 
+                # 每完成一个分镜即持久化，云端实例回收/切换后仍可回源恢复。
+                self.save_project_state(project.project_id)
+
                 logger.info(f"[FLOW] Scene {scene_number} completed. Approved: {final_approved}, Score: {final_score}")
 
                 # 手动模式：每次只完成一个分镜，然后停住等待 next/go/下一步
@@ -1593,6 +1625,9 @@ class MainAgent:
                 project.status = "videos_generated"
                 project.progress = 90
                 logger.info(f"[FLOW] Video generation completed without merge for project {project_id}")
+
+            # 视频流程结束后持久化，保证合成步骤在任意实例都能恢复项目。
+            self.save_project_state(project_id)
 
         except Exception as e:
             logger.error(f"[FLOW] Video generation failed: {str(e)}")
@@ -2155,6 +2190,9 @@ class MainAgent:
         """调用ScriptAgent生成剧本"""
         logger.info(f"Generating script for project {project.project_id}")
 
+        # 确保后台的素材组准备任务已完成（create_project 已改为非阻塞）。
+        await self.ensure_project_prepared(project.project_id)
+
         audio_text = None
         if project.audio_url:
             try:
@@ -2533,6 +2571,8 @@ class MainAgent:
         progress_callback: Optional[Callable[[VideoProject], Awaitable[None]]] = None,
     ) -> GeneratedImage:
         self._raise_if_project_ended(project)
+        # 确保后台素材组准备任务完成，再进行参考图生成/登记。
+        await self.ensure_project_prepared(project.project_id)
         active_task = self._reference_generation_tasks.get(project.project_id)
         if active_task and not active_task.done():
             return await asyncio.shield(active_task)
@@ -3201,9 +3241,42 @@ class MainAgent:
             except Exception as e:
                 logger.error(f"WebSocket send error: {str(e)}")
 
+    def save_project_state(self, project_id: str) -> None:
+        """将项目状态快照持久化到 TOS，用于云端多实例/实例回收后的回源恢复。
+
+        注意：持久化失败不能影响主流程（best-effort），仅记录日志。
+        """
+        project = self.projects.get(project_id)
+        if not project:
+            return
+        try:
+            state_json = project.model_dump_json()
+            tos_service.put_project_state_json(project_id, state_json)
+        except Exception as e:
+            logger.warning(f"save_project_state failed for {project_id}: {str(e)}")
+
+    def _restore_project_from_tos(self, project_id: str) -> Optional[VideoProject]:
+        """内存未命中时，尝试从 TOS 快照恢复项目到内存。"""
+        try:
+            state_json = tos_service.get_project_state_json(project_id)
+            if not state_json:
+                return None
+            project = VideoProject.model_validate_json(state_json)
+            self.projects[project_id] = project
+            logger.info(f"Project {project_id} restored from TOS snapshot")
+            return project
+        except Exception as e:
+            logger.warning(f"Failed to restore project {project_id} from TOS: {str(e)}")
+            return None
+
     def get_project(self, project_id: str) -> Optional[VideoProject]:
-        """获取项目信息"""
-        return self.projects.get(project_id)
+        """获取项目信息；内存未命中时回源 TOS 快照（云端跨实例恢复）。"""
+        if not project_id:
+            return None
+        project = self.projects.get(project_id)
+        if project is not None:
+            return project
+        return self._restore_project_from_tos(project_id)
 
     def chat_with_user(self, message: str, project_id: str = None, output_language: Optional[str] = None) -> str:
         """处理已有项目的补充需求，不再执行旧的风格收集/预处理 LLM 对话。"""

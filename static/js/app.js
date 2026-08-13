@@ -802,10 +802,50 @@ async function init() {
     bindEvents();
 }
 
+// 健壮解析后端 JSON 响应。
+// 云端 API 网关在实例繁忙/冷启动时可能返回明文错误（如 "upstream request timeout"），
+// 直接 response.json() 会抛 SyntaxError，前端表现为“发送失败/请重试”。
+// 这里对非 JSON 响应给出可读错误，交由调用方决定是否重试或提示。
+async function parseJsonResponse(response) {
+    const rawText = await response.text();
+    try {
+        return JSON.parse(rawText);
+    } catch (e) {
+        throw new Error(`gateway_error: HTTP ${response.status} ${String(rawText).slice(0, 100)}`);
+    }
+}
+
+// 获取/生成稳定的 client_id。
+// 云端 API 网关会在长任务的静默期主动断开长连接 WebSocket，浏览器随后自动重连。
+// 若每次重连都拿到新的 client_id，正在后台运行的任务仍向“旧 client_id”推送消息，
+// 而旧连接已 close，导致进度/完成消息丢失（UI 卡住）、并触发误清理（合成时“未找到项目”）。
+// 这里用 sessionStorage 持久化一个稳定的 client_id，重连时携带，让后端复用同一连接标识。
+function getStableClientId() {
+    try {
+        let cid = sessionStorage.getItem('ws_client_id');
+        if (!cid) {
+            cid = (window.crypto && window.crypto.randomUUID)
+                ? window.crypto.randomUUID()
+                : 'cid-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+            sessionStorage.setItem('ws_client_id', cid);
+        }
+        return cid;
+    } catch (e) {
+        // sessionStorage 不可用时退化为内存值（至少保证单次会话内稳定）。
+        if (!wsClientId) {
+            wsClientId = 'cid-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+        }
+        return wsClientId;
+    }
+}
+
 // 连接 WebSocket - 添加3600秒长链接和心跳机制
 function connectWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    // 携带稳定 client_id，保证网关断连重连后仍复用同一连接标识。
+    const stableClientId = getStableClientId();
+    wsClientId = stableClientId;
+    ws = new WebSocket(`${protocol}//${window.location.host}/ws?client_id=${encodeURIComponent(stableClientId)}`);
     
     ws.onopen = () => {
         // 启动心跳机制
@@ -882,6 +922,10 @@ function handleWebSocketMessage(data) {
             hideEmptyState();
             hideFullscreenGenerating();
             handleAgentOutput(data.data.agent, data.data.output);
+            break;
+
+        case 'reference_asset_regenerated':
+            handleReferenceAssetRegenerated(data.data);
             break;
 
         case 'step_complete':
@@ -1514,7 +1558,7 @@ async function sendMessage() {
                         use_original_reference: useOriginalReference ? 'true' : 'false'
                     })
                 });
-                const result = await response.json();
+                const result = await parseJsonResponse(response);
                 if (result.success) {
                     currentProjectId = result.project_id;
                     projectEnded = false;
@@ -1585,7 +1629,7 @@ async function sendMessage() {
             })
         });
         
-        const result = await response.json();
+        const result = await parseJsonResponse(response);
         
         if (result.success) {
             currentProjectId = result.project_id;
@@ -2124,23 +2168,41 @@ async function handleImageUpload(event) {
 
 // 上传文件
 async function uploadFile(file, projectId = '') {
-    const formData = new FormData();
-    formData.append('file', file);
-    if (projectId) {
-        formData.append('project_id', projectId);
-    }
-    
-    const response = await fetch('/upload', {
-        method: 'POST',
-        body: formData
-    });
-    
-    const result = await response.json();
-    
-    if (result.success) {
-        return result.url;
-    } else {
-        throw new Error(result.error);
+    // 云端网关偶发 "upstream request timeout" 等非 JSON 明文错误；
+    // 直接 response.json() 会抛 SyntaxError 使上传硬失败。这里做健壮解析 + 一次重试。
+    const attemptUpload = async () => {
+        const formData = new FormData();
+        formData.append('file', file);
+        if (projectId) {
+            formData.append('project_id', projectId);
+        }
+
+        const response = await fetch('/upload', {
+            method: 'POST',
+            body: formData
+        });
+
+        const rawText = await response.text();
+        let result;
+        try {
+            result = JSON.parse(rawText);
+        } catch (parseError) {
+            // 非 JSON（多为网关超时/网关错误页），抛出可读错误以触发重试。
+            throw new Error(`gateway_error: HTTP ${response.status} ${rawText.slice(0, 80)}`);
+        }
+
+        if (result.success) {
+            return result.url;
+        }
+        throw new Error(result.error || 'upload_failed');
+    };
+
+    try {
+        return await attemptUpload();
+    } catch (firstError) {
+        console.warn('Upload attempt failed, retrying once:', firstError);
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        return await attemptUpload();
     }
 }
 
@@ -3047,6 +3109,62 @@ function refreshVariantAssetsActionState() {
     });
 }
 
+// 标记某个参考资产正处于“后台异步重生成”状态：保持锁定，等待 WebSocket 推送结果。
+const pendingReferenceAssetRegenerations = new Set();
+
+function markReferenceAssetRegenerationPending(referenceAssetKey) {
+    if (!referenceAssetKey) return;
+    pendingReferenceAssetRegenerations.add(referenceAssetKey);
+    // 保持 regeneratingReferenceAssetKeys 中的锁定，不在 finally 中移除。
+}
+
+// 统一收尾：解锁按钮并刷新三个模块的状态。
+// force=true 时（WebSocket 结果到达）无条件解锁；否则若该 key 仍在等待后台异步结果，则保持锁定。
+function finishReferenceAssetRegeneration(referenceAssetKey, force = false) {
+    if (referenceAssetKey) {
+        if (!force && pendingReferenceAssetRegenerations.has(referenceAssetKey)) {
+            // 仍在等待 WebSocket 推送结果，保持锁定，仅刷新状态。
+            refreshReferenceImageActionState();
+            refreshVariantAssetsActionState();
+            refreshStoryboardActionState();
+            return;
+        }
+        regeneratingReferenceAssetKeys.delete(referenceAssetKey);
+        pendingReferenceAssetRegenerations.delete(referenceAssetKey);
+    }
+    referenceImageRegenerating = regeneratingReferenceAssetKeys.size > 0;
+    refreshReferenceImageActionState();
+    refreshVariantAssetsActionState();
+    refreshStoryboardActionState();
+    maybeStartPendingStepCountdown();
+}
+
+// 处理后端通过 WebSocket 推送的单张重生成结果（角色装扮图/场景状态图/故事版/参考图库）。
+function handleReferenceAssetRegenerated(data) {
+    data = data || {};
+    const referenceAssetKey = data.reference_asset_key || '';
+    // 若不是当前页面发起的异步任务，忽略（例如多标签场景），但仍处理成功刷新。
+    try {
+        if (data.success) {
+            if (data.reference_output) {
+                displayReferenceImage(data.reference_output);
+            }
+            const name = data.reference_name || data.variant_key || '';
+            renderStatusBar(
+                t('messages.referenceAssetRegeneratedSuccess', { name }),
+                'info',
+                t('steps.referenceImageTitle')
+            );
+            addAgentMessage(t('messages.referenceAssetRegeneratedSuccess', { name }));
+        } else {
+            const errText = data.error || '';
+            addAgentMessage(t('messages.regenerateFailedWithError', { error: errText }));
+        }
+    } finally {
+        finishReferenceAssetRegeneration(referenceAssetKey, true);
+    }
+}
+
 // 重新生成单张角色装扮图/场景状态图
 async function regenerateVariantAsset(referenceType, encodedVariantKey) {
     if (!currentProjectId) {
@@ -3084,6 +3202,11 @@ async function regenerateVariantAsset(referenceType, encodedVariantKey) {
         });
 
         const result = await response.json();
+        if (result.success && result.async) {
+            // 后台异步生成：保持按钮锁定，结果通过 WebSocket 推送后再解锁与刷新。
+            markReferenceAssetRegenerationPending(referenceAssetKey);
+            return;
+        }
         if (result.success) {
             displayReferenceImage(result.reference_output);
             renderStatusBar(
@@ -3103,12 +3226,22 @@ async function regenerateVariantAsset(referenceType, encodedVariantKey) {
         console.error('Regenerate variant asset error:', error);
         addAgentMessage(t('messages.regenerateFailed'));
     } finally {
-        regeneratingReferenceAssetKeys.delete(referenceAssetKey);
-        referenceImageRegenerating = regeneratingReferenceAssetKeys.size > 0;
-        refreshReferenceImageActionState();
-        refreshVariantAssetsActionState();
-        maybeStartPendingStepCountdown();
+        finishReferenceAssetRegeneration(referenceAssetKey);
     }
+}
+
+// 刷新“各分镜故事版”模块内重新生成按钮状态。
+function refreshStoryboardActionState() {
+    const card = document.getElementById('storyboard-card');
+    if (!card) return;
+    const regenerateButtons = card.querySelectorAll('button.reference-regenerate-btn');
+    regenerateButtons.forEach((regenerateBtn) => {
+        const assetKey = regenerateBtn.dataset.referenceKey || '';
+        const enabled = canRegenerateReferenceImage(false, assetKey);
+        regenerateBtn.disabled = !enabled;
+        regenerateBtn.style.opacity = enabled ? '' : '0.65';
+        regenerateBtn.style.cursor = enabled ? 'pointer' : 'not-allowed';
+    });
 }
 
 // 渲染“各分镜故事版”模块：位于布景参考图库与分镜视频之间，布局参照参考图库。
@@ -3161,6 +3294,7 @@ function displayStoryboards(output) {
                     <button
                         class="item-btn regenerate reference-regenerate-btn"
                         data-locked="false"
+                        data-reference-key="${escapeHtml(buildReferenceAssetKey('storyboard', sceneNumber))}"
                         onclick="event.stopPropagation(); regenerateStoryboardAsset(${sceneNumber}, ${slotIndex})"
                         style="background: #faad14; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer;"
                     >${t('actions.regenerate')}</button>
@@ -3175,7 +3309,7 @@ function displayStoryboards(output) {
         <div class="reference-grid">${items}</div>
     `;
 
-    refreshReferenceImageActionState();
+    refreshStoryboardActionState();
 }
 
 // 重新生成单张分镜故事版
@@ -3184,15 +3318,17 @@ async function regenerateStoryboardAsset(sceneNumber, slotIndex = -1) {
         alert(t('messages.createProjectFirst'));
         return;
     }
-    if (!canRegenerateReferenceImage(false)) {
+    const referenceAssetKey = buildReferenceAssetKey('storyboard', sceneNumber);
+    if (!canRegenerateReferenceImage(false, referenceAssetKey)) {
         return;
     }
 
-    const referenceAssetKey = `storyboard:${sceneNumber}`;
     regeneratingReferenceAssetKeys.add(referenceAssetKey);
     referenceImageRegenerating = regeneratingReferenceAssetKeys.size > 0;
     cancelAutoRunCountdown();
     refreshReferenceImageActionState();
+    refreshVariantAssetsActionState();
+    refreshStoryboardActionState();
     renderStatusBar(t('labels.referenceImageRegeneratingText'), 'loading', t('steps.referenceImageTitle'));
 
     try {
@@ -3214,6 +3350,11 @@ async function regenerateStoryboardAsset(sceneNumber, slotIndex = -1) {
         });
 
         const result = await response.json();
+        if (result.success && result.async) {
+            // 后台异步生成：保持按钮锁定，结果通过 WebSocket 推送后再解锁与刷新。
+            markReferenceAssetRegenerationPending(referenceAssetKey);
+            return;
+        }
         if (result.success) {
             displayReferenceImage(result.reference_output);
             renderStatusBar(
@@ -3229,10 +3370,7 @@ async function regenerateStoryboardAsset(sceneNumber, slotIndex = -1) {
         console.error('Regenerate storyboard asset error:', error);
         addAgentMessage(t('messages.regenerateFailed'));
     } finally {
-        regeneratingReferenceAssetKeys.delete(referenceAssetKey);
-        referenceImageRegenerating = regeneratingReferenceAssetKeys.size > 0;
-        refreshReferenceImageActionState();
-        maybeStartPendingStepCountdown();
+        finishReferenceAssetRegeneration(referenceAssetKey);
     }
 }
 
@@ -3276,6 +3414,11 @@ async function regenerateReferenceAsset(referenceType, encodedReferenceName, ref
         });
 
         const result = await response.json();
+        if (result.success && result.async) {
+            // 后台异步生成：保持按钮锁定，结果通过 WebSocket 推送后再解锁与刷新。
+            markReferenceAssetRegenerationPending(referenceAssetKey);
+            return;
+        }
         if (result.success) {
             displayReferenceImage(result.reference_output);
             renderStatusBar(
@@ -3295,10 +3438,7 @@ async function regenerateReferenceAsset(referenceType, encodedReferenceName, ref
         console.error('Regenerate reference asset error:', error);
         addAgentMessage(t('messages.regenerateFailed'));
     } finally {
-        regeneratingReferenceAssetKeys.delete(referenceAssetKey);
-        referenceImageRegenerating = regeneratingReferenceAssetKeys.size > 0;
-        refreshReferenceImageActionState();
-        maybeStartPendingStepCountdown();
+        finishReferenceAssetRegeneration(referenceAssetKey);
     }
 }
 
