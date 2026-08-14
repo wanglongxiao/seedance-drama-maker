@@ -68,7 +68,10 @@
     "review": "審核",
     "video": "影片",
     "storyboardImage": "分鏡圖",
-    "storyboardImageTitle": "🧩 分鏡圖生成"
+    "storyboardImageTitle": "🧩 分鏡圖生成",
+    "referenceCategory1": "人物/角色圖庫與佈景參考圖庫",
+    "referenceCategory2": "角色裝扮圖與場景狀態圖",
+    "referenceCategory3": "各分鏡圖"
   },
   "status": {
     "processing": "正在處理...",
@@ -216,6 +219,10 @@
     "allVideosCompleted": "🎉 影片生成全部完成！",
     "autoEnterNext": "自動進入下一步：{step}...",
     "autoEnterNextNewFlow": "自動進入下一步：{step}...（新流程：逐個生成＋審核）",
+    "autoEnterNextReferenceStage": "自動進入下一階段：{stage}...",
+    "referenceCategory1Complete": "🎨 人物/角色圖庫與佈景參考圖庫已生成完成！\n\n請在聊天區輸入：\n• \"繼續\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"開始\" - 進入下一階段\n• \"重新生成\" / \"重做\" / \"regen\" - 重新製作本階段\n或對任意一張圖片點擊\"重新生成\"進行微調",
+    "referenceCategory2Complete": "🎨 角色裝扮圖與場景狀態圖已生成完成！\n\n請在聊天區輸入：\n• \"繼續\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"開始\" - 進入下一階段\n• \"重新生成\" / \"重做\" / \"regen\" - 重新製作本階段\n或對任意一張圖片點擊\"重新生成\"進行微調",
+    "referenceCategory3Complete": "🧩 各分鏡圖已生成完成！\n\n請在聊天區輸入：\n• \"繼續\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"開始\" - 進行下一步：🎬 影片生成\n• \"重新生成\" / \"重做\" / \"regen\" - 重新製作本階段\n或對任意一張圖片點擊\"重新生成\"進行微調",
     "exitAutoRun": "⛔ 已退出自動模式。\n\n請在聊天區輸入：\n• 「繼續」 / 「下一步」 / 「ok」 / 「好」 / 「go」 / 「開始」 - 繼續生成\n• 「重新生成」 / 「重做」 / 「regen」 - 重新製作當前步驟",
     "exitAutoRunStatus": "已退出自動模式，請在聊天區輸入指令繼續",
     "scriptComplete": "📖 劇本生成已完成！\n\n請在聊天區輸入：\n• 「繼續」 / 「下一步」 / 「ok」 / 「好」 / 「go」 / 「開始」 - 進行下一步：🎨 參考圖生成\n• 「重新生成」 / 「重做」 / 「regen」 - 重新製作📖 劇本生成",

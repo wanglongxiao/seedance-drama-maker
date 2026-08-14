@@ -662,6 +662,33 @@ class MainAgent:
             and actual_storyboard_count >= expected["storyboards"]
         )
 
+    def _reference_stage_has_category2(self, project: VideoProject) -> bool:
+        """判断分类2（角色装扮图/场景状态图）是否存在。"""
+        expected = self._expected_reference_counts(project)
+        return (expected["character_outfits"] + expected["scene_states"]) > 0
+
+    def _is_reference_stage_ready(self, project: VideoProject, stage: str) -> bool:
+        """按子阶段判定是否就绪：category1=角色+场景；category2=装扮+状态；category3=故事版。"""
+        expected = self._expected_reference_counts(project)
+        actual_character_count = len(getattr(project, "character_reference_images", []) or [])
+        actual_scene_count = len(getattr(project, "scene_reference_images", []) or [])
+        actual_outfit_count = len(getattr(project, "character_outfit_images", []) or [])
+        actual_scene_state_count = len(getattr(project, "scene_state_images", []) or [])
+        actual_storyboard_count = len(getattr(project, "storyboard_images", []) or [])
+        if stage == "category1":
+            return (
+                actual_character_count >= expected["characters"]
+                and actual_scene_count >= expected["scenes"]
+            )
+        if stage == "category2":
+            return (
+                actual_outfit_count >= expected["character_outfits"]
+                and actual_scene_state_count >= expected["scene_states"]
+            )
+        if stage == "category3":
+            return actual_storyboard_count >= expected["storyboards"]
+        return self._is_reference_library_ready_for_confirmation(project)
+
     def _serialize_reference_images(
         self,
         project: VideoProject,
@@ -748,6 +775,7 @@ class MainAgent:
         project: VideoProject,
         message: Optional[str] = None,
         include_default_message: bool = False,
+        stage: Optional[str] = None,
     ) -> Dict[str, Any]:
         character_images = list(getattr(project, "character_reference_images", []) or [])
         scene_images = list(getattr(project, "scene_reference_images", []) or [])
@@ -789,6 +817,9 @@ class MainAgent:
             },
             "scene_reference_mappings": self._build_scene_reference_mappings(project),
             "ready_for_confirmation": self._is_reference_library_ready_for_confirmation(project),
+            "reference_stage": stage,
+            "stage_ready": self._is_reference_stage_ready(project, stage) if stage else None,
+            "has_category2": self._reference_stage_has_category2(project),
             "expected_count": expected_counts["total"],
             "expected_character_count": expected_counts["characters"],
             "expected_scene_count": expected_counts["scenes"],
@@ -866,6 +897,28 @@ class MainAgent:
         project: VideoProject,
     ) -> Optional[Dict[str, List[Optional[GeneratedImage]]]]:
         return self._reference_generation_slots.get(project.project_id)
+
+    def _ensure_reference_generation_session(
+        self,
+        project: VideoProject,
+        character_count: int,
+        scene_count: int,
+        storyboard_count: int,
+        outfit_count: int = 0,
+        scene_state_count: int = 0,
+    ) -> Dict[str, List[Optional[GeneratedImage]]]:
+        """分阶段生成复用同一 session：已存在则直接返回，避免重建清空前阶段成果。"""
+        existing = self._reference_generation_slots.get(project.project_id)
+        if existing is not None:
+            return existing
+        return self._start_reference_generation_session(
+            project,
+            character_count=character_count,
+            scene_count=scene_count,
+            storyboard_count=storyboard_count,
+            outfit_count=outfit_count,
+            scene_state_count=scene_state_count,
+        )
 
     def _finish_reference_generation_session(self, project: VideoProject) -> None:
         self._reference_generation_slots.pop(project.project_id, None)
@@ -2273,10 +2326,18 @@ class MainAgent:
         self,
         project: VideoProject,
         progress_callback: Optional[Callable[[VideoProject], Awaitable[None]]] = None,
+        stage: str = "all",
     ) -> GeneratedImage:
-        """生成角色参考图与场景参考图，并保留兼容字段。"""
+        """生成角色参考图与场景参考图，并保留兼容字段。
+
+        stage 控制惰性分阶段生成：
+        - "category1": 仅角色图库 + 布景参考图库
+        - "category2": 仅角色装扮图 + 场景状态图（无差异则跳过）
+        - "category3": 仅各分镜故事版
+        - "all": 三类一次性生成（兼容旧 execute_images_step 路径）
+        """
         self._raise_if_project_ended(project)
-        logger.info(f"Step 1: Generating reference image library for project {project.project_id}")
+        logger.info(f"Step 1: Generating reference image library (stage={stage}) for project {project.project_id}")
         user_style_info = getattr(project, "combined_input", None)
         aspect_ratio = getattr(project, "aspect_ratio", None)
         uploaded_assets = list(getattr(project, "uploaded_reference_images", []) or [])
@@ -2310,7 +2371,7 @@ class MainAgent:
             f"max_concurrency={reference_max_concurrency}"
         )
 
-        session_slots = self._start_reference_generation_session(
+        session_slots = self._ensure_reference_generation_session(
             project,
             character_count=len(target_characters),
             scene_count=len(scene_definitions),
@@ -2509,13 +2570,19 @@ class MainAgent:
                 )
             await finalize_generated_image("storyboard", index, stored_storyboard)
 
-        tasks = [
-            asyncio.create_task(generate_character_job(index, character))
-            for index, character in enumerate(target_characters)
-        ] + [
-            asyncio.create_task(generate_scene_job(index, scene_definition))
-            for index, scene_definition in enumerate(scene_definitions)
-        ]
+        run_category1 = stage in ("all", "category1")
+        run_category2 = stage in ("all", "category2")
+        run_category3 = stage in ("all", "category3")
+
+        tasks = []
+        if run_category1:
+            tasks = [
+                asyncio.create_task(generate_character_job(index, character))
+                for index, character in enumerate(target_characters)
+            ] + [
+                asyncio.create_task(generate_scene_job(index, scene_definition))
+                for index, scene_definition in enumerate(scene_definitions)
+            ]
 
         try:
             if tasks:
@@ -2526,33 +2593,38 @@ class MainAgent:
             if not project.reference_image:
                 raise RuntimeError("No reference images were generated")
 
-            # 所有角色主图 + 场景主图生成完成后，再按每个分镜的角色装扮 / 场景状态信息，
-            # 生成角色装扮图与场景状态图（已去重复用）。并行生成，受 max_concurrency 控制。
-            variant_tasks = [
-                asyncio.create_task(generate_outfit_job(index, task))
-                for index, task in enumerate(outfit_tasks_plan)
-            ] + [
-                asyncio.create_task(generate_scene_state_job(index, task))
-                for index, task in enumerate(scene_state_tasks_plan)
-            ]
-            if variant_tasks:
-                await asyncio.gather(*variant_tasks)
-                _sync_all()
+            if run_category2:
+                # 所有角色主图 + 场景主图生成完成后，再按每个分镜的角色装扮 / 场景状态信息，
+                # 生成角色装扮图与场景状态图（已去重复用）。并行生成，受 max_concurrency 控制。
+                variant_tasks = [
+                    asyncio.create_task(generate_outfit_job(index, task))
+                    for index, task in enumerate(outfit_tasks_plan)
+                ] + [
+                    asyncio.create_task(generate_scene_state_job(index, task))
+                    for index, task in enumerate(scene_state_tasks_plan)
+                ]
+                if variant_tasks:
+                    await asyncio.gather(*variant_tasks)
+                    _sync_all()
 
-            # 所有角色图（含装扮图）+ 场景图（含状态图）生成完成后，再逐个分镜生成 6 宫格 storyboard。
-            # 多个分镜的 storyboard 并行生成，并发数由参考图库配置的 max_concurrency（semaphore）控制。
-            storyboard_tasks = [
-                asyncio.create_task(generate_storyboard_job(index, scene))
-                for index, scene in enumerate(getattr(project.script, "scenes", None) or [])
-            ]
-            if storyboard_tasks:
-                await asyncio.gather(*storyboard_tasks)
+            if run_category3:
+                # 所有角色图（含装扮图）+ 场景图（含状态图）生成完成后，再逐个分镜生成 6 宫格 storyboard。
+                # 多个分镜的 storyboard 并行生成，并发数由参考图库配置的 max_concurrency（semaphore）控制。
+                storyboard_tasks = [
+                    asyncio.create_task(generate_storyboard_job(index, scene))
+                    for index, scene in enumerate(getattr(project.script, "scenes", None) or [])
+                ]
+                if storyboard_tasks:
+                    await asyncio.gather(*storyboard_tasks)
 
             _sync_all()
 
             return project.reference_image
         finally:
-            self._finish_reference_generation_session(project)
+            # 分阶段生成时，仅在 category3（或旧 all 路径）完成后才结束 session，
+            # 以保住 category1/category2 之间单张重生成所需的 session_slots 上下文。
+            if stage in ("all", "category3"):
+                self._finish_reference_generation_session(project)
 
     def _reset_reference_library_state(self, project: VideoProject) -> None:
         project.character_reference_images = []
@@ -2618,6 +2690,72 @@ class MainAgent:
         finally:
             if self._reference_generation_tasks.get(project.project_id) is generation_task:
                 self._reference_generation_tasks.pop(project.project_id, None)
+
+    async def generate_reference_stage_with_retry(
+        self,
+        project: VideoProject,
+        stage: str,
+        progress_callback: Optional[Callable[[VideoProject], Awaitable[None]]] = None,
+    ) -> GeneratedImage:
+        """分阶段生成参考图（category1/category2/category3），含自动重试。
+
+        - 仅 category1 会调用 `_reset_reference_library_state` 清空全部五类；
+          category2/category3 重试不清空，只幂等重跑本阶段对应槽位。
+        - 幂等表 key 使用 `f"{project_id}:{stage}"`，避免不同阶段互相 shield。
+        - session 仅在 category3 完成后清理（见 `_generate_reference_image` finally）。
+        """
+        self._raise_if_project_ended(project)
+        await self.ensure_project_prepared(project.project_id)
+        stage_key = f"{project.project_id}:{stage}"
+        active_task = self._reference_generation_tasks.get(stage_key)
+        if active_task and not active_task.done():
+            return await asyncio.shield(active_task)
+
+        async def run_generation() -> GeneratedImage:
+            max_auto_retries = max(0, int(config.get("video_generation.reference_images.auto_retry_count", 2)))
+            last_error: Optional[Exception] = None
+
+            for attempt in range(max_auto_retries + 1):
+                self._raise_if_project_ended(project)
+                if stage == "category1":
+                    self._reset_reference_library_state(project)
+                try:
+                    if attempt > 0:
+                        logger.warning(
+                            f"Reference stage {stage} generation retry {attempt}/{max_auto_retries} "
+                            f"for project {project.project_id}"
+                        )
+                    return await self._generate_reference_image(
+                        project, progress_callback=progress_callback, stage=stage
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        f"Reference stage {stage} generation failed on attempt {attempt + 1}/{max_auto_retries + 1} "
+                        f"for project {project.project_id}: {str(exc)}"
+                    )
+                    if attempt >= max_auto_retries:
+                        break
+
+            raise RuntimeError(
+                self._t(
+                    project,
+                    "error.reference_generation_failed_after_retries",
+                    retries=max_auto_retries,
+                    error=str(last_error) if last_error else "unknown error",
+                )
+            ) from last_error
+
+        generation_task = asyncio.create_task(
+            run_generation(),
+            name=f"reference-generation:{stage_key}",
+        )
+        self._reference_generation_tasks[stage_key] = generation_task
+        try:
+            return await asyncio.shield(generation_task)
+        finally:
+            if self._reference_generation_tasks.get(stage_key) is generation_task:
+                self._reference_generation_tasks.pop(stage_key, None)
 
     async def regenerate_reference_asset(
         self,

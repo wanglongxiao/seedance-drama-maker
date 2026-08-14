@@ -460,6 +460,60 @@ async def continue_generate_after_reference(
         return {"success": False, "error": translate(ui_language, "error.step_execute_failed", error=str(e))}
 
 
+@app.post("/continue_reference_stage")
+async def continue_reference_stage(
+    project_id: str = Form(...),
+    client_id: str = Form(None),
+    stage: str = Form(...),
+    generation_mode: Optional[str] = Form(None),
+    ui_language: Optional[str] = Form("zh-CN"),
+):
+    """用户确认某个参考图子阶段后推进下一子阶段（或进入视频）。
+
+    遵守 API 网关约 60s 超时约束：立即 create_task 触发生成并返回 {"success": True}，
+    生成进度与结果统一通过 WebSocket 推送。stage 为“当前已完成阶段”。
+    """
+    ui_language = normalize_locale(ui_language)
+    try:
+        if len(websocket_connections) == 0:
+            return {"success": False, "error": translate(ui_language, "error.no_active_websocket")}
+
+        if not client_id:
+            client_id = list(websocket_connections.keys())[0]
+            logger.warning(f"/continue_reference_stage: missing client_id, fallback to {client_id}")
+
+        if client_id not in websocket_connections:
+            return {"success": False, "error": translate(ui_language, "error.invalid_client_id", client_id=client_id)}
+
+        access_error = validate_project_client_access(project_id, client_id)
+        if access_error:
+            return {"success": False, "error": access_error}
+
+        if stage not in ("category1", "category2", "category3"):
+            return {"success": False, "error": translate(ui_language, "error.invalid_step", step=stage)}
+
+        main_agent.set_project_output_language(project_id, ui_language)
+        main_agent.set_project_video_generation_mode(project_id, generation_mode)
+
+        project = main_agent.get_project(project_id)
+        has_category2 = bool(main_agent._reference_stage_has_category2(project)) if project else False
+        next_stage = _compute_next_reference_stage(stage, has_category2)
+
+        if next_stage == "videos":
+            asyncio.create_task(
+                continue_generate_after_reference_confirmation(client_id, project_id)
+            )
+        else:
+            asyncio.create_task(
+                execute_reference_stage(client_id, project_id, next_stage)
+            )
+
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"continue_reference_stage failed: {str(e)}")
+        return {"success": False, "error": translate(ui_language, "error.step_execute_failed", error=str(e))}
+
+
 @app.post("/regenerate")
 async def regenerate(
     project_id: str = Form(...),
@@ -1166,6 +1220,46 @@ async def websocket_endpoint(websocket: WebSocket):
                             regenerate_reference_image(client_id, project_id)
                         )
                     
+            elif message_type == "confirm_reference_stage":
+                # 用户确认某个参考图子阶段（category1/category2/category3）
+                confirmed = data.get("confirmed", True)
+                project_id = data.get("project_id")
+                stage = str(data.get("stage") or "").strip()
+                generation_mode = data.get("generation_mode")
+
+                if not project_id or stage not in ("category1", "category2", "category3"):
+                    await manager.send_message(client_id, {
+                        "type": "error",
+                        "data": {"message": translate(ui_language, "error.invalid_step", step=stage or "?")}
+                    })
+                elif confirmed:
+                    project = main_agent.get_project(project_id)
+                    has_category2 = bool(main_agent._reference_stage_has_category2(project)) if project else False
+                    next_stage = _compute_next_reference_stage(stage, has_category2)
+                    if next_stage == "videos":
+                        # category3 已确认：进入视频生成（复用既有流程）。
+                        main_agent.set_project_video_generation_mode(project_id, generation_mode)
+                        asyncio.create_task(
+                            continue_generate_after_reference_confirmation(client_id, project_id)
+                        )
+                        await manager.send_message(client_id, {
+                            "type": "status",
+                            "data": {
+                                "agent": "image_agent",
+                                "message": translate(ui_language, "message.reference.confirmed_start_videos")
+                            }
+                        })
+                    else:
+                        # 推进下一子阶段（category2 或 category3）。
+                        asyncio.create_task(
+                            execute_reference_stage(client_id, project_id, next_stage)
+                        )
+                else:
+                    # 用户要求重跑当前阶段（不清前阶段）。
+                    asyncio.create_task(
+                        execute_reference_stage(client_id, project_id, stage)
+                    )
+
             elif message_type == "ping":
                 # 心跳响应
                 try:
@@ -1363,18 +1457,83 @@ async def execute_images_step(client_id: str, project_id: str):
 
 
 async def execute_reference_image_step(client_id: str, project_id: str):
-    """只执行参考图生成步骤（第一步）"""
+    """只执行参考图生成第一子阶段（category1：人物/角色图库 + 布景参考图库）。
+
+    参考图内部改造为严格串行三子阶段：category1 → category2（可选）→ category3。
+    每个子阶段完成后等待用户确认（手动）或倒计时（自动）再推进下一阶段。
+    """
+    await execute_reference_stage(client_id, project_id, "category1")
+
+
+# 参考图子阶段元信息：progress 文案、完成文案、确认提示、下一确认阶段进度值
+_REFERENCE_STAGE_META = {
+    "category1": {
+        "progress": 30,
+        "completed_progress": 33,
+        "completed_wait_key": "progress.reference.category1_completed_wait",
+        "confirm_prompt_key": "message.reference.category1_confirm_prompt",
+        "step_complete_key": "step.reference.category1_complete",
+    },
+    "category2": {
+        "progress": 34,
+        "completed_progress": 36,
+        "completed_wait_key": "progress.reference.category2_completed_wait",
+        "confirm_prompt_key": "message.reference.category2_confirm_prompt",
+        "step_complete_key": "step.reference.category2_complete",
+    },
+    "category3": {
+        "progress": 37,
+        "completed_progress": 40,
+        "completed_wait_key": "progress.reference.category3_completed_wait",
+        "confirm_prompt_key": "message.reference.category3_confirm_prompt",
+        "step_complete_key": "step.reference.category3_complete",
+    },
+}
+
+
+def _compute_next_reference_stage(stage: str, has_category2: bool) -> str:
+    """依据当前完成阶段与是否存在分类2，计算下一目标：category2/category3/videos。"""
+    if stage == "category1":
+        return "category2" if has_category2 else "category3"
+    if stage == "category2":
+        return "category3"
+    return "videos"
+
+
+def _current_reference_stage(project) -> str:
+    """由 project.reference_stage（{stage}_done）推导“当前所处子阶段”，用于单张重生成输出。"""
+    done = str(getattr(project, "reference_stage", "none") or "none")
+    if done.startswith("category3"):
+        return "category3"
+    if done.startswith("category2"):
+        return "category2"
+    return "category1"
+
+
+async def execute_reference_stage(client_id: str, project_id: str, stage: str):
+    """通用分阶段参考图生成执行器（category1/category2/category3）。
+
+    按 stage 调 generate_reference_stage_with_retry，发送 progress/agent_output/step_complete
+    （均携带 reference_stage）。完成后 save_project_state 并将 reference_stage 标记为 {stage}_done。
+    若为 category2 但实际无装扮/状态差异（has_category2=False），直接跳到 category3。
+    """
     project = main_agent.get_project(project_id)
     lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+    meta = _REFERENCE_STAGE_META.get(stage, _REFERENCE_STAGE_META["category1"])
+
+    # category2 跳过保护：若实际无分类2资产，直接推进 category3，避免卡死。
+    if stage == "category2" and not main_agent._reference_stage_has_category2(project):
+        logger.info(f"[REF-STAGE] project {project_id} has no category2 assets, skipping to category3")
+        await execute_reference_stage(client_id, project_id, "category3")
+        return
 
     await manager.send_message(client_id, {
         "type": "status",
         "data": {"agent": "image_agent", "message": translate(lang, "progress.reference.generating")}
     })
-
     await manager.send_message(client_id, {
         "type": "progress",
-        "data": {"agent": "image_agent", "progress": 30, "message": translate(lang, "progress.reference.generating")}
+        "data": {"agent": "image_agent", "progress": meta["progress"], "message": translate(lang, "progress.reference.generating")}
     })
 
     async def push_reference_library_progress(updated_project):
@@ -1382,20 +1541,27 @@ async def execute_reference_image_step(client_id: str, project_id: str):
             "type": "agent_output",
             "data": {
                 "agent": "image_agent",
-                "output": main_agent._build_reference_output(updated_project)
+                "output": main_agent._build_reference_output(updated_project, stage=stage)
             }
         })
 
-    # 逐张生成并推送参考图库
-    reference_image = await main_agent.generate_reference_image_with_retry(
-        project,
-        progress_callback=push_reference_library_progress,
-    )
-    project.reference_image = reference_image
+    try:
+        await main_agent.generate_reference_stage_with_retry(
+            project,
+            stage=stage,
+            progress_callback=push_reference_library_progress,
+        )
+    except Exception as e:
+        logger.error(f"[REF-STAGE] stage {stage} generation failed for project {project_id}: {str(e)}")
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": translate(lang, "error.generation_failed", error=str(e))}
+        })
+        return
 
     await manager.send_message(client_id, {
         "type": "progress",
-        "data": {"agent": "image_agent", "progress": 35, "message": translate(lang, "progress.reference.completed_wait")}
+        "data": {"agent": "image_agent", "progress": meta["completed_progress"], "message": translate(lang, meta["completed_wait_key"])}
     })
 
     await manager.send_message(client_id, {
@@ -1404,20 +1570,26 @@ async def execute_reference_image_step(client_id: str, project_id: str):
             "agent": "image_agent",
             "output": main_agent._build_reference_output(
                 project,
-                translate(lang, "message.reference.confirm_prompt")
+                translate(lang, meta["confirm_prompt_key"]),
+                stage=stage,
             )
         }
     })
 
-    # 参考图库完成后持久化，供后续视频/合成步骤跨实例恢复。
+    # 各子阶段完成后持久化子阶段进度，供跨实例断线恢复。
+    project.reference_stage = f"{stage}_done"
     main_agent.save_project_state(project_id)
 
-    # 通知步骤完成
+    has_category2 = main_agent._reference_stage_has_category2(project)
     await manager.send_message(client_id, {
         "type": "step_complete",
         "data": {
             "step": "reference_image",
-            "message": translate(lang, "step.reference.complete")
+            "reference_stage": stage,
+            "has_category2": has_category2,
+            "require_confirmation": True,
+            "confirmation_type": "reference_stage",
+            "message": translate(lang, meta["step_complete_key"])
         }
     })
 
@@ -1542,6 +1714,8 @@ async def regenerate_reference_asset_background(
         project.status = "waiting_reference_confirmation"
         project.current_step = "waiting_reference_confirmation"
 
+        # 携带当前子阶段，使前端 stage_ready/has_category2 正确，保证子阶段倒计时能重启。
+        current_stage = _current_reference_stage(project)
         await manager.send_message(client_id, {
             "type": "reference_asset_regenerated",
             "data": {
@@ -1551,7 +1725,8 @@ async def regenerate_reference_asset_background(
                 "reference_name": getattr(new_image, "name", None),
                 "variant_key": getattr(new_image, "variant_key", None),
                 "reference_output": main_agent._build_reference_output(
-                    project, translate(ui_language, "message.reference.regenerated_confirm_prompt")
+                    project, translate(ui_language, "message.reference.regenerated_confirm_prompt"),
+                    stage=current_stage,
                 ),
             }
         })

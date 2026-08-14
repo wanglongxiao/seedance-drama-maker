@@ -68,7 +68,10 @@
     "review": "Review",
     "video": "Video",
     "storyboardImage": "Storyboard",
-    "storyboardImageTitle": "🧩 Storyboard Images"
+    "storyboardImageTitle": "🧩 Storyboard Images",
+    "referenceCategory1": "Character gallery & scene reference gallery",
+    "referenceCategory2": "Character outfit & scene state images",
+    "referenceCategory3": "Storyboard images"
   },
   "status": {
     "processing": "Processing...",
@@ -216,6 +219,10 @@
     "allVideosCompleted": "🎉 Video generation is fully complete!",
     "autoEnterNext": "Automatically entering next step: {step}...",
     "autoEnterNextNewFlow": "Automatically entering next step: {step}... (new flow: generate and review scene by scene)",
+    "autoEnterNextReferenceStage": "Automatically entering next stage: {stage}...",
+    "referenceCategory1Complete": "🎨 Character gallery and scene reference gallery are ready!\n\nType in the chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - proceed to the next stage\n• \"regenerate\" / \"redo\" / \"regen\" - remake this stage\nor click \"Regenerate\" on any single image to fine-tune it",
+    "referenceCategory2Complete": "🎨 Character outfit images and scene state images are ready!\n\nType in the chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - proceed to the next stage\n• \"regenerate\" / \"redo\" / \"regen\" - remake this stage\nor click \"Regenerate\" on any single image to fine-tune it",
+    "referenceCategory3Complete": "🧩 Storyboard images are ready!\n\nType in the chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - proceed to the next step: 🎬 Video generation\n• \"regenerate\" / \"redo\" / \"regen\" - remake this stage\nor click \"Regenerate\" on any single image to fine-tune it",
     "exitAutoRun": "⛔ Auto mode exited.\n\nEnter in chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - continue\n• \"regenerate\" / \"redo\" / \"regen\" - regenerate current step",
     "exitAutoRunStatus": "Auto mode exited. Enter a command in chat to continue",
     "scriptComplete": "📖 Script generation complete!\n\nEnter in chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - next step: 🎨 Reference image\n• \"regenerate\" / \"redo\" / \"regen\" - regenerate 📖 Script generation",

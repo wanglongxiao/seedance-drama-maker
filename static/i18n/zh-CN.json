@@ -68,7 +68,10 @@
     "review": "审核",
     "video": "视频",
     "storyboardImage": "故事版",
-    "storyboardImageTitle": "🧩 分镜故事版"
+    "storyboardImageTitle": "🧩 分镜故事版",
+    "referenceCategory1": "人物/角色图库与布景参考图库",
+    "referenceCategory2": "角色装扮图与场景状态图",
+    "referenceCategory3": "各分镜故事版"
   },
   "status": {
     "processing": "正在处理...",
@@ -216,6 +219,10 @@
     "allVideosCompleted": "🎉 视频生成全部完成！",
     "autoEnterNext": "自动进入下一步：{step}...",
     "autoEnterNextNewFlow": "自动进入下一步：{step}... (新流程：逐个生成+审核)",
+    "autoEnterNextReferenceStage": "自动进入下一阶段：{stage}...",
+    "referenceCategory1Complete": "🎨 人物/角色图库与布景参考图库已生成完成！\n\n请在聊天区输入：\n• \"继续\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"开始\" - 进入下一阶段\n• \"重新生成\" / \"重做\" / \"regen\" - 重新制作本阶段\n或对任意一张图片点击\"重新生成\"进行微调",
+    "referenceCategory2Complete": "🎨 角色装扮图与场景状态图已生成完成！\n\n请在聊天区输入：\n• \"继续\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"开始\" - 进入下一阶段\n• \"重新生成\" / \"重做\" / \"regen\" - 重新制作本阶段\n或对任意一张图片点击\"重新生成\"进行微调",
+    "referenceCategory3Complete": "🧩 各分镜故事版已生成完成！\n\n请在聊天区输入：\n• \"继续\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"开始\" - 进行下一步：🎬 视频生成\n• \"重新生成\" / \"重做\" / \"regen\" - 重新制作本阶段\n或对任意一张图片点击\"重新生成\"进行微调",
     "exitAutoRun": "⛔ 已退出全自动模式。\n\n请在聊天区输入：\n• \"继续\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"开始\" - 继续生成\n• \"重新生成\" / \"重做\" / \"regen\" - 重新制作当前步骤",
     "exitAutoRunStatus": "已退出自动模式，请在聊天区输入指令继续",
     "scriptComplete": "📖 剧本生成已完成！\n\n请在聊天区输入：\n• \"继续\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"开始\" - 进行下一步：🎨 参考图生成\n• \"重新生成\" / \"重做\" / \"regen\" - 重新制作📖 剧本生成",

@@ -68,7 +68,10 @@
     "review": "Revisión",
     "video": "Video",
     "storyboardImage": "Storyboard",
-    "storyboardImageTitle": "🧩 Imagenes del storyboard"
+    "storyboardImageTitle": "🧩 Imagenes del storyboard",
+    "referenceCategory1": "Galería de personajes y de referencias de escenarios",
+    "referenceCategory2": "Imágenes de vestuario y de estado de escena",
+    "referenceCategory3": "Storyboards de cada escena"
   },
   "status": {
     "processing": "Procesando...",
@@ -216,6 +219,10 @@
     "allVideosCompleted": "🎉 ¡La generación de video se completó por completo!",
     "autoEnterNext": "Entrando automáticamente al siguiente paso: {step}...",
     "autoEnterNextNewFlow": "Entrando automáticamente al siguiente paso: {step}... (nuevo flujo: generar y revisar escena por escena)",
+    "autoEnterNextReferenceStage": "Entrando automáticamente a la siguiente etapa: {stage}...",
+    "referenceCategory1Complete": "🎨 ¡La galería de personajes y la galería de referencias de escenarios están listas!\n\nEscribe en el chat:\n• \"continuar\" / \"siguiente\" / \"ok\" / \"go\" / \"empezar\" - avanzar a la siguiente etapa\n• \"regenerar\" / \"rehacer\" / \"regen\" - rehacer esta etapa\no haz clic en \"Regenerar\" en cualquier imagen para ajustarla",
+    "referenceCategory2Complete": "🎨 ¡Las imágenes de vestuario de personajes y de estado de escena están listas!\n\nEscribe en el chat:\n• \"continuar\" / \"siguiente\" / \"ok\" / \"go\" / \"empezar\" - avanzar a la siguiente etapa\n• \"regenerar\" / \"rehacer\" / \"regen\" - rehacer esta etapa\no haz clic en \"Regenerar\" en cualquier imagen para ajustarla",
+    "referenceCategory3Complete": "🧩 ¡Los storyboards de cada escena están listos!\n\nEscribe en el chat:\n• \"continuar\" / \"siguiente\" / \"ok\" / \"go\" / \"empezar\" - siguiente paso: 🎬 Generación de video\n• \"regenerar\" / \"rehacer\" / \"regen\" - rehacer esta etapa\no haz clic en \"Regenerar\" en cualquier imagen para ajustarla",
     "exitAutoRun": "⛔ Se salió del modo automático.\n\nEscribe en el chat:\n• \"continuar\" / \"siguiente\" / \"ok\" / \"go\" / \"start\" - continuar\n• \"regenerar\" / \"rehacer\" / \"regen\" - regenerar el paso actual",
     "exitAutoRunStatus": "Se salió del modo automático. Introduce un comando en el chat para continuar",
     "scriptComplete": "📖 ¡Generación de guion completada!\n\nEscribe en el chat:\n• \"continuar\" / \"siguiente\" / \"ok\" / \"go\" / \"start\" - siguiente paso: 🎨 Imagen de referencia\n• \"regenerar\" / \"rehacer\" / \"regen\" - regenerar 📖 Generación de guion",

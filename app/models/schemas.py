@@ -180,6 +180,8 @@ class VideoProject(BaseModel):
     end_reason: Optional[str] = None
     # 两步图片生成相关字段
     reference_image: Optional[GeneratedImage] = None  # 参考图库主图
+    # 参考图分阶段生成进度：none/category1_done/category2_done/category3_done
+    reference_stage: str = "none"
     video_review_mode: str = "manual"
     # 视频生成模式：extend=延长（串行，参考前一分镜视频），parallel=并行（默认，各分镜独立并行生成）
     video_generation_mode: str = "parallel"

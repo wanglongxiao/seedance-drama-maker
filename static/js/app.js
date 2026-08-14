@@ -48,10 +48,14 @@ let regeneratingReferenceAssetKeys = new Set();
 let regeneratingVideoSceneNumbers = new Set();
 let useOriginalReference = false;
 let referenceImageRegenerateLocked = false;
+// 参考图分阶段（category1/category2/category3）子状态机：
+let referenceStage = null; // 当前已完成子阶段：category1/category2/category3
+let pendingReferenceStage = null; // 待进入子阶段：category2/category3/videos
+let referenceStageHasCategory2 = false; // 后端下发：本项目是否存在分类2（装扮/场景状态）
 let projectEnding = false;
 let projectEnded = false;
 let projectEndBeaconSent = false;
-const I18N_VERSION = '20260811c';
+const I18N_VERSION = '20260814c';
 const FRONTEND_CONFIG_VERSION = '20260811c';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
@@ -939,12 +943,17 @@ function handleWebSocketMessage(data) {
 
         case 'step_complete':
             hideFullscreenGenerating();
-            // 防止重复处理相同的 step_complete 消息
-            const stepKey = `${data.data.step}_${data.data.message}`;
+            // 防止重复处理相同的 step_complete 消息（含 reference_stage，避免各子阶段 message 相同被误去重）
+            const stepKey = `${data.data.step}_${data.data.reference_stage || ''}_${data.data.message}`;
             if (window.lastStepComplete === stepKey) {
                 break;
             }
             window.lastStepComplete = stepKey;
+            // 参考图子阶段完成走独立分发（不复用主步骤 handleStepComplete）
+            if (data.data.step === 'reference_image' && data.data.reference_stage) {
+                handleReferenceStageComplete(data.data.reference_stage, data.data);
+                break;
+            }
             handleStepComplete(data.data.step, data.data.message);
             break;
 
@@ -1438,6 +1447,18 @@ async function sendMessage() {
     const shouldEnableAutoRunFromPrompt = !currentProjectId && containsAutoRunHint(message);
     
     // 检查是否是"继续"指令（支持多种说法）
+    if (isContinueCommand(message) && isWaitingForConfirm && pendingReferenceStage && pendingReferenceStage !== 'videos') {
+        // 参考图子阶段等待中（category1/category2 完成后）：推进下一子阶段。
+        textInput.value = '';
+        addUserMessage(message);
+        isWaitingForConfirm = false;
+        cancelAutoRunCountdown();
+        hideStatusSection();
+        proceedToReferenceStage(pendingReferenceStage);
+        return;
+    }
+
+    // 检查是否是"继续"指令（支持多种说法）
     if (isContinueCommand(message) && isWaitingForConfirm && pendingStep) {
         textInput.value = '';
         addUserMessage(message);
@@ -1523,6 +1544,12 @@ async function sendMessage() {
 
         // 启用全自动模式标志
         isAutoRunMode = true;
+
+        // 处于参考图子阶段等待时（category1/category2 完成后）：开启子阶段倒计时后返回。
+        if (isWaitingForConfirm && pendingReferenceStage && pendingReferenceStage !== 'videos') {
+            maybeStartReferenceStageCountdown();
+            return;
+        }
 
         // 确定从哪个步骤开始
         let startStepName = 'script';
@@ -1803,6 +1830,13 @@ function startStep(step) {
     // 重置 step_complete 消息记录，允许重新生成时正常处理
     window.lastStepComplete = null;
 
+    // 重新进入参考图步骤时，重置子阶段状态机（category1 将从头开始）。
+    if (step === 'reference_image') {
+        referenceStage = null;
+        pendingReferenceStage = null;
+        referenceStageHasCategory2 = false;
+    }
+
     showLoading(getStepLoadingText(step));
 
     // 发送步骤执行请求
@@ -1926,12 +1960,13 @@ function getNextStep(currentStep) {
 }
 
 // 显示步骤倒计时；autoProceed=false 时，倒计时结束后仅停在等待聊天指令状态
-function showAutoRunCountdown(nextStep, completedStep, autoProceed = true) {
+// 公共倒计时渲染：创建 #autoRunCountdownMessage / #countdownValue / #exitAutoRunBtn，
+// 并按 1s 递减；归零后调用 onFinish()。主步骤与参考图子阶段共用，避免 DOM id 冲突。
+function renderCountdownMessage(onFinish) {
     cancelAutoRunCountdown();
     const countdownSeconds = Math.max(0, Number(frontendConfig.auto_run_countdown_seconds) || 10);
     autoRunCountdownValue = countdownSeconds;
 
-    // 创建倒计时消息
     const messageDiv = document.createElement('div');
     messageDiv.className = 'message agent-message auto-run-countdown';
     messageDiv.id = 'autoRunCountdownMessage';
@@ -1965,10 +2000,8 @@ function showAutoRunCountdown(nextStep, completedStep, autoProceed = true) {
     chatMessages.appendChild(messageDiv);
     chatMessages.scrollTop = chatMessages.scrollHeight;
 
-    // 绑定退出按钮事件
     document.getElementById('exitAutoRunBtn').addEventListener('click', exitAutoRunMode);
 
-    // 开始倒计时
     autoRunCountdown = setInterval(() => {
         autoRunCountdownValue--;
         const countdownEl = document.getElementById('countdownValue');
@@ -1977,32 +2010,34 @@ function showAutoRunCountdown(nextStep, completedStep, autoProceed = true) {
         }
 
         if (autoRunCountdownValue <= 0) {
-            // 倒计时结束，执行下一步
             clearInterval(autoRunCountdown);
             autoRunCountdown = null;
-
-            // 移除倒计时消息
             removeAutoRunCountdownMessage();
-
-            if (!autoProceed) {
-                showPendingStepPrompt(completedStep, nextStep);
-                return;
-            }
-
-            // 特殊处理：参考图完成后下一步是videos，应该调用新流程而不是旧流程
-            if (completedStep === 'reference_image' && nextStep === 'videos') {
-                addAgentMessage(t('messages.autoEnterNextNewFlow', { step: getStepName(nextStep) }));
-                isWaitingForConfirm = false;
-                hideStatusSection();
-                startVideoGenerationAfterReference();
-            } else {
-                addAgentMessage(t('messages.autoEnterNext', { step: getStepName(nextStep) }));
-                isWaitingForConfirm = false;
-                hideStatusSection();
-                startStep(nextStep);
-            }
+            onFinish();
         }
     }, 1000);
+}
+
+function showAutoRunCountdown(nextStep, completedStep, autoProceed = true) {
+    renderCountdownMessage(() => {
+        if (!autoProceed) {
+            showPendingStepPrompt(completedStep, nextStep);
+            return;
+        }
+
+        // 特殊处理：参考图完成后下一步是videos，应该调用新流程而不是旧流程
+        if (completedStep === 'reference_image' && nextStep === 'videos') {
+            addAgentMessage(t('messages.autoEnterNextNewFlow', { step: getStepName(nextStep) }));
+            isWaitingForConfirm = false;
+            hideStatusSection();
+            startVideoGenerationAfterReference();
+        } else {
+            addAgentMessage(t('messages.autoEnterNext', { step: getStepName(nextStep) }));
+            isWaitingForConfirm = false;
+            hideStatusSection();
+            startStep(nextStep);
+        }
+    });
 }
 
 // 退出全自动模式
@@ -2017,6 +2052,121 @@ function exitAutoRunMode() {
     // 显示退出提示
     addAgentMessage(t('messages.exitAutoRun'));
     showStatusSection(t('messages.exitAutoRunStatus'));
+}
+
+// ========== 参考图子阶段（category1/category2/category3）推进逻辑 ==========
+
+// 依据当前完成阶段与是否存在分类2，计算下一目标：category2/category3/videos。
+function computeNextReferenceStage(stage, hasCategory2) {
+    if (stage === 'category1') {
+        return hasCategory2 ? 'category2' : 'category3';
+    }
+    if (stage === 'category2') {
+        return 'category3';
+    }
+    return 'videos';
+}
+
+// 子阶段就绪门控：要求本阶段资产齐全（stage_ready）且无正在进行的单张重生成。
+function canStartReferenceStageCountdown(output) {
+    return !!(output && output.stage_ready === true) && !hasPendingReferenceRegeneration();
+}
+
+// 手动模式下的子阶段等待提示（仿 showPendingStepPrompt）。
+function showPendingReferenceStagePrompt(completedStage) {
+    isWaitingForConfirm = true;
+    const messageKey = {
+        category1: 'messages.referenceCategory1Complete',
+        category2: 'messages.referenceCategory2Complete',
+        category3: 'messages.referenceCategory3Complete',
+    }[completedStage] || 'messages.referenceComplete';
+    addAgentMessage(t(messageKey));
+}
+
+// 参考图子阶段完成分发（不复用主步骤 getNextStep）。
+function handleReferenceStageComplete(stage, output) {
+    hideLoading();
+    currentStep = 'reference_image';
+    referenceStage = stage;
+    referenceStageHasCategory2 = !!(output && output.has_category2);
+
+    const nextStage = computeNextReferenceStage(stage, referenceStageHasCategory2);
+    if (nextStage === 'videos') {
+        // category3 已完成：复用主步骤 videos 等待/倒计时逻辑。
+        pendingReferenceStage = 'videos';
+        pendingStep = 'videos';
+        isWaitingForConfirm = true;
+        maybeStartPendingStepCountdown();
+        return;
+    }
+
+    pendingReferenceStage = nextStage;
+    isWaitingForConfirm = true;
+    maybeStartReferenceStageCountdown();
+}
+
+// 依模式决定子阶段等待呈现：手动→提示，自动→倒计时（复用公共渲染）。
+function maybeStartReferenceStageCountdown() {
+    if (!pendingReferenceStage || pendingReferenceStage === 'videos') return;
+    if (autoRunCountdown) return;
+    if (!canStartReferenceStageCountdown(lastReferenceImageOutput)) return;
+
+    if (isAutoRunMode) {
+        showReferenceStageCountdown(pendingReferenceStage, referenceStage);
+    } else {
+        showPendingReferenceStagePrompt(referenceStage);
+    }
+}
+
+// 自动模式子阶段倒计时：归零后推进 proceedToReferenceStage(nextStage)。
+function showReferenceStageCountdown(nextStage, completedStage) {
+    renderCountdownMessage(() => {
+        addAgentMessage(t('messages.autoEnterNextReferenceStage', { stage: getReferenceStageName(nextStage) }));
+        isWaitingForConfirm = false;
+        hideStatusSection();
+        proceedToReferenceStage(nextStage);
+    });
+}
+
+// 推进到下一子阶段：videos→进入视频流程；否则 POST /continue_reference_stage。
+function proceedToReferenceStage(nextStage) {
+    if (nextStage === 'videos') {
+        startVideoGenerationAfterReference();
+        return;
+    }
+    // stage 参数传“当前已完成阶段”，后端据 has_category2 计算真实下一阶段。
+    fetch('/continue_reference_stage', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+            project_id: currentProjectId || '',
+            client_id: wsClientId || '',
+            stage: referenceStage || 'category1',
+            generation_mode: getCurrentVideoMode(),
+            ui_language: currentLanguage,
+        })
+    })
+    .then(response => response.json())
+    .then(result => {
+        if (!result.success) {
+            addAgentMessage(t('messages.regenerateFailedWithError', { error: result.error || '' }));
+        }
+    })
+    .catch(error => {
+        addAgentMessage(t('messages.regenerateFailedWithError', { error: String(error) }));
+    });
+}
+
+function getReferenceStageName(stage) {
+    const names = {
+        category1: t('steps.referenceCategory1'),
+        category2: t('steps.referenceCategory2'),
+        category3: t('steps.referenceCategory3'),
+        videos: t('steps.videosTitle'),
+    };
+    return names[stage] || stage;
 }
 
 // 参考图完成后开始视频生成（新流程：逐个生成+审核）
@@ -2975,8 +3125,14 @@ function displayReferenceImage(output) {
     if (allImages.length === 0) return;
     referenceImageRegenerateLocked = allImages.every((item) => !!item.regenerate_locked);
     const isReferenceGenerationComplete = canStartReferenceStepCountdown(output);
+    // 子阶段完成态：本阶段资产齐全（stage_ready）但整套尚未 ready_for_confirmation（category1/category2）。
+    const isReferenceStageComplete = !!(output && output.stage_ready === true);
 
-    if (isReferenceGenerationComplete) {
+    if (hasPendingReferenceRegeneration()) {
+        // 仍有参考图/装扮/场景状态/故事版在重新生成中：状态栏必须保持“图片重新生成中”，
+        // 不能因为 reference_output 携带 ready_for_confirmation 就误显示“已生成完成，请确认”。
+        renderStatusBar(t('labels.referenceImageRegeneratingText'), 'loading', t('steps.referenceImageTitle'));
+    } else if (isReferenceGenerationComplete || isReferenceStageComplete) {
         showStatusSection(output.message || t('messages.referenceCompleteStatus'));
     } else {
         renderStatusBar(t('progress.reference.generating'), 'loading', t('steps.referenceImageTitle'));
@@ -3145,31 +3301,41 @@ function finishReferenceAssetRegeneration(referenceAssetKey, force = false) {
     refreshReferenceImageActionState();
     refreshVariantAssetsActionState();
     refreshStoryboardActionState();
-    maybeStartPendingStepCountdown();
+    // 处于参考图子阶段等待（category1/category2 完成后）时，重启该子阶段倒计时；
+    // 否则走主步骤（videos/merge）倒计时逻辑。
+    if (pendingReferenceStage && pendingReferenceStage !== 'videos') {
+        maybeStartReferenceStageCountdown();
+    } else {
+        maybeStartPendingStepCountdown();
+    }
 }
 
 // 处理后端通过 WebSocket 推送的单张重生成结果（角色装扮图/场景状态图/故事版/参考图库）。
 function handleReferenceAssetRegenerated(data) {
     data = data || {};
     const referenceAssetKey = data.reference_asset_key || '';
-    // 若不是当前页面发起的异步任务，忽略（例如多标签场景），但仍处理成功刷新。
-    try {
-        if (data.success) {
-            if (data.reference_output) {
-                displayReferenceImage(data.reference_output);
-            }
-            const name = data.reference_name || data.variant_key || '';
+    if (data.success) {
+        // 先结算本张（从进行中集合移除并刷新按钮），再据“是否仍有其他张在重生成”决定状态栏文案，
+        // 避免在仍有排队重生成时提前显示“已完成/请确认”。
+        finishReferenceAssetRegeneration(referenceAssetKey, true);
+        if (data.reference_output) {
+            displayReferenceImage(data.reference_output);
+        }
+        const name = data.reference_name || data.variant_key || '';
+        if (hasPendingReferenceRegeneration()) {
+            // 仍有其他图片在重新生成：保持“图片重新生成中”，不覆盖为完成态。
+            renderStatusBar(t('labels.referenceImageRegeneratingText'), 'loading', t('steps.referenceImageTitle'));
+        } else {
             renderStatusBar(
                 t('messages.referenceAssetRegeneratedSuccess', { name }),
                 'info',
                 t('steps.referenceImageTitle')
             );
-            addAgentMessage(t('messages.referenceAssetRegeneratedSuccess', { name }));
-        } else {
-            const errText = data.error || '';
-            addAgentMessage(t('messages.regenerateFailedWithError', { error: errText }));
         }
-    } finally {
+        addAgentMessage(t('messages.referenceAssetRegeneratedSuccess', { name }));
+    } else {
+        const errText = data.error || '';
+        addAgentMessage(t('messages.regenerateFailedWithError', { error: errText }));
         finishReferenceAssetRegeneration(referenceAssetKey, true);
     }
 }
@@ -3942,6 +4108,9 @@ function resetProject() {
     currentStep = null;
     isWaitingForConfirm = false;
     pendingStep = null;
+    referenceStage = null;
+    pendingReferenceStage = null;
+    referenceStageHasCategory2 = false;
     overallProgress = 0;
     stepProgress = { script: 0, reference_image: 0, videos: 0, merge: 0 };
     isAutoRunMode = false; // 重置全自动模式
