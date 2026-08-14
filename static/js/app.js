@@ -779,6 +779,15 @@ function refreshReferenceImageActionState() {
     });
 }
 
+// 统一刷新“参考图库/角色装扮图/场景状态图/各分镜故事版”四个模块的重新生成按钮状态。
+// 视频生成开始（referenceImageLocked=true）等锁定态变化时必须调用本函数，
+// 否则装扮/场景状态/故事版按钮不会随之置灰（refreshReferenceImageActionState 只覆盖参考图库）。
+function refreshAllReferenceActionStates() {
+    refreshReferenceImageActionState();
+    refreshVariantAssetsActionState();
+    refreshStoryboardActionState();
+}
+
 // 初始化
 async function init() {
     // 永久关闭旧的全屏/整页遮罩，统一改为右侧底部状态栏
@@ -2019,7 +2028,7 @@ function startVideoGenerationAfterReference() {
 
     referenceImageLocked = true;
     currentStep = 'videos';
-    refreshReferenceImageActionState();
+    refreshAllReferenceActionStates();
     showLoading(t('status.startingVideoGeneration'));
 
     // 发送请求到后端
@@ -2042,7 +2051,7 @@ function startVideoGenerationAfterReference() {
         if (!result.success) {
             referenceImageLocked = false;
             currentStep = 'reference_image';
-            refreshReferenceImageActionState();
+            refreshAllReferenceActionStates();
             addAgentMessage(t('messages.startVideoFailed', { error: result.error }));
         }
         // 后端通过WebSocket推送进度，不需要额外处理
@@ -2051,7 +2060,7 @@ function startVideoGenerationAfterReference() {
         hideLoading();
         referenceImageLocked = false;
         currentStep = 'reference_image';
-        refreshReferenceImageActionState();
+        refreshAllReferenceActionStates();
         console.error('Start video generation error:', error);
         addAgentMessage(t('messages.startVideoFailedRetry'));
     });
@@ -3606,7 +3615,7 @@ function displayVideos(output) {
     // 更新当前步骤为 videos（确保后续流程正确）
     referenceImageLocked = true;
     currentStep = 'videos';
-    refreshReferenceImageActionState();
+    refreshAllReferenceActionStates();
     ensureVideosContainer();
 
     // 兼容两种输出：
@@ -3830,7 +3839,7 @@ async function skipScene(sceneNumber) {
 function showMergeStep() {
     mergeStepVisible = true;
     referenceImageLocked = true;
-    refreshReferenceImageActionState();
+    refreshAllReferenceActionStates();
     // 检查是否已存在合成步骤卡片
     let mergeCard = document.getElementById('merge-step-card');
     if (mergeCard) {
