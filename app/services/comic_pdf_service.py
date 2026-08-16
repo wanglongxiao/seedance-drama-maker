@@ -8,7 +8,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
@@ -36,11 +36,17 @@ class ComicPDFService:
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
         "/System/Library/Fonts/STHeiti Light.ttc",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
+
+    def __init__(self):
+        self._font_path: Optional[str] = None
+        self._font_cache: Dict[int, ImageFont.ImageFont] = {}
 
     def generate_and_upload(self, project: VideoProject) -> str:
         if not getattr(project, "script", None):
@@ -265,13 +271,32 @@ class ComicPDFService:
         return page, ImageDraw.Draw(page)
 
     def _font(self, size: int) -> ImageFont.ImageFont:
-        for path in self.FONT_CANDIDATES:
+        if size in self._font_cache:
+            return self._font_cache[size]
+
+        font_path = self._font_path or self._resolve_cjk_font_path()
+        try:
+            font = ImageFont.truetype(font_path, size=size)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load CJK font for comic PDF: {font_path}") from e
+
+        self._font_cache[size] = font
+        return font
+
+    def _resolve_cjk_font_path(self) -> str:
+        for path in dict.fromkeys(self.FONT_CANDIDATES):
             if Path(path).exists():
                 try:
-                    return ImageFont.truetype(path, size=size)
+                    ImageFont.truetype(path, size=24)
                 except Exception:
                     continue
-        return ImageFont.load_default()
+                self._font_path = path
+                logger.info(f"Using comic PDF CJK font: {path}")
+                return path
+        raise RuntimeError(
+            "No CJK font found for comic PDF generation. "
+            "Install fonts-noto-cjk in the runtime image."
+        )
 
     def _wrap_text(self, draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> List[str]:
         lines: List[str] = []
