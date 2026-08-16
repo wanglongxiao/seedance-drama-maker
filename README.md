@@ -100,7 +100,8 @@
 ### 环境要求
 
 - Python `3.9+`
-- 本机可执行 `ffmpeg` 与 `ffprobe`
+- 运行环境可执行 `ffmpeg` 与 `ffprobe`（本地、Docker、云端 veFaaS 镜像均需要安装）
+- 运行环境需安装可覆盖 CJK 的字体和常见 emoji 字体，例如 `fonts-noto-cjk`、`fonts-noto-color-emoji` 与 `fontconfig`；否则云端生成连环画 PDF 时中文/日文/韩文或 emoji 可能显示为方框乱码
 - 网络可访问 BytePlus / ModelArk / Seed-Speech / TOS
 
 ### 服务开通要求
@@ -418,6 +419,7 @@ Services
 - 所有敏感凭证统一写入 `.env`，`config.yaml` 仅保留 `${VAR}` 占位符，运行时由 `app/config.py` 注入
 - 前后端界面支持 `zh-CN`、`zh-TW`、`en`、`ja`、`es`；`SeeDance-2.5` 视频对白原生支持 14 种语言
 - 视频链路生成阶段统一使用 `MOV`，最终成片统一转封装为 `MP4`（`+faststart`），`TOS` 归一化 `Content-Type` 保证 Web 端正常播放
+- 连环画 PDF 生成使用运行时系统字体渲染文本，容器镜像必须包含 CJK/emoji 字体与 `fontconfig` 字体缓存
 - 项目与浏览器连接绑定，支持多标签页独立运行
 - 后台长任务通过稳定客户端 ID 支持 WebSocket 断线重连后的结果续推
 - 参考图库、视频生成、审核、合成都采用渐进式前端展示

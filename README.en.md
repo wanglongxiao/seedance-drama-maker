@@ -100,7 +100,8 @@ All of the above are available through [byteplus.com](https://www.byteplus.com/)
 ### Environment
 
 - Python `3.9+`
-- `ffmpeg` and `ffprobe` available on the local machine
+- `ffmpeg` and `ffprobe` available in the runtime environment, including local runs, Docker, and cloud veFaaS images
+- CJK-capable fonts and common emoji fonts installed in the runtime environment, for example `fonts-noto-cjk`, `fonts-noto-color-emoji`, and `fontconfig`; otherwise Chinese/Japanese/Korean text or emoji in cloud-generated comic PDFs may render as tofu boxes
 - Network access to BytePlus / ModelArk / Seed-Speech / TOS
 
 ### Required Service Enablement
@@ -418,6 +419,7 @@ Services
 - All sensitive credentials live in `.env`; `config.yaml` keeps only `${VAR}` placeholders injected by `app/config.py` at runtime
 - The UI supports `zh-CN`, `zh-TW`, `en`, `ja`, and `es`; `SeeDance-2.5` video dialogue is natively supported in 14 languages
 - The pipeline generates in `MOV` and remuxes the final cut to `MP4` (`+faststart`), with `TOS` normalizing `Content-Type` for reliable web playback
+- Comic PDF generation renders text with runtime system fonts, so container images must include CJK/emoji fonts and a `fontconfig` font cache
 - Each project is bound to its browser connection to support isolated multi-tab execution
 - Long-running background tasks can continue pushing results after WebSocket reconnects through a stable client ID
 - Reference generation, video generation, review, and merge are rendered progressively in the UI
