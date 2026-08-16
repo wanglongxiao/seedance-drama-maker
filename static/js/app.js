@@ -7,6 +7,10 @@
 
 // 全局状态
 let currentProjectId = null;
+// 上传图片/音频会调用 ensureDraftProjectId() 提前生成「草稿」projectId，
+// 此时后端尚未创建真实项目。用该标志区分草稿态与已创建态，避免把草稿 ID
+// 误判为「已有项目」而导致 auto 提示无法触发全自动模式。
+let hasDraftProject = false;
 let uploadedImages = [];
 let uploadedAudio = null;
 let ws = null;
@@ -55,7 +59,7 @@ let referenceStageHasCategory2 = false; // 后端下发：本项目是否存在�
 let projectEnding = false;
 let projectEnded = false;
 let projectEndBeaconSent = false;
-const I18N_VERSION = '20260816a';
+const I18N_VERSION = '20260816b';
 const FRONTEND_CONFIG_VERSION = '20260811c';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
@@ -246,6 +250,8 @@ function ensureDraftProjectId() {
     } else {
         currentProjectId = `p${Math.random().toString(36).slice(2, 10)}`;
     }
+    // 标记为草稿态：后端尚未据此创建真实项目。
+    hasDraftProject = true;
     projectEnded = false;
     projectEndBeaconSent = false;
     updateProjectActionState();
@@ -909,6 +915,7 @@ function handleWebSocketMessage(data) {
             addAgentMessage(data.data.message);
             if (data.data.project_id) {
                 currentProjectId = data.data.project_id;
+                hasDraftProject = false; // 后端已确认真实项目
                 projectEnded = false;
                 projectEndBeaconSent = false;
                 updateProjectActionState();
@@ -1437,10 +1444,11 @@ async function sendMessage() {
         return;
     }
 
-    // 必须在 ensureDraftProjectId() 之前判定：上传图片/音频会提前生成草稿
-    // projectId，使 currentProjectId 变为真值，若在其后再判断 !currentProjectId
-    // 会误判为“已有项目”，导致上传图片时 auto 提示无法触发全自动模式。
-    const shouldEnableAutoRunFromPrompt = !currentProjectId && containsAutoRunHint(message);
+    // 判定是否应从提示语触发全自动：只要后端尚未创建真实项目即可（无项目 ID，
+    // 或仅有上传图片/音频生成的草稿 ID）。不能用 !currentProjectId——上传会提前
+    // 生成草稿 ID 使其变真值，从而漏判，导致上传图片时 auto 提示无法进入全自动。
+    const hasRealProject = !!currentProjectId && !hasDraftProject;
+    const shouldEnableAutoRunFromPrompt = !hasRealProject && containsAutoRunHint(message);
 
     if (uploadedImages.length > 0) {
         ensureDraftProjectId();
@@ -1600,6 +1608,7 @@ async function sendMessage() {
                 const result = await parseJsonResponse(response);
                 if (result.success) {
                     currentProjectId = result.project_id;
+                    hasDraftProject = false; // 后端已创建真实项目
                     projectEnded = false;
                     projectEndBeaconSent = false;
                     updateProjectActionState();
@@ -1672,6 +1681,7 @@ async function sendMessage() {
         
         if (result.success) {
             currentProjectId = result.project_id;
+            hasDraftProject = false; // 后端已创建真实项目
             projectEnded = false;
             projectEndBeaconSent = false;
             updateProjectActionState();
@@ -4106,6 +4116,7 @@ function hideLoading() {
 // 重置项目
 function resetProject() {
     currentProjectId = null;
+    hasDraftProject = false;
     uploadedImages = [];
     uploadedAudio = null;
     currentStep = null;
