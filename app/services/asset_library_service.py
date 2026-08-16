@@ -32,7 +32,7 @@ class AssetActivationFailedError(AssetLibraryError):
     """素材预处理失败或超时。"""
 
 
-class _ArkAssetOpenAPI(Service):
+class _ArkAssetOpenAPI(Service or object):
     _ACTIONS = (
         "CreateAssetGroup",
         "GetAssetGroup",
@@ -97,7 +97,7 @@ class AssetLibraryService:
         self.socket_timeout = max(1, int(config.get("asset_library.socket_timeout", 300)))
 
         self.client: Optional[_ArkAssetOpenAPI] = None
-        if self.ak and self.sk:
+        if self.ak and self.sk and all([ApiInfo, Credentials, ServiceInfo, Service]):
             self.client = _ArkAssetOpenAPI(
                 ak=self.ak,
                 sk=self.sk,
@@ -106,6 +106,8 @@ class AssetLibraryService:
                 connection_timeout=self.connection_timeout,
                 socket_timeout=self.socket_timeout,
             )
+        elif self.ak and self.sk:
+            logger.warning("byteplus-sdk is unavailable, asset library service is disabled")
         else:
             logger.warning("BytePlus AK/SK missing, asset library service is disabled")
 

@@ -23,6 +23,7 @@ from app.agents.video_review_agent import VideoReviewAgent
 from app.agents.storyboard_review_agent import StoryboardReviewAgent
 from app.agents.merge_agent import MergeAgent
 from app.services.asset_library_service import asset_library_service, AssetLibraryError
+from app.services.comic_pdf_service import comic_pdf_service
 from app.services.tos_service import tos_service
 
 logger = get_logger("main_agent")
@@ -190,6 +191,7 @@ class MainAgent:
         self._reference_generation_tasks: Dict[str, asyncio.Task] = {}
         self._reference_asset_regeneration_tasks: Dict[str, asyncio.Task] = {}
         self._project_prepare_tasks: Dict[str, asyncio.Task] = {}
+        self._comic_pdf_tasks: Dict[str, asyncio.Task] = {}
 
     def _build_asset_group_name(self, project_id: str) -> str:
         return f"seedance-project-{project_id}"
@@ -217,6 +219,10 @@ class MainAgent:
         if generation_task and not generation_task.done():
             generation_task.cancel()
 
+        comic_task = self._comic_pdf_tasks.pop(project_id, None)
+        if comic_task and not comic_task.done():
+            comic_task.cancel()
+
         for task_key, task in list(self._reference_asset_regeneration_tasks.items()):
             if not task_key.startswith(f"{project_id}:"):
                 continue
@@ -233,6 +239,7 @@ class MainAgent:
         self._reference_asset_cache.pop(project_id, None)
         self._reference_generation_tasks.pop(project_id, None)
         self._project_prepare_tasks.pop(project_id, None)
+        self._comic_pdf_tasks.pop(project_id, None)
         for task_key in list(self._reference_asset_regeneration_tasks.keys()):
             if task_key.startswith(f"{project_id}:"):
                 self._reference_asset_regeneration_tasks.pop(task_key, None)
@@ -1445,6 +1452,57 @@ class MainAgent:
             await self._update_progress(websocket, "error", 0, self._t(project, "error.generation_failed", error=str(e)))
             raise
 
+    def start_comic_pdf_generation(self, project: VideoProject, websocket=None) -> None:
+        """Start comic PDF generation once, without blocking video generation."""
+        self._raise_if_project_ended(project)
+        if getattr(project, "comic_pdf_url", None):
+            project.comic_pdf_status = "completed"
+            return
+
+        existing_task = self._comic_pdf_tasks.get(project.project_id)
+        if existing_task and not existing_task.done():
+            return
+
+        project.comic_pdf_status = "generating"
+        project.comic_pdf_error = None
+        self.save_project_state(project.project_id)
+
+        async def _run() -> None:
+            current_project = self.get_project(project.project_id)
+            if not current_project:
+                return
+            try:
+                pdf_url = await run_generation(comic_pdf_service.generate_and_upload, current_project)
+                current_project.comic_pdf_url = pdf_url
+                current_project.comic_pdf_status = "completed"
+                current_project.comic_pdf_error = None
+                self.save_project_state(current_project.project_id)
+                await self._send_agent_output(websocket, "comic_pdf_agent", {
+                    "status": "completed",
+                    "comic_pdf_url": pdf_url,
+                })
+                logger.info(f"Comic PDF generated for project {current_project.project_id}: {pdf_url}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                current_project.comic_pdf_status = "failed"
+                current_project.comic_pdf_error = str(e)
+                self.save_project_state(current_project.project_id)
+                await self._send_agent_output(websocket, "comic_pdf_agent", {
+                    "status": "failed",
+                    "error": str(e),
+                })
+                logger.error(f"Comic PDF generation failed for project {current_project.project_id}: {str(e)}")
+            finally:
+                task = self._comic_pdf_tasks.get(project.project_id)
+                if task is asyncio.current_task():
+                    self._comic_pdf_tasks.pop(project.project_id, None)
+
+        self._comic_pdf_tasks[project.project_id] = asyncio.create_task(
+            _run(),
+            name=f"comic-pdf:{project.project_id}",
+        )
+
     async def continue_generate_after_reference_confirmation(
         self,
         project_id: str,
@@ -1516,6 +1574,7 @@ class MainAgent:
             )
             project.current_step = "images_generated"
             self._ensure_video_flow_state(project, review_mode=review_mode, reset=not resume)
+            self.start_comic_pdf_generation(project, websocket=websocket)
 
             # 新流程：逐个生成分镜视频并审核
             num_scenes = len(project.script.scenes)
@@ -1598,6 +1657,8 @@ class MainAgent:
                 scene_state = self._get_scene_state(project, scene_number)
                 scene_state.completed = True
                 scene_state.approved = bool(final_approved)
+                if final_approved and not getattr(scene_state, "accepted_over_retry", False):
+                    scene_state.accepted_over_retry = False
                 project.next_scene_index = min(scene_index + 1, len(project.script.scenes))
 
                 # 每完成一个分镜即持久化，云端实例回收/切换后仍可回源恢复。
@@ -1749,6 +1810,26 @@ class MainAgent:
                     )
                 except SceneSkippedError:
                     logger.warning(f"[FLOW] Parallel mode: scene {scene_number} skipped")
+                    self.save_project_state(project.project_id)
+                    return
+                except Exception as e:
+                    logger.error(f"[FLOW] Parallel mode: scene {scene_number} failed: {str(e)}")
+                    scene_state = self._get_scene_state(project, scene_number)
+                    scene_state.completed = True
+                    scene_state.approved = False
+                    scene_state.accepted_over_retry = False
+                    scene_state.last_feedback = str(e)
+                    await self._send_agent_output(websocket, "video_agent", {
+                        "scene_number": scene_number,
+                        "status": "scene_failed",
+                        "total_scenes": num_scenes,
+                        "message": translate(
+                            self._project_language(project),
+                            "error.generation_failed",
+                            error=str(e),
+                        ),
+                    })
+                    self.save_project_state(project.project_id)
                     return
 
             async with results_lock:
@@ -1756,6 +1837,9 @@ class MainAgent:
                 scene_state = self._get_scene_state(project, scene_number)
                 scene_state.completed = True
                 scene_state.approved = bool(final_approved)
+                if final_approved and not getattr(scene_state, "accepted_over_retry", False):
+                    scene_state.accepted_over_retry = False
+                self.save_project_state(project.project_id)
                 logger.info(
                     f"[FLOW] Scene {scene_number} completed (parallel). "
                     f"Approved: {final_approved}, Score: {final_score}"
@@ -1813,9 +1897,13 @@ class MainAgent:
                     logger.warning(
                         f"[FLOW] Scene {scene_number} total generation limit reached, selecting best-scored video {scene_state.best_score}"
                     )
+                    scene_state.completed = True
+                    scene_state.approved = True
+                    scene_state.accepted_over_retry = True
                     await self._send_agent_output(websocket, "video_review_agent", {
                         "scene_number": scene_number,
-                        "approved": False,
+                        "approved": True,
+                        "accepted_over_retry": True,
                         "score": scene_state.best_score,
                         "retry_count": scene_state.auto_retry_count,
                         "max_retries": max_retries,
@@ -1830,7 +1918,7 @@ class MainAgent:
                             feedback=scene_state.best_feedback
                         )
                     })
-                    return scene_state.best_video, False, scene_state.best_feedback, scene_state.best_score
+                    return scene_state.best_video, True, scene_state.best_feedback, scene_state.best_score
                 raise RuntimeError(
                     translate(
                         project_language,
@@ -1926,9 +2014,13 @@ class MainAgent:
                         logger.warning(
                             f"[FLOW] Scene {scene_number} generation retries exhausted, selecting best-scored reviewed video {scene_state.best_score}"
                         )
+                        scene_state.completed = True
+                        scene_state.approved = True
+                        scene_state.accepted_over_retry = True
                         await self._send_agent_output(websocket, "video_review_agent", {
                             "scene_number": scene_number,
-                            "approved": False,
+                            "approved": True,
+                            "accepted_over_retry": True,
                             "score": scene_state.best_score,
                             "retry_count": scene_state.auto_retry_count,
                             "max_retries": max_retries,
@@ -1943,7 +2035,7 @@ class MainAgent:
                                 feedback=scene_state.best_feedback
                             )
                         })
-                        return scene_state.best_video, False, scene_state.best_feedback, scene_state.best_score
+                        return scene_state.best_video, True, scene_state.best_feedback, scene_state.best_score
                     if is_manual_mode:
                         raise RuntimeError(
                             translate(
@@ -2016,9 +2108,13 @@ class MainAgent:
                         logger.warning(
                             f"[FLOW] Scene {scene_number} duplicate seed retries exhausted, selecting best-scored reviewed video {scene_state.best_score}"
                         )
+                        scene_state.completed = True
+                        scene_state.approved = True
+                        scene_state.accepted_over_retry = True
                         await self._send_agent_output(websocket, "video_review_agent", {
                             "scene_number": scene_number,
-                            "approved": False,
+                            "approved": True,
+                            "accepted_over_retry": True,
                             "score": scene_state.best_score,
                             "retry_count": scene_state.auto_retry_count,
                             "max_retries": max_retries,
@@ -2033,7 +2129,7 @@ class MainAgent:
                                 feedback=scene_state.best_feedback
                             )
                         })
-                        return scene_state.best_video, False, scene_state.best_feedback, scene_state.best_score
+                        return scene_state.best_video, True, scene_state.best_feedback, scene_state.best_score
 
                     if is_manual_mode:
                         raise RuntimeError(
@@ -2202,9 +2298,13 @@ class MainAgent:
                     logger.warning(
                         f"[REVIEW] Scene {scene_number} - Max retries exhausted, selecting best-scored video {scene_state.best_score}"
                     )
+                    scene_state.completed = True
+                    scene_state.approved = True
+                    scene_state.accepted_over_retry = True
                     await self._send_agent_output(websocket, "video_review_agent", {
                         "scene_number": scene_number,
-                        "approved": False,
+                        "approved": True,
+                        "accepted_over_retry": True,
                         "score": scene_state.best_score,
                         "retry_count": scene_state.auto_retry_count,
                         "max_retries": max_retries,
@@ -2221,7 +2321,7 @@ class MainAgent:
                             feedback=scene_state.best_feedback
                         )
                     })
-                    return scene_state.best_video, False, scene_state.best_feedback, scene_state.best_score
+                    return scene_state.best_video, True, scene_state.best_feedback, scene_state.best_score
 
                 logger.error(
                     f"[REVIEW] Scene {scene_number} - Max retries exhausted and no reviewed video is available"

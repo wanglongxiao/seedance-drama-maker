@@ -143,6 +143,7 @@ class VideoSceneState(BaseModel):
     last_score: int = 0
     last_feedback: str = ""
     approved: bool = False
+    accepted_over_retry: bool = False
     completed: bool = False
 
 class VideoProject(BaseModel):
@@ -155,6 +156,9 @@ class VideoProject(BaseModel):
     images: List[GeneratedImage] = Field(default_factory=list)
     videos: List[GeneratedVideo] = Field(default_factory=list)
     final_video_url: Optional[str] = None
+    comic_pdf_url: Optional[str] = None
+    comic_pdf_status: str = "pending"
+    comic_pdf_error: Optional[str] = None
     status: str = "pending"
     current_step: str = "init"
     progress: int = 0

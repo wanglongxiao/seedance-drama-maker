@@ -6,7 +6,7 @@
 import os
 import json
 import asyncio
-from typing import Optional, Dict
+from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.staticfiles import StaticFiles
@@ -71,6 +71,34 @@ websocket_connections: Dict[str, WebSocket] = {}
 step_confirmations: Dict[str, asyncio.Event] = {}
 project_client_owners: Dict[str, str] = {}
 disconnect_cleanup_tasks: Dict[str, asyncio.Task] = {}
+
+
+class ReconnectingWebSocketProxy:
+    """Route background task messages to the latest WebSocket for a client_id."""
+
+    def __init__(self, client_id: str):
+        self.client_id = client_id
+
+    async def send_json(self, message: dict):
+        websocket = websocket_connections.get(self.client_id)
+        if websocket is None:
+            logger.debug(f"Client {self.client_id} has no active WebSocket, skipping background message")
+            return
+        client_state = getattr(websocket, "client_state", None)
+        client_state_name = getattr(client_state, "name", "CONNECTED")
+        if client_state_name != "CONNECTED":
+            logger.warning(
+                f"WebSocket for client {self.client_id} is not connected "
+                f"(state: {client_state_name})"
+            )
+            return
+        await websocket.send_json(jsonable_encoder(message))
+
+
+def get_reconnecting_websocket(client_id: Optional[str]):
+    if not client_id:
+        return None
+    return ReconnectingWebSocketProxy(client_id)
 
 
 @app.on_event("shutdown")
@@ -138,6 +166,8 @@ def build_end_cleanup_keep_prefixes(project) -> list[str]:
     keep_prefixes = []
     if getattr(project, "final_video_url", None):
         keep_prefixes.append("videos/final")
+    if getattr(project, "comic_pdf_url", None):
+        keep_prefixes.append("documents/comics")
     return keep_prefixes
 
 
@@ -459,6 +489,7 @@ async def restore_project_snapshot(project_id: str):
             "scene_number": scene_number,
             "url": url,
             "approved": bool(getattr(state, "approved", False)) if state else False,
+            "accepted_over_retry": bool(getattr(state, "accepted_over_retry", False)) if state else False,
             "completed": bool(getattr(state, "completed", False)) if state else True,
             "score": int(getattr(state, "best_score", -1) or -1) if state else -1,
             "feedback": (getattr(state, "best_feedback", "") or "") if state else "",
@@ -488,6 +519,9 @@ async def restore_project_snapshot(project_id: str):
             "next_scene_index": int(getattr(project, "next_scene_index", 0) or 0),
             "regenerating_scene_numbers": list(getattr(project, "regenerating_scene_numbers", []) or []),
             "final_video_url": getattr(project, "final_video_url", None),
+            "comic_pdf_url": getattr(project, "comic_pdf_url", None),
+            "comic_pdf_status": getattr(project, "comic_pdf_status", "pending") or "pending",
+            "comic_pdf_error": getattr(project, "comic_pdf_error", None),
             # 是否仍有分镜在重新生成/未通过审核（用于恢复后判断能否进入合成）。
             "merge_blocked": _scene_regeneration_blocks_merge(project),
         }
@@ -998,7 +1032,7 @@ async def _regenerate_video_scene(
             )
         }
 
-        websocket = websocket_connections.get(client_id) if client_id else None
+        websocket = get_reconnecting_websocket(client_id)
         if websocket:
             await websocket.send_json(jsonable_encoder({
                 "type": "agent_output",
@@ -1037,7 +1071,7 @@ async def regenerate_video_scene_background(
     """
     project = main_agent.get_project(project_id)
     if not project:
-        websocket = websocket_connections.get(client_id) if client_id else None
+        websocket = get_reconnecting_websocket(client_id)
         if websocket:
             await websocket.send_json(jsonable_encoder({
                 "type": "video_scene_regenerated",
@@ -1076,7 +1110,7 @@ async def regenerate_video_scene_background(
         main_agent.save_project_state(project_id)
 
     # 把最终结果推送给前端（无论成功/失败），前端据此更新缩略图、审核结论或错误提示。
-    websocket = websocket_connections.get(client_id) if client_id else None
+    websocket = get_reconnecting_websocket(client_id)
     if websocket:
         payload = dict(result) if isinstance(result, dict) else {"success": False}
         payload.setdefault("scene_number", scene_number)
@@ -1121,7 +1155,7 @@ async def skip_scene(
 
         main_agent.set_project_output_language(project_id, ui_language)
         project = main_agent.get_project(project_id)
-        websocket = websocket_connections.get(client_id) if client_id else None
+        websocket = get_reconnecting_websocket(client_id)
         skip_result = await main_agent.skip_scene(
             project_id=project_id,
             scene_number=scene_number,
@@ -1187,7 +1221,14 @@ async def rollback_step(request: Request):
             project.images = []
             project.character_reference_images = []
             project.scene_reference_images = []
+            project.character_outfit_images = []
+            project.scene_state_images = []
+            project.storyboard_images = []
             project.reference_image_library = {}
+            project.scene_reference_mappings = {}
+            project.comic_pdf_url = None
+            project.comic_pdf_status = "pending"
+            project.comic_pdf_error = None
             # 保留 reference_images（用户上传的原图）
 
         # 清空视频（如果是退回视频或更早）
@@ -1205,6 +1246,7 @@ async def rollback_step(request: Request):
         project.current_step = target_step
         project.status = f"rolled_back_to_{target_step}"
         project.progress = max(0, target_index * 25)
+        main_agent.save_project_state(project_id)
 
         logger.info(f"Project {project_id} rolled back to step: {target_step}")
 
@@ -1505,7 +1547,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 async def execute_step_with_websocket(client_id: str, project_id: str, step: str, review_mode: Optional[str] = None):
     """执行步骤并通过WebSocket发送更新"""
-    websocket = websocket_connections.get(client_id)
+    websocket = get_reconnecting_websocket(client_id)
     if not websocket:
         logger.error(f"WebSocket not found for client {client_id}")
         return
@@ -1850,7 +1892,7 @@ async def continue_generate_after_reference_confirmation(client_id: str, project
 
     # 新流程：使用 MainAgent 的 continue_generate_after_reference_confirmation 方法
     # 该方法会逐个生成分镜视频并审核
-    websocket = websocket_connections.get(client_id)
+    websocket = get_reconnecting_websocket(client_id)
 
     try:
         logger.info(f"[FLOW] Starting new video generation flow with review for project {project_id}")
@@ -2054,7 +2096,7 @@ async def execute_videos_step(client_id: str, project_id: str, review_mode: Opti
         })
         return
 
-    websocket = websocket_connections.get(client_id)
+    websocket = get_reconnecting_websocket(client_id)
 
     # 复用统一的新流程：分镜视频生成失败与审核失败共享同一套重试次数，
     # 但此入口只执行到“视频完成”，不自动进入合成步骤。
@@ -2163,6 +2205,7 @@ async def cleanup_project_files(
                 "references/scenes",
                 "videos/scenes",
                 "videos/final",
+                "documents/comics",
             ],
         )
     except Exception as e:

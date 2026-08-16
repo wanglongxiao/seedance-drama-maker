@@ -18,6 +18,7 @@ Powered by the **SeeDance 2.5** video model — turn one sentence into a cinemat
 - 🎞️ **Cinematic audiovisual quality**: native audio-video sync, adaptive aspect ratio, and the final cut is remuxed to high-fidelity `MP4` (H.264/AAC, `+faststart`) that streams progressively in the browser.
 - 🎭 **Character-outfit / scene-state variants**: per scene the system derives character-outfit images and scene time/weather-state images, and references them consistently in storyboards and scene videos.
 - 🧩 **Line-art storyboard + AI review**: line-art multi-panel storyboards are generated first and auto-reviewed (style, no duplicated character and normal limbs, correct gender); failures regenerate automatically.
+- 📄 **Comic PDF export**: when scene-video generation starts, the system generates a script-title PDF in parallel, including a cover, character page, and one storyboard page per scene, then exposes it in the Web UI for download.
 - 🤖 **Fully automated multi-agent pipeline**: script → reference library → character-outfit/scene-state variants → storyboards → scene generation & review → long-video merge, end to end.
 
 ## Overview
@@ -36,7 +37,7 @@ The system automatically coordinates script writing, character definitions, back
 Current primary workflow:
 
 ```text
-User Input -> Script Generation -> Reference Library Confirmation -> Character-Outfit/Scene-State Variants -> Storyboard Generation And Review -> Scene Video Generation And Review -> Final Merge
+User Input -> Script Generation -> Reference Library Confirmation -> Character-Outfit/Scene-State Variants -> Storyboard Generation And Review -> Comic PDF Export + Scene Video Generation And Review -> Final Merge
 ```
 
 The system focuses on:
@@ -76,7 +77,7 @@ The system focuses on:
 ## BytePlus Products Used
 
 - `TOS`
-  Stores and serves uploaded assets, reference images, scene videos, and final videos.
+  Stores and serves uploaded assets, reference images, comic PDFs, scene videos, and final videos.
 - `Seed-Speech`
   Converts voice input into text for the creation workflow.
 - `Seed-2.1-turbo`
@@ -301,6 +302,14 @@ Key rules:
 
 ### 4.1 Project Ending And Cleanup
 
+When the workflow enters scene-video generation, the system starts comic PDF generation in parallel:
+
+- The PDF is named after the script title and uploaded to the `documents/comics` path in `TOS`
+- Page 1 shows the script title, era, and background; page 2 shows main character names and character images
+- Each following page maps to one scene in order, with the storyboard image on top and the scene description plus dialogue/narration below
+- The Web UI shows the PDF download entry between the storyboards section and the scene-videos section
+- Project cleanup preserves the comic PDF and does not treat it as a temporary file
+
 The Web UI now includes an `End Project` button. Cleanup can be triggered in three ways:
 
 - the user clicks `End Project`
@@ -336,6 +345,9 @@ Flow rules:
 - Auto mode: failed reviews regenerate automatically; after the retry limit, the highest-scoring candidate is selected to continue the workflow
 - Manual mode: review still runs, but regeneration is not automatic; the user may continue manually
 - The workflow never moves forward while there are unfinished automatic or manual regeneration jobs
+- Cloud long-running tasks route messages through the stable `client_id` to the latest WebSocket connection, so generation and review results still reach the active frontend after gateway or browser reconnects
+- In parallel mode, each scene is persisted as soon as it finishes, preventing completed late-index scenes from being lost when another scene hits a 504 timeout
+- When auto mode reaches the retry cap and selects the highest-scoring candidate, the scene is marked as accepted-over-retry and does not block the final merge
 
 ### 6. Merge
 
@@ -407,7 +419,9 @@ Services
 - The UI supports `zh-CN`, `zh-TW`, `en`, `ja`, and `es`; `SeeDance-2.5` video dialogue is natively supported in 14 languages
 - The pipeline generates in `MOV` and remuxes the final cut to `MP4` (`+faststart`), with `TOS` normalizing `Content-Type` for reliable web playback
 - Each project is bound to its browser connection to support isolated multi-tab execution
+- Long-running background tasks can continue pushing results after WebSocket reconnects through a stable client ID
 - Reference generation, video generation, review, and merge are rendered progressively in the UI
+- Exported artifacts such as comic PDFs and final videos are preserved during project-ending cleanup
 
 ## Usage
 
@@ -476,4 +490,3 @@ To prevent secret leakage or accidental publication of test artifacts, this repo
 
 - See `CHANGELOG.en.md` for the English changelog
 - See `CHANGELOG.md` for the Simplified Chinese changelog
-

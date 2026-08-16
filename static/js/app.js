@@ -42,6 +42,7 @@ let lastScriptData = null;
 let lastReferenceImageOutput = null;
 let lastImagesOutput = null;
 let lastFinalVideoUrl = null;
+let lastComicPdfOutput = null;
 let mergeStepVisible = false;
 let videoOutputsByScene = {};
 let videoReviewOutputsByScene = {};
@@ -85,7 +86,7 @@ function getPersistedProjectId() {
         return null;
     }
 }
-const I18N_VERSION = '20260816f';
+const I18N_VERSION = '20260816h';
 const FRONTEND_CONFIG_VERSION = '20260811c';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
@@ -507,6 +508,8 @@ function rerenderPreviewCards() {
     if (referenceCard) referenceCard.remove();
     const storyboardCard = document.getElementById('storyboard-card');
     if (storyboardCard) storyboardCard.remove();
+    const comicPdfCard = document.getElementById('comic-pdf-card');
+    if (comicPdfCard) comicPdfCard.remove();
     const imagesCard = document.getElementById('images-card');
     if (imagesCard) imagesCard.remove();
     const videosContainer = document.getElementById('videos-container');
@@ -523,6 +526,9 @@ function rerenderPreviewCards() {
         displayImages(lastImagesOutput);
     } else if (lastReferenceImageOutput) {
         displayReferenceImage(lastReferenceImageOutput);
+    }
+    if (lastComicPdfOutput) {
+        displayComicPdfLink(lastComicPdfOutput);
     }
 
     Object.values(videoOutputsByScene)
@@ -925,6 +931,14 @@ function applyRestoredSnapshot(snap) {
         stepProgress.reference_image = 100;
     }
 
+    if (snap.comic_pdf_url || snap.comic_pdf_status === 'generating' || snap.comic_pdf_status === 'failed') {
+        displayComicPdfLink({
+            status: snap.comic_pdf_status || (snap.comic_pdf_url ? 'completed' : 'pending'),
+            comic_pdf_url: snap.comic_pdf_url || '',
+            error: snap.comic_pdf_error || ''
+        });
+    }
+
     // 3) 视频分镜
     const videos = snap.videos || [];
     if (videos.length > 0 || (snap.total_scenes && snap.current_step && String(snap.current_step).startsWith('videos'))) {
@@ -944,7 +958,16 @@ function applyRestoredSnapshot(snap) {
                 markVideoReviewed(sceneNum, !!v.approved);
                 const reviewEl = ensureReviewEl(sceneNum);
                 if (reviewEl) {
-                    if (v.approved) {
+                    if (v.accepted_over_retry) {
+                        reviewEl.style.background = '#fff7e6';
+                        reviewEl.style.border = '1px solid #ffd591';
+                        reviewEl.style.color = '#fa8c16';
+                        reviewEl.className = 'video-review-status is-accepted-over-retry';
+                        reviewEl.innerHTML = `
+                            <div class="review-status-title">${t('labels.acceptedOverRetry')}</div>
+                            ${v.score >= 0 ? `<div class="review-status-text">${t('labels.score', { score: v.score })}</div>` : ''}
+                        `;
+                    } else if (v.approved) {
                         reviewEl.style.background = '#f6ffed';
                         reviewEl.style.border = '1px solid #b7eb8f';
                         reviewEl.style.color = '#52c41a';
@@ -2722,6 +2745,9 @@ function handleAgentOutput(agent, output) {
             // 故事版审核结果（自动重生成，前端仅记录日志，最终以刷新后的故事版为准）
             console.log('[storyboard_review]', output);
             break;
+        case 'comic_pdf_agent':
+            displayComicPdfLink(output);
+            break;
         case 'merge_agent':
             // 检查是否是合成开始（没有final_video_url）还是合成完成
             if (output.final_video_url) {
@@ -2747,6 +2773,7 @@ function displayVideoReviewResult(output) {
     const message = output.message || '';
     const totalScenes = output.total_scenes || null;
     const status = output.status || '';
+    const acceptedOverRetry = !!output.accepted_over_retry;
     const manualContinueAllowed = !!output.manual_continue_allowed;
     const reviewMode = output.review_mode || '';
     const manualPauseRequired = reviewMode === 'manual' && manualContinueAllowed;
@@ -2778,7 +2805,18 @@ function displayVideoReviewResult(output) {
     }
 
     // 根据审核结果显示不同样式
-    if (approved) {
+    if (acceptedOverRetry) {
+        reviewEl.style.background = '#fff7e6';
+        reviewEl.style.border = '1px solid #ffd591';
+        reviewEl.style.color = '#fa8c16';
+        reviewEl.className = 'video-review-status is-accepted-over-retry';
+        reviewEl.innerHTML = `
+            <div class="review-status-title">${t('labels.acceptedOverRetry')}</div>
+            <div class="review-status-text">${t('labels.score', { score })} | ${t('labels.retryCount', { count: retryCount })}</div>
+        `;
+        clearVideoItemLoading(sceneNumber);
+        markVideoReviewed(sceneNumber, true);
+    } else if (approved) {
         reviewEl.style.background = '#f6ffed';
         reviewEl.style.border = '1px solid #b7eb8f';
         reviewEl.style.color = '#52c41a';
@@ -3702,6 +3740,53 @@ function displayStoryboards(output) {
     `;
 
     refreshStoryboardActionState();
+}
+
+function displayComicPdfLink(output) {
+    const normalizedOutput = {
+        status: output?.status || (output?.comic_pdf_url ? 'completed' : 'pending'),
+        comic_pdf_url: output?.comic_pdf_url || '',
+        error: output?.error || ''
+    };
+    lastComicPdfOutput = normalizedOutput;
+
+    let card = document.getElementById('comic-pdf-card');
+    if (!card) {
+        card = document.createElement('div');
+        card.className = 'content-card';
+        card.id = 'comic-pdf-card';
+    }
+
+    const storyboardCard = document.getElementById('storyboard-card');
+    const videosContainer = document.getElementById('videos-container');
+    if (storyboardCard && storyboardCard.parentNode === contentDisplay) {
+        if (storyboardCard.nextSibling !== card) {
+            contentDisplay.insertBefore(card, storyboardCard.nextSibling);
+        }
+    } else if (videosContainer && videosContainer.parentNode === contentDisplay) {
+        contentDisplay.insertBefore(card, videosContainer);
+    } else if (card.parentNode !== contentDisplay) {
+        contentDisplay.appendChild(card);
+    }
+
+    const linkAttrs = getExternalLinkAttrs();
+    const isCompleted = normalizedOutput.status === 'completed' && normalizedOutput.comic_pdf_url;
+    const isFailed = normalizedOutput.status === 'failed';
+    const title = t('labels.comicPdfTitle');
+    const statusText = isCompleted
+        ? t('labels.comicPdfReady')
+        : (isFailed ? t('labels.comicPdfFailed') : t('labels.comicPdfGenerating'));
+
+    card.innerHTML = `
+        <h4 style="margin: 0 0 12px 0; font-size: 18px; font-weight: 600; color: #333; border-bottom: 2px solid #1890ff; padding-bottom: 10px;">${title}</h4>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+            <div style="font-size:14px; color:${isFailed ? '#cf1322' : '#555'}; line-height:1.5;">
+                ${escapeHtml(statusText)}
+                ${isFailed && normalizedOutput.error ? `<div style="font-size:12px; color:#8c8c8c; margin-top:4px;">${escapeHtml(normalizedOutput.error)}</div>` : ''}
+            </div>
+            ${isCompleted ? `<a href="${normalizedOutput.comic_pdf_url}" ${linkAttrs} class="action-btn" style="background:#1890ff; color:white; padding:8px 14px; border-radius:6px; text-decoration:none; display:inline-flex; align-items:center; gap:5px; white-space:nowrap;">${t('actions.downloadPdf')}</a>` : ''}
+        </div>
+    `;
 }
 
 // 重新生成单张分镜故事版
