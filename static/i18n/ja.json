@@ -243,6 +243,7 @@
     "projectEnded": "✅ プロジェクトを終了しました。リソースのクリーンアップを開始しました。",
     "projectEndFailed": "❌ プロジェクトの終了に失敗しました: {error}",
     "projectEndNoActive": "終了できるアクティブなプロジェクトはありません。",
+    "projectRestored": "🔄 このタブで進行中のプロジェクトを復元しました。続行できます。",
     "rollbackRequestFailed": "❌ ロールバック要求に失敗しました。もう一度お試しください",
     "genericStepCompleteStatus": "{step} が完了しました。チャットで「continue」または「next」を入力すると {nextStep} に進みます。再実行するには「regenerate」「redo」または「regen」を入力してください。",
     "genericStepComplete": "{step} が完了しました！\n\nチャットに入力してください：\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - 次のステップ: {nextStep}\n• \"regenerate\" / \"redo\" / \"regen\" - {step} をやり直す",

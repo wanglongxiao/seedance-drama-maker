@@ -250,7 +250,8 @@
     "projectEnding": "Ending the project and cleaning resources...",
     "projectEnded": "✅ The project has been ended and resource cleanup has started.",
     "projectEndFailed": "❌ Failed to end project: {error}",
-    "projectEndNoActive": "There is no active project to end."
+    "projectEndNoActive": "There is no active project to end.",
+    "projectRestored": "🔄 Restored the in-progress project for this tab. You can continue."
   },
   "chat": {
     "system_prompt": "You are a professional AI video creation assistant. Your tasks are:\n1. Understand the user's video creation requirements\n2. Ask for the necessary details such as style, characters, and scenes\n3. Guide the user to provide reference images or voice descriptions\n4. Tell the user when enough information has been collected and video generation can start\n\nRespond in a friendly and professional tone.",

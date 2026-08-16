@@ -243,6 +243,7 @@
     "projectEnded": "✅ El proyecto se finalizó y la limpieza de recursos ya comenzó.",
     "projectEndFailed": "❌ No se pudo finalizar el proyecto: {error}",
     "projectEndNoActive": "No hay ningún proyecto activo para finalizar.",
+    "projectRestored": "🔄 Se restauró el proyecto en curso de esta pestaña. Puedes continuar.",
     "rollbackRequestFailed": "❌ Error en la solicitud de rollback. Inténtalo de nuevo",
     "genericStepCompleteStatus": "{step} está completo. Escribe \"continue\" o \"next\" en el chat para pasar a {nextStep}, o escribe \"regenerar\", \"rehacer\" o \"regen\" para rehacerlo.",
     "genericStepComplete": "¡{step} está completo!\n\nEscribe en el chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - siguiente paso: {nextStep}\n• \"regenerar\" / \"rehacer\" / \"regen\" - rehacer {step}",

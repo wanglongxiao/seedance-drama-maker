@@ -243,6 +243,7 @@
     "projectEnded": "✅ 專案已結束，資源清理已開始。",
     "projectEndFailed": "❌ 結束專案失敗: {error}",
     "projectEndNoActive": "目前沒有可結束的專案。",
+    "projectRestored": "🔄 已恢復本頁正在進行的專案，可繼續操作。",
     "rollbackRequestFailed": "❌ 退回請求失敗，請重試",
     "genericStepCompleteStatus": "{step}已完成！請在聊天區輸入「繼續」或「下一步」進行{nextStep}，或輸入「重新生成」、「重做」或「regen」重新製作",
     "genericStepComplete": "{step}已完成！\n\n請在聊天區輸入：\n• 「繼續」 / 「下一步」 / 「ok」 / 「好」 / 「go」 / 「開始」 - 進行下一步：{nextStep}\n• 「重新生成」 / 「重做」 / 「regen」 - 重新製作{step}",

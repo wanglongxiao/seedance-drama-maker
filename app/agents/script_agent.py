@@ -43,6 +43,69 @@ class ScriptAgent:
         first = self.scene_duration_max + 1
         return f"{first}、{first + 1}"
 
+    def _fit_scene_durations_to_target(
+        self, scenes: List[Dict[str, Any]], target_total_duration: int
+    ) -> None:
+        """在保持分镜数量与情节不变的前提下，把各分镜 duration 微调到使总时长尽量贴近目标秒数。
+
+        约束：
+        - 每个分镜的 duration 仍是 [scene_duration_min, scene_duration_max] 的整数。
+        - 只增减时长，不新增/删除分镜，避免破坏模型已规划的情节结构。
+        - 若目标超出 n 个分镜的可达区间 [n*min, n*max]，则贴到最近的可达端点。
+        - 优先从时长冗余（>min）的分镜回收、向时长仍有余量（<max）的分镜补足，
+          让开头/结尾等短镜头尽量保持精简，主要时长留给情节推进的分镜。
+        """
+        if not scenes or not target_total_duration:
+            return
+
+        n = len(scenes)
+        lo, hi = self.scene_duration_min, self.scene_duration_max
+        # 目标钳制到当前分镜数可达的时长区间。
+        target = max(n * lo, min(n * hi, int(target_total_duration)))
+
+        # 先确保每个分镜落在合法区间内。
+        for scene in scenes:
+            try:
+                dur = int(scene.get('duration') or lo)
+            except (TypeError, ValueError):
+                dur = lo
+            scene['duration'] = max(lo, min(hi, dur))
+
+        def current_total() -> int:
+            return sum(int(s.get('duration', lo)) for s in scenes)
+
+        diff = target - current_total()
+        if diff == 0:
+            return
+
+        if diff > 0:
+            # 需要增时长：轮流给仍有余量 (<max) 的分镜每次 +1，直至补齐或全部到顶。
+            while diff > 0:
+                progressed = False
+                for scene in scenes:
+                    if diff <= 0:
+                        break
+                    if int(scene['duration']) < hi:
+                        scene['duration'] = int(scene['duration']) + 1
+                        diff -= 1
+                        progressed = True
+                if not progressed:
+                    break
+        else:
+            # 需要减时长：轮流从冗余 (>min) 的分镜每次 -1，直至削够或全部触底。
+            deficit = -diff
+            while deficit > 0:
+                progressed = False
+                for scene in scenes:
+                    if deficit <= 0:
+                        break
+                    if int(scene['duration']) > lo:
+                        scene['duration'] = int(scene['duration']) - 1
+                        deficit -= 1
+                        progressed = True
+                if not progressed:
+                    break
+
     def _normalize_single_line(self, value: Any) -> str:
         return re.sub(r"\s+", " ", str(value or "").strip())
 
@@ -344,6 +407,13 @@ class ScriptAgent:
         logger.info(f"Script generated with {len(script_data['scenes'])} scenes")
         logger.info(f"Script style: {script_data.get('style', 'Not specified')}")
 
+        # 在合法区间内微调各分镜时长，使总时长尽量贴近用户指定/默认的目标秒数。
+        self._fit_scene_durations_to_target(script_data['scenes'], target_total_duration)
+        logger.info(
+            f"Script total duration fitted to {sum(int(s.get('duration', 0)) for s in script_data['scenes'])}s "
+            f"(target {target_total_duration}s)"
+        )
+
         # 构建Script对象
         characters = [Character(**c) for c in script_data['characters']]
         scene_definitions = [SceneDefinition(**item) for item in script_data.get('scene_definitions', [])]
@@ -461,6 +531,9 @@ class ScriptAgent:
 
         logger.info(f"Script rewritten with {len(script_data['scenes'])} scenes")
 
+        # 与首次生成一致：改稿后同样把总时长微调贴近目标秒数。
+        self._fit_scene_durations_to_target(script_data['scenes'], total_duration)
+
         characters = [Character(**c) for c in script_data['characters']]
         scene_definitions = [SceneDefinition(**item) for item in script_data.get('scene_definitions', [])]
         scenes = [Scene(**s) for s in script_data['scenes']]
@@ -576,11 +649,17 @@ class ScriptAgent:
    - 禁止写成: "赛博朋克国风混搭，霓虹闪烁的香港中环街头融合水墨国风元素"
 
 【创作目标】
-1. 视频总时长约 {effective_total_duration} 秒，且不得超过配置上限 {self.total_duration_max} 秒。
+1. 视频总时长约 {effective_total_duration} 秒，且不得超过配置上限 {self.total_duration_max} 秒。你要让所有分镜 duration 之和尽量贴近 {effective_total_duration} 秒（允许小幅浮动），不要明显偏短或偏长。
 2. 每个分镜时长必须在 {self.scene_duration_min}-{self.scene_duration_max} 秒之间；如果剧情更长，必须拆成多个分镜。
    - duration 只能填写 {self.scene_duration_min}-{self.scene_duration_max} 之间的整数，绝对禁止输出 {self._disallowed_duration_examples()} 或任何超出范围的值。
 3. 剧本必须完整包含开端、发展、高潮、结局，剧情连贯、符合客观规律并具有起伏。
 4. 分镜总数不得超过 {self.max_storyboard_scenes} 个。
+
+【时长分配规则】
+1. 把绝大部分时长投入到情节发展、剧情推进，以及对角色/动作/心理/互动的细致刻画，让节奏紧凑、层层递进直至剧本高潮。
+2. 开头（交代背景/人物/悬念）与结尾都要精简，不要占用过多时长；开头快速切入、结尾干净利落。
+3. 高潮及其前后的关键情节分镜应获得相对更充裕的时长，铺垫与过渡分镜可适当压缩。
+4. 结尾可采用钩子式结尾、突然收尾、开放式结尾或合家欢结尾等收束方式，根据 tone 选择最契合的一种，做到收得利落、有回味，避免拖沓冗长的收场。
 
 【基调规则】
 1. 必须输出 tone 字段，明确本剧本的背景基调，例如恐怖、爱情、悬疑、爽剧、历史、情欲等，可使用更细分的组合基调（如“悬疑恐怖”“甜宠爽剧”“历史权谋”）。
@@ -704,6 +783,7 @@ class ScriptAgent:
 
         prompt_parts.append(f"\n【技术要求】")
         prompt_parts.append(f"- 视频总时长：约{effective_total_duration}秒")
+        prompt_parts.append(f"- 所有分镜 duration 之和要尽量贴近{effective_total_duration}秒，不要明显偏短或偏长")
         prompt_parts.append(f"- 总时长不得超过{self.total_duration_max}秒")
         prompt_parts.append(f"- 每个分镜时长：{self.scene_duration_min}-{self.scene_duration_max}秒之间灵活调整，根据剧情需要设定")
         prompt_parts.append(
@@ -711,6 +791,8 @@ class ScriptAgent:
             f"禁止输出 {self._disallowed_duration_examples()} 或更大值"
         )
         prompt_parts.append(f"- 分镜数量：约{effective_total_duration // ((self.scene_duration_min + self.scene_duration_max) // 2)}个，总数不得超过{self.max_storyboard_scenes}个")
+        prompt_parts.append("- 时长分配：绝大部分时长用于情节发展与剧情推进（细致刻画角色/动作/心理/互动，节奏紧凑推向高潮）；开头与结尾要精简，不占用过多时长")
+        prompt_parts.append("- 结尾方式：可用钩子式结尾/突然收尾/开放式结尾/合家欢结尾等，按 tone 选择最契合的一种，收得利落有回味")
         prompt_parts.append("- 剧情要求：有故事感、有起伏、连贯不跳跃、符合客观规律")
         prompt_parts.append("- 每个分镜都要写足环境、人物、动作、神态、眼神、情绪、心理、语言等细节")
         prompt_parts.append("- 每个分镜都必须明确输出 time_of_day 和 weather 字段，例如白天/夜晚、晴天/雨天，并与分镜内容保持一致，且必须把该时间/天气‘场景状态’写入 description（场景描述部分）")

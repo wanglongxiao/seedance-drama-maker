@@ -250,7 +250,8 @@
     "projectEnding": "正在结束项目并清理资源...",
     "projectEnded": "✅ 项目已结束，资源清理已开始。",
     "projectEndFailed": "❌ 结束项目失败: {error}",
-    "projectEndNoActive": "当前没有可结束的项目。"
+    "projectEndNoActive": "当前没有可结束的项目。",
+    "projectRestored": "🔄 已恢复本页正在进行的项目，可继续操作。"
   },
   "chat": {
     "system_prompt": "你是一个专业的AI视频生成助手。你的任务是：\n1. 理解用户的视频创作需求\n2. 询问必要的细节（如风格、角色、场景等）\n3. 引导用户提供参考图片或语音描述\n4. 当信息足够时，告知用户可以开始生成视频\n\n请用友好、专业的语气与用户交流。",

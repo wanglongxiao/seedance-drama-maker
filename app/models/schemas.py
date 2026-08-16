@@ -188,6 +188,9 @@ class VideoProject(BaseModel):
     next_scene_index: int = 0
     video_scene_states: Dict[int, VideoSceneState] = Field(default_factory=dict)
     generated_video_seeds: List[str] = Field(default_factory=list)
+    # 正在「重新生成」（尚未完成生成+审核）的分镜编号集合。
+    # 只要非空，就必须阻塞「视频合成(merge)」步骤；用 List 以便随项目状态一并持久化到 TOS。
+    regenerating_scene_numbers: List[int] = Field(default_factory=list)
 
 class ChatMessage(BaseModel):
     """聊天消息数据模型"""

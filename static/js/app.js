@@ -59,7 +59,33 @@ let referenceStageHasCategory2 = false; // 后端下发：本项目是否存在�
 let projectEnding = false;
 let projectEnded = false;
 let projectEndBeaconSent = false;
-const I18N_VERSION = '20260816b';
+
+// 刷新恢复：把「当前正在运行的真实项目」持久化到 sessionStorage（每个 Tab 独立）。
+// - 同一 Tab 刷新：sessionStorage 保留，恢复项目并继续，不新建项目。
+// - 真正关闭 Tab：sessionStorage 随之清空，不影响其它 Tab。
+// - 仅在后端确认真实项目（非草稿）时写入；「结束项目」时清除。
+const PERSISTED_PROJECT_KEY = 'active_project_id';
+
+function persistActiveProject(projectId) {
+    try {
+        if (projectId) {
+            sessionStorage.setItem(PERSISTED_PROJECT_KEY, projectId);
+        } else {
+            sessionStorage.removeItem(PERSISTED_PROJECT_KEY);
+        }
+    } catch (e) {
+        // sessionStorage 不可用时忽略：退化为「刷新后需重新开始」，不影响主流程。
+    }
+}
+
+function getPersistedProjectId() {
+    try {
+        return sessionStorage.getItem(PERSISTED_PROJECT_KEY) || null;
+    } catch (e) {
+        return null;
+    }
+}
+const I18N_VERSION = '20260816c';
 const FRONTEND_CONFIG_VERSION = '20260811c';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
@@ -670,6 +696,7 @@ async function endProject(reason = 'user_end', options = {}) {
         projectEnding = false;
         projectEnded = true;
         projectEndBeaconSent = true;
+        persistActiveProject(null); // 已结束：清除刷新恢复标记
         updateProjectActionState();
 
         if (resetAfter) {
@@ -819,6 +846,133 @@ async function init() {
     updateProjectActionState();
     connectWebSocket();
     bindEvents();
+    // 刷新恢复：若本 Tab 仍有未结束的项目，从后端快照恢复 UI 与进度并继续。
+    await restoreProjectOnLoad();
+}
+
+// 页面加载（含刷新）时尝试恢复正在运行的项目。
+// - 依据 sessionStorage 中的 active_project_id（仅在真实项目创建后写入）。
+// - 通过后端 /project/{id}/restore 拉取快照；后端内存未命中会回源 TOS，
+//   因此本地与云端多实例刷新后都能恢复同一项目，实现「继续执行而非新建」。
+async function restoreProjectOnLoad() {
+    const projectId = getPersistedProjectId();
+    if (!projectId) return;
+
+    try {
+        const response = await fetch(`/project/${encodeURIComponent(projectId)}/restore`);
+        if (!response.ok) {
+            // 404 等：项目已不存在（已结束/被清理），清除标记，正常新开局面。
+            persistActiveProject(null);
+            return;
+        }
+        const result = await parseJsonResponse(response);
+        if (!result || !result.success || !result.snapshot) {
+            persistActiveProject(null);
+            return;
+        }
+
+        const snap = result.snapshot;
+        if (snap.is_ended) {
+            // 项目已结束：不恢复，清除标记。
+            persistActiveProject(null);
+            return;
+        }
+
+        applyRestoredSnapshot(snap);
+    } catch (e) {
+        console.error('Restore project on load failed:', e);
+        // 恢复失败不阻塞正常使用：保留标记，用户可继续或手动结束。
+    }
+}
+
+// 依据后端快照重建 UI 状态。尽量复用既有渲染函数，保证与实时链路一致。
+function applyRestoredSnapshot(snap) {
+    currentProjectId = snap.project_id;
+    hasDraftProject = false;
+    projectEnded = false;
+    projectEndBeaconSent = false;
+    persistActiveProject(currentProjectId);
+
+    // 恢复后默认不自动推进（isAutoRunMode 保持 false），避免刷新即触发合成等破坏性动作；
+    // 用户可再次点击继续或输入 auto 指令恢复全自动。视频模式选择器按快照回填。
+    if (snap.video_generation_mode) {
+        const videoModeSelect = document.getElementById('videoModeSelect');
+        if (videoModeSelect) {
+            videoModeSelect.value = snap.video_generation_mode === 'extend' ? 'extend' : 'parallel';
+            if (typeof syncSelectDisplay === 'function') syncSelectDisplay('videoModeSelect');
+        }
+    }
+
+    hideEmptyState();
+    addAgentMessage(t('messages.projectRestored'));
+
+    // 1) 剧本
+    if (snap.script) {
+        displayScript(snap.script);
+        stepProgress.script = 100;
+    }
+
+    // 2) 参考图库（含装扮/场景状态/故事版）
+    if (snap.reference_output) {
+        // 恢复态下不希望再自动触发确认倒计时，这里标记为已确认完成。
+        const refOutput = { ...snap.reference_output, ready_for_confirmation: false };
+        displayReferenceImage(refOutput);
+        referenceImageLocked = true;
+        stepProgress.reference_image = 100;
+    }
+
+    // 3) 视频分镜
+    const videos = snap.videos || [];
+    if (videos.length > 0 || (snap.total_scenes && snap.current_step && String(snap.current_step).startsWith('videos'))) {
+        currentStep = 'videos';
+        referenceImageLocked = true;
+        if (snap.total_scenes) videoTotalScenes = snap.total_scenes;
+        ensureVideosContainer();
+        videos.forEach((v) => {
+            const sceneNum = v.scene_number;
+            ensureVideoItem(sceneNum);
+            if (v.url) {
+                setVideoItemUrl(sceneNum, v.url);
+                clearVideoItemLoading(sceneNum);
+                markVideoGenerated(sceneNum);
+            }
+            if (v.completed) {
+                markVideoReviewed(sceneNum, !!v.approved);
+                const reviewEl = ensureReviewEl(sceneNum);
+                if (reviewEl) {
+                    if (v.approved) {
+                        reviewEl.style.background = '#f6ffed';
+                        reviewEl.style.border = '1px solid #b7eb8f';
+                        reviewEl.style.color = '#52c41a';
+                        reviewEl.className = 'video-review-status is-passed';
+                        reviewEl.innerHTML = `
+                            <div class="review-status-title">${t('labels.reviewPassed')}</div>
+                            ${v.score >= 0 ? `<div class="review-status-text">${t('labels.score', { score: v.score })}</div>` : ''}
+                        `;
+                    } else {
+                        reviewEl.className = 'video-review-status';
+                        reviewEl.innerHTML = `<div class="review-status-title">${t('labels.waitingGenerateReview')}</div>`;
+                    }
+                }
+            }
+        });
+        updateVideoStepProgressUI();
+    }
+
+    // 4) 最终合成视频
+    if (snap.final_video_url) {
+        displayFinalVideo(snap.final_video_url);
+        currentStep = 'merge';
+    } else if (snap.total_scenes > 0 && (snap.next_scene_index >= snap.total_scenes) && !snap.merge_blocked) {
+        // 所有分镜已完成且未被重新生成阻塞：恢复到「等待/可进入合成」态。
+        // 不自动开始倒计时，交由后端 step_complete 或用户继续驱动，避免重复合成。
+        isWaitingForConfirm = true;
+        pendingStep = 'merge';
+        currentStep = 'videos';
+    }
+
+    updateOverallProgress();
+    updateProjectActionState();
 }
 
 // 健壮解析后端 JSON 响应。
@@ -918,6 +1072,7 @@ function handleWebSocketMessage(data) {
                 hasDraftProject = false; // 后端已确认真实项目
                 projectEnded = false;
                 projectEndBeaconSent = false;
+                persistActiveProject(currentProjectId);
                 updateProjectActionState();
             }
             break;
@@ -1140,12 +1295,10 @@ function bindEvents() {
         }
     });
 
-    window.addEventListener('pagehide', () => {
-        sendProjectEndBeacon('pagehide');
-    });
-    window.addEventListener('beforeunload', () => {
-        sendProjectEndBeacon('beforeunload');
-    });
+    // 注意：不再在 pagehide/beforeunload 上自动结束项目。
+    // 浏览器刷新同样会触发这些事件，若在此结束项目，刷新后进度会丢失。
+    // 结束项目现在只能由用户显式点击「结束项目」按钮触发（见 endProjectBtn）。
+    // 刷新恢复依赖 sessionStorage 中的 active_project_id + 后端 /restore 快照。
 }
 
 // 打开媒体弹窗（用于图片）
@@ -1611,6 +1764,7 @@ async function sendMessage() {
                     hasDraftProject = false; // 后端已创建真实项目
                     projectEnded = false;
                     projectEndBeaconSent = false;
+                    persistActiveProject(currentProjectId);
                     updateProjectActionState();
                     addAgentMessage(result.response);
                 } else {
@@ -1684,6 +1838,7 @@ async function sendMessage() {
             hasDraftProject = false; // 后端已创建真实项目
             projectEnded = false;
             projectEndBeaconSent = false;
+            persistActiveProject(currentProjectId);
             updateProjectActionState();
             addAgentMessage(result.response);
 
@@ -4117,6 +4272,7 @@ function hideLoading() {
 function resetProject() {
     currentProjectId = null;
     hasDraftProject = false;
+    persistActiveProject(null); // 清除刷新恢复标记：新建/结束后不再恢复旧项目
     uploadedImages = [];
     uploadedAudio = null;
     currentStep = null;

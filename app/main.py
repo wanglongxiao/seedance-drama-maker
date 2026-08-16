@@ -141,11 +141,37 @@ def build_end_cleanup_keep_prefixes(project) -> list[str]:
     return keep_prefixes
 
 
+def _scene_regeneration_blocks_merge(project) -> bool:
+    """判断是否存在「正在重新生成 / 尚未通过审核」的分镜，从而必须阻塞 merge。
+
+    两种阻塞情形：
+    1. regenerating_scene_numbers 非空：有分镜的重新生成+审核尚未结束。
+    2. 已生成完所有分镜后，仍有分镜 scene_state 未 approved：重新生成完成但未通过审核。
+    """
+    if list(getattr(project, "regenerating_scene_numbers", []) or []):
+        return True
+
+    scene_states = getattr(project, "video_scene_states", None) or {}
+    total_scenes = len(getattr(getattr(project, "script", None), "scenes", []) or [])
+    # 仅当已进入「全部分镜生成完毕」阶段才用 approved 兜底判断，避免在正常串行生成中途误伤。
+    next_scene_index = int(getattr(project, "next_scene_index", 0) or 0)
+    if total_scenes > 0 and next_scene_index >= total_scenes:
+        for state in scene_states.values():
+            if getattr(state, "completed", False) and not getattr(state, "approved", False):
+                return True
+    return False
+
+
 async def notify_videos_step_complete_if_ready(client_id: str, project, lang: str) -> None:
     total_scenes = len(getattr(getattr(project, "script", None), "scenes", []) or [])
     completed_videos = len(getattr(project, "videos", None) or [])
     next_scene_index = int(getattr(project, "next_scene_index", 0) or 0)
-    if total_scenes > 0 and completed_videos >= total_scenes and next_scene_index >= total_scenes:
+    if (
+        total_scenes > 0
+        and completed_videos >= total_scenes
+        and next_scene_index >= total_scenes
+        and not _scene_regeneration_blocks_merge(project)
+    ):
         await manager.send_message(client_id, {
             "type": "step_complete",
             "data": {
@@ -404,6 +430,67 @@ async def get_project(project_id: str):
     return {
         "success": True,
         "project": project.dict()
+    }
+
+
+@app.get("/project/{project_id}/restore")
+async def restore_project_snapshot(project_id: str):
+    """页面刷新后恢复项目 UI 状态所需的快照。
+
+    内存未命中时 get_project 会自动回源 TOS 快照，因此本地与云端多实例
+    刷新后都能拿到同一项目的完整进度，从而“继续执行而非新建项目”。
+    """
+    project = main_agent.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=translate("zh-CN", "error.project_not_found"))
+
+    lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+
+    # 视频分镜：仅回传已生成成功且有 URL 的分镜，附带审核结论用于前端复原。
+    scene_states = getattr(project, "video_scene_states", None) or {}
+    videos_payload: List[Dict[str, Any]] = []
+    for video in getattr(project, "videos", None) or []:
+        scene_number = int(getattr(video, "scene_number", 0) or 0)
+        url = getattr(video, "url", "") or ""
+        if not url:
+            continue
+        state = scene_states.get(scene_number)
+        videos_payload.append({
+            "scene_number": scene_number,
+            "url": url,
+            "approved": bool(getattr(state, "approved", False)) if state else False,
+            "completed": bool(getattr(state, "completed", False)) if state else True,
+            "score": int(getattr(state, "best_score", -1) or -1) if state else -1,
+            "feedback": (getattr(state, "best_feedback", "") or "") if state else "",
+        })
+
+    total_scenes = len(getattr(getattr(project, "script", None), "scenes", []) or [])
+    reference_ready = bool(getattr(project, "character_reference_images", None)) or bool(
+        getattr(project, "scene_reference_images", None)
+    ) or bool(getattr(project, "storyboard_images", None))
+
+    return {
+        "success": True,
+        "snapshot": {
+            "project_id": project.project_id,
+            "is_ended": bool(getattr(project, "is_ended", False)),
+            "current_step": getattr(project, "current_step", "") or "",
+            "status": getattr(project, "status", "") or "",
+            "output_language": lang,
+            "video_review_mode": getattr(project, "video_review_mode", "manual") or "manual",
+            "video_generation_mode": getattr(project, "video_generation_mode", "parallel") or "parallel",
+            "script": project.script.dict() if getattr(project, "script", None) else None,
+            "reference_output": (
+                main_agent._build_reference_output(project) if reference_ready else None
+            ),
+            "videos": videos_payload,
+            "total_scenes": total_scenes,
+            "next_scene_index": int(getattr(project, "next_scene_index", 0) or 0),
+            "regenerating_scene_numbers": list(getattr(project, "regenerating_scene_numbers", []) or []),
+            "final_video_url": getattr(project, "final_video_url", None),
+            # 是否仍有分镜在重新生成/未通过审核（用于恢复后判断能否进入合成）。
+            "merge_blocked": _scene_regeneration_blocks_merge(project),
+        }
     }
 
 
@@ -685,61 +772,164 @@ async def regenerate(
             logger.info(f"Total scenes in script: {len(project.script.scenes)}")
             logger.info(f"Total videos: {len(project.videos)}")
 
-            # 获取参考图
-            reference_image = getattr(project, 'reference_image', None)
-            if not reference_image:
-                return {"success": False, "error": translate(ui_language, "error.reference_missing")}
+            # 登记「正在重新生成」的分镜：只要该集合非空，就会阻塞 merge 步骤。
+            # 生成+审核在本请求内同步完成，无论成功失败都会在 finally 中移除。
+            if scene_number not in project.regenerating_scene_numbers:
+                project.regenerating_scene_numbers.append(scene_number)
+            main_agent.save_project_state(project_id)
 
-            review_mode = getattr(project, "video_review_mode", "manual")
-            scene_state = main_agent._get_scene_state(project, scene_number)
-            total_generation_limit = max(1, int(config.get('video_generation.scene_total_generate_limit', 3)))
-            # 仅延长模式参考前一分镜视频；并行模式各分镜独立生成，不引用上一分镜视频。
-            generation_mode = main_agent._normalize_generation_mode(getattr(project, "video_generation_mode", None))
-            previous_video_url = (
-                main_agent._get_previous_video_url(project, scene_number - 1)
-                if generation_mode == "extend"
-                else None
-            )
-            project_language = normalize_locale(getattr(project, "output_language", "zh-CN"))
-            manual_request_attempt = 0
-            while True:
-                manual_request_attempt += 1
-                scene_state.manual_regeneration_count += 1
+            try:
+                result = await _regenerate_video_scene(
+                    project=project,
+                    project_id=project_id,
+                    scene_number=scene_number,
+                    client_id=client_id,
+                    ui_language=ui_language,
+                )
+            finally:
+                if scene_number in project.regenerating_scene_numbers:
+                    project.regenerating_scene_numbers.remove(scene_number)
+                main_agent.save_project_state(project_id)
 
-                try:
-                    # 重新生成视频，使用参考图保持人物一致性
-                    new_video = await run_generation(
-                        main_agent.video_agent.regenerate_video,
-                        scene_number=scene_number,
-                        script=project.script,
-                        project_id=project.project_id,
-                        reference_image=reference_image,
-                        reference_images=main_agent._select_reference_assets_for_scene(project, project.script.scenes[scene_number - 1]),
-                        previous_video_url=previous_video_url,
-                        feedback="用户要求重新生成",
-                        # 已有分镜脚本时，不再把初始用户长文本塞进视频提示词
-                        user_style_info=getattr(project.script, "style", None),
-                        user_requirement_text=getattr(project, "combined_input", None),
-                        resolution=getattr(project, "video_resolution", None),
-                        aspect_ratio=getattr(project, "aspect_ratio", None),
-                    )
-                    new_video = await main_agent.archive_scene_video_async(
-                        project,
-                        new_video,
-                        generation_count=main_agent._next_scene_archive_attempt(scene_state),
-                    )
-                except Exception as e:
-                    scene_state.generation_failure_count += 1
-                    scene_state.last_feedback = str(e)
-                    can_skip_scene = (
-                        review_mode == "manual" and
-                        scene_state.generation_failure_count >= total_generation_limit
-                    )
+            # 该分镜重新生成并通过审核后，若所有分镜都已完成且不再阻塞 merge，
+            # 主动重新下发 videos 的 step_complete，让前端重新进入 merge 倒计时并继续。
+            review_info = result.get("review") if isinstance(result, dict) else None
+            if (
+                isinstance(result, dict)
+                and result.get("success")
+                and isinstance(review_info, dict)
+                and review_info.get("approved")
+                and client_id
+            ):
+                project = main_agent.get_project(project_id)
+                lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+                await notify_videos_step_complete_if_ready(client_id, project, lang)
+
+            return result
+        else:
+            return {"success": False, "error": translate(ui_language, "error.invalid_type")}
+
+    except Exception as e:
+        logger.error(f"Regenerate failed: {str(e)}")
+        return {"success": False, "error": translate(ui_language, "error.generation_failed", error=str(e))}
+
+
+async def _regenerate_video_scene(
+    *,
+    project,
+    project_id: str,
+    scene_number: int,
+    client_id: Optional[str],
+    ui_language: str,
+):
+    """执行单个分镜视频的重新生成 + 审核；由 /regenerate 的 video 分支包裹调用。
+
+    调用方负责在外层维护 project.regenerating_scene_numbers（阻塞 merge）。
+    """
+    try:
+        # 获取参考图
+        reference_image = getattr(project, 'reference_image', None)
+        if not reference_image:
+            return {"success": False, "error": translate(ui_language, "error.reference_missing")}
+
+        review_mode = getattr(project, "video_review_mode", "manual")
+        scene_state = main_agent._get_scene_state(project, scene_number)
+        total_generation_limit = max(1, int(config.get('video_generation.scene_total_generate_limit', 3)))
+        # 仅延长模式参考前一分镜视频；并行模式各分镜独立生成，不引用上一分镜视频。
+        generation_mode = main_agent._normalize_generation_mode(getattr(project, "video_generation_mode", None))
+        previous_video_url = (
+            main_agent._get_previous_video_url(project, scene_number - 1)
+            if generation_mode == "extend"
+            else None
+        )
+        project_language = normalize_locale(getattr(project, "output_language", "zh-CN"))
+        manual_request_attempt = 0
+        while True:
+            manual_request_attempt += 1
+            scene_state.manual_regeneration_count += 1
+
+            try:
+                # 重新生成视频，使用参考图保持人物一致性
+                new_video = await run_generation(
+                    main_agent.video_agent.regenerate_video,
+                    scene_number=scene_number,
+                    script=project.script,
+                    project_id=project.project_id,
+                    reference_image=reference_image,
+                    reference_images=main_agent._select_reference_assets_for_scene(project, project.script.scenes[scene_number - 1]),
+                    previous_video_url=previous_video_url,
+                    feedback="用户要求重新生成",
+                    # 已有分镜脚本时，不再把初始用户长文本塞进视频提示词
+                    user_style_info=getattr(project.script, "style", None),
+                    user_requirement_text=getattr(project, "combined_input", None),
+                    resolution=getattr(project, "video_resolution", None),
+                    aspect_ratio=getattr(project, "aspect_ratio", None),
+                )
+                new_video = await main_agent.archive_scene_video_async(
+                    project,
+                    new_video,
+                    generation_count=main_agent._next_scene_archive_attempt(scene_state),
+                )
+            except Exception as e:
+                scene_state.generation_failure_count += 1
+                scene_state.last_feedback = str(e)
+                can_skip_scene = (
+                    review_mode == "manual" and
+                    scene_state.generation_failure_count >= total_generation_limit
+                )
+                return {
+                    "success": False,
+                    "error": translate(project_language, "error.video_generation_failed", error=str(e)),
+                    "scene_number": scene_number,
+                    "can_skip_scene": can_skip_scene,
+                    "generation_failure_count": scene_state.generation_failure_count,
+                    "max_generation_count": total_generation_limit,
+                    "skip_message": translate(
+                        project_language,
+                        "message.video.scene_can_skip",
+                        scene=scene_number,
+                        limit=total_generation_limit,
+                    ) if can_skip_scene else None,
+                }
+
+            if main_agent._has_duplicate_video_seed(project, new_video.seed):
+                duplicate_seed = main_agent._normalize_video_seed(new_video.seed) or "unknown"
+                duplicate_message = translate(
+                    project_language,
+                    "message.video.duplicate_seed_retry",
+                    scene=scene_number,
+                    seed=duplicate_seed,
+                )
+                logger.warning(
+                    f"Scene {scene_number} regenerate got duplicate seed {duplicate_seed}, retry without review"
+                )
+                scene_state.generation_failure_count += 1
+                scene_state.last_feedback = duplicate_message
+                can_skip_scene = (
+                    review_mode == "manual" and
+                    scene_state.generation_failure_count >= total_generation_limit
+                )
+                if manual_request_attempt >= total_generation_limit:
                     return {
                         "success": False,
-                        "error": translate(project_language, "error.video_generation_failed", error=str(e)),
+                        "error": translate(
+                            project_language,
+                            "message.video.duplicate_seed_retry_limit",
+                            scene=scene_number,
+                            limit=total_generation_limit,
+                            seed=duplicate_seed,
+                        ),
                         "scene_number": scene_number,
-                        "can_skip_scene": can_skip_scene,
+                        "can_skip_scene": False,
+                        "generation_failure_count": scene_state.generation_failure_count,
+                        "max_generation_count": total_generation_limit,
+                    }
+                if can_skip_scene:
+                    return {
+                        "success": False,
+                        "error": duplicate_message,
+                        "scene_number": scene_number,
+                        "can_skip_scene": True,
                         "generation_failure_count": scene_state.generation_failure_count,
                         "max_generation_count": total_generation_limit,
                         "skip_message": translate(
@@ -747,141 +937,92 @@ async def regenerate(
                             "message.video.scene_can_skip",
                             scene=scene_number,
                             limit=total_generation_limit,
-                        ) if can_skip_scene else None,
+                        ),
                     }
+                continue
+            break
 
-                if main_agent._has_duplicate_video_seed(project, new_video.seed):
-                    duplicate_seed = main_agent._normalize_video_seed(new_video.seed) or "unknown"
-                    duplicate_message = translate(
-                        project_language,
-                        "message.video.duplicate_seed_retry",
-                        scene=scene_number,
-                        seed=duplicate_seed,
-                    )
-                    logger.warning(
-                        f"Scene {scene_number} regenerate got duplicate seed {duplicate_seed}, retry without review"
-                    )
-                    scene_state.generation_failure_count += 1
-                    scene_state.last_feedback = duplicate_message
-                    can_skip_scene = (
-                        review_mode == "manual" and
-                        scene_state.generation_failure_count >= total_generation_limit
-                    )
-                    if manual_request_attempt >= total_generation_limit:
-                        return {
-                            "success": False,
-                            "error": translate(
-                                project_language,
-                                "message.video.duplicate_seed_retry_limit",
-                                scene=scene_number,
-                                limit=total_generation_limit,
-                                seed=duplicate_seed,
-                            ),
-                            "scene_number": scene_number,
-                            "can_skip_scene": False,
-                            "generation_failure_count": scene_state.generation_failure_count,
-                            "max_generation_count": total_generation_limit,
-                        }
-                    if can_skip_scene:
-                        return {
-                            "success": False,
-                            "error": duplicate_message,
-                            "scene_number": scene_number,
-                            "can_skip_scene": True,
-                            "generation_failure_count": scene_state.generation_failure_count,
-                            "max_generation_count": total_generation_limit,
-                            "skip_message": translate(
-                                project_language,
-                                "message.video.scene_can_skip",
-                                scene=scene_number,
-                                limit=total_generation_limit,
-                            ),
-                        }
-                    continue
+        logger.info(f"Video regenerated successfully: {new_video.url}")
+        scene_state.last_video = new_video
+        scene_state.generation_failure_count = 0
+        main_agent._register_video_seed(project, new_video.seed)
+
+        # 更新项目中的视频
+        video_found = False
+        for i, vid in enumerate(project.videos):
+            if vid.scene_number == scene_number:
+                project.videos[i] = new_video
+                video_found = True
+                logger.info(f"Updated video at index {i}")
                 break
 
-            logger.info(f"Video regenerated successfully: {new_video.url}")
-            scene_state.last_video = new_video
-            scene_state.generation_failure_count = 0
-            main_agent._register_video_seed(project, new_video.seed)
+        if not video_found:
+            logger.warning(f"Video for scene {scene_number} not found in project, adding new video")
+            project.videos.append(new_video)
 
-            # 更新项目中的视频
-            video_found = False
-            for i, vid in enumerate(project.videos):
-                if vid.scene_number == scene_number:
-                    project.videos[i] = new_video
-                    video_found = True
-                    logger.info(f"Updated video at index {i}")
-                    break
+        is_approved, feedback, score = await run_generation(
+            main_agent.video_review_agent.review_video,
+            script_scene_description=project.script.scenes[scene_number - 1].description,
+            video_url=new_video.url,
+            previous_video_url=previous_video_url,
+            reference_image_url=project.reference_image.url,
+            output_language=normalize_locale(getattr(project, "output_language", "zh-CN")),
+        )
 
-            if not video_found:
-                logger.warning(f"Video for scene {scene_number} not found in project, adding new video")
-                project.videos.append(new_video)
+        scene_state.last_score = score
+        scene_state.last_feedback = feedback
+        scene_state.completed = True
+        scene_state.approved = bool(is_approved)
+        if score > scene_state.best_score:
+            scene_state.best_score = score
+            scene_state.best_feedback = feedback
+            scene_state.best_video = new_video
 
-            is_approved, feedback, score = await run_generation(
-                main_agent.video_review_agent.review_video,
-                script_scene_description=project.script.scenes[scene_number - 1].description,
-                video_url=new_video.url,
-                previous_video_url=previous_video_url,
-                reference_image_url=project.reference_image.url,
-                output_language=normalize_locale(getattr(project, "output_language", "zh-CN")),
+        review_output = {
+            "scene_number": scene_number,
+            "approved": is_approved,
+            "score": score,
+            "retry_count": scene_state.auto_retry_count,
+            "max_retries": max(0, int(config.get('video_review.max_retries', 2))),
+            "generation_count": scene_state.total_generation_count,
+            "manual_regeneration_count": scene_state.manual_regeneration_count,
+            "max_generation_count": total_generation_limit,
+            "feedback": feedback,
+            "review_mode": review_mode,
+            "manual_continue_allowed": review_mode == "manual",
+            "next_step": "merge" if scene_number == len(project.script.scenes) else "videos",
+            "is_last_scene": scene_number == len(project.script.scenes),
+            "message": translate(
+                normalize_locale(getattr(project, "output_language", "zh-CN")),
+                "message.video.review_passed" if is_approved else "message.video.review_failed",
+                scene=scene_number,
+                score=score,
+                feedback=feedback
             )
+        }
 
-            scene_state.last_score = score
-            scene_state.last_feedback = feedback
-            scene_state.completed = True
-            scene_state.approved = bool(is_approved)
-            if score > scene_state.best_score:
-                scene_state.best_score = score
-                scene_state.best_feedback = feedback
-                scene_state.best_video = new_video
+        websocket = websocket_connections.get(client_id) if client_id else None
+        if websocket:
+            await websocket.send_json(jsonable_encoder({
+                "type": "agent_output",
+                "data": {
+                    "agent": "video_review_agent",
+                    "output": review_output
+                }
+            }))
 
-            review_output = {
-                "scene_number": scene_number,
-                "approved": is_approved,
-                "score": score,
-                "retry_count": scene_state.auto_retry_count,
-                "max_retries": max(0, int(config.get('video_review.max_retries', 2))),
-                "generation_count": scene_state.total_generation_count,
-                "manual_regeneration_count": scene_state.manual_regeneration_count,
-                "max_generation_count": total_generation_limit,
-                "feedback": feedback,
-                "review_mode": review_mode,
-                "manual_continue_allowed": review_mode == "manual",
-                "next_step": "merge" if scene_number == len(project.script.scenes) else "videos",
-                "is_last_scene": scene_number == len(project.script.scenes),
-                "message": translate(
-                    normalize_locale(getattr(project, "output_language", "zh-CN")),
-                    "message.video.review_passed" if is_approved else "message.video.review_failed",
-                    scene=scene_number,
-                    score=score,
-                    feedback=feedback
-                )
-            }
-
-            websocket = websocket_connections.get(client_id) if client_id else None
-            if websocket:
-                await websocket.send_json(jsonable_encoder({
-                    "type": "agent_output",
-                    "data": {
-                        "agent": "video_review_agent",
-                        "output": review_output
-                    }
-                }))
-
-            return {
-                "success": True,
-                "url": new_video.url,
-                "type": "video",
-                "scene_number": scene_number,
-                "review": review_output,
-            }
-        else:
-            return {"success": False, "error": translate(ui_language, "error.invalid_type")}
+        return {
+            "success": True,
+            "url": new_video.url,
+            "type": "video",
+            "scene_number": scene_number,
+            "review": review_output,
+        }
 
     except Exception as e:
-        logger.error(f"Regenerate failed: {str(e)}")
+        logger.error(f"Regenerate video failed: {str(e)}")
         return {"success": False, "error": translate(ui_language, "error.generation_failed", error=str(e))}
+
 
 
 @app.post("/skip_scene")
@@ -1869,6 +2010,18 @@ async def execute_merge_step(client_id: str, project_id: str):
         logger.warning(
             f"Rejected premature merge for project {project_id}: "
             f"videos={completed_videos}/{total_scenes}, next_scene_index={next_scene_index}"
+        )
+        return
+
+    # 有分镜正在「重新生成」或重新生成后尚未通过审核时，阻塞合成，等其完成并通过审核。
+    if _scene_regeneration_blocks_merge(project):
+        await manager.send_message(client_id, {
+            "type": "error",
+            "data": {"message": translate(lang, "error.merge_before_all_scenes_completed")}
+        })
+        logger.warning(
+            f"Rejected merge for project {project_id}: scene regeneration/review still pending "
+            f"(regenerating={list(getattr(project, 'regenerating_scene_numbers', []) or [])})"
         )
         return
 
