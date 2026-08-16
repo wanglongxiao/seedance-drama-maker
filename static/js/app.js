@@ -55,7 +55,7 @@ let referenceStageHasCategory2 = false; // 后端下发：本项目是否存在�
 let projectEnding = false;
 let projectEnded = false;
 let projectEndBeaconSent = false;
-const I18N_VERSION = '20260814c';
+const I18N_VERSION = '20260816a';
 const FRONTEND_CONFIG_VERSION = '20260811c';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
@@ -1437,14 +1437,17 @@ async function sendMessage() {
         return;
     }
 
+    // 必须在 ensureDraftProjectId() 之前判定：上传图片/音频会提前生成草稿
+    // projectId，使 currentProjectId 变为真值，若在其后再判断 !currentProjectId
+    // 会误判为“已有项目”，导致上传图片时 auto 提示无法触发全自动模式。
+    const shouldEnableAutoRunFromPrompt = !currentProjectId && containsAutoRunHint(message);
+
     if (uploadedImages.length > 0) {
         ensureDraftProjectId();
     }
     if (uploadedAudio) {
         ensureDraftProjectId();
     }
-
-    const shouldEnableAutoRunFromPrompt = !currentProjectId && containsAutoRunHint(message);
     
     // 检查是否是"继续"指令（支持多种说法）
     if (isContinueCommand(message) && isWaitingForConfirm && pendingReferenceStage && pendingReferenceStage !== 'videos') {
