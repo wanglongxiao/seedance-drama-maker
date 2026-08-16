@@ -1270,6 +1270,8 @@ class ImageAgent:
 
         # 根据剧本风格生成结尾画面
         prompt_parts.append(f"Ending scene for: {script.title}")
+        if getattr(script, "era", None):
+            prompt_parts.append(f"Era: {script.era}")
         prompt_parts.append(f"Background: {script.background}")
 
         # 生成带有"The End"的结尾画面

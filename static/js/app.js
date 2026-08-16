@@ -85,7 +85,7 @@ function getPersistedProjectId() {
         return null;
     }
 }
-const I18N_VERSION = '20260816c';
+const I18N_VERSION = '20260816f';
 const FRONTEND_CONFIG_VERSION = '20260811c';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
@@ -687,7 +687,9 @@ async function endProject(reason = 'user_end', options = {}) {
             method: 'POST',
             body: buildProjectEndFormData(reason),
         });
-        const result = await response.json();
+        // 云端 API 网关在实例繁忙/超时时可能返回明文（如 "upstream request timeout"），
+        // 直接 response.json() 会抛 "Unexpected token 'u'"。改用健壮解析。
+        const result = await parseJsonResponse(response);
 
         if (!response.ok || !result.success) {
             throw new Error(result.error || getHttpErrorMessage(response.status));
@@ -910,6 +912,8 @@ function applyRestoredSnapshot(snap) {
     if (snap.script) {
         displayScript(snap.script);
         stepProgress.script = 100;
+        // 恢复态下没有实时 step_complete 推送，需显式点亮剧本步骤（进度条 1 变绿）。
+        updateStepHighlight('script_agent', 100);
     }
 
     // 2) 参考图库（含装扮/场景状态/故事版）
@@ -1101,6 +1105,10 @@ function handleWebSocketMessage(data) {
 
         case 'reference_asset_regenerated':
             handleReferenceAssetRegenerated(data.data);
+            break;
+
+        case 'video_scene_regenerated':
+            handleVideoSceneRegenerated(data.data);
             break;
 
         case 'step_complete':
@@ -3137,6 +3145,8 @@ function displayScript(script) {
     // 检查并转换数据格式（处理后端发送的 dict 格式）
     const title = script.title || t('labels.scriptUntitled');
     const style = script.style || t('labels.unspecified');
+    const era = script.era || '';
+    const background = script.background || '';
     const tone = script.tone || '';
     const total_duration = script.total_duration || 0;
     const characters = script.characters || [];
@@ -3242,10 +3252,12 @@ function displayScript(script) {
         <div class="script-content">
             <div style="display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 15px;">
                 <p style="margin: 0;"><strong>${t('labels.style')}</strong> <span style="color: #1890ff;">${style}</span></p>
+                ${era ? `<p style="margin: 0;"><strong>${t('labels.era')}</strong> <span style="color: #13c2c2;">${era}</span></p>` : ''}
                 ${tone ? `<p style="margin: 0;"><strong>${t('labels.tone')}</strong> <span style="color: #eb2f96;">${tone}</span></p>` : ''}
                 <p style="margin: 0;"><strong>${t('labels.totalDuration')}</strong> <span style="color: #52c41a;">${t('labels.seconds', { count: total_duration })}</span></p>
                 <p style="margin: 0;"><strong>${t('labels.sceneCount')}</strong> <span style="color: #722ed1;">${t('labels.countUnit', { count: scenes.length })}</span></p>
             </div>
+            ${background ? `<p style="margin: 0 0 15px 0;"><strong>${t('labels.background')}</strong> <span style="color: #555;">${background}</span></p>` : ''}
 
             ${charactersHtml}
             ${sceneDefinitionsHtml}
@@ -3505,6 +3517,43 @@ function handleReferenceAssetRegenerated(data) {
         const errText = data.error || '';
         addAgentMessage(t('messages.regenerateFailedWithError', { error: errText }));
         finishReferenceAssetRegeneration(referenceAssetKey, true);
+    }
+}
+
+// 处理后台「分镜视频重新生成」的最终结果（经 WebSocket 推送）。
+// 与同步 fetch 路径的成功/失败分支保持一致，只是触发时机改为异步。
+function handleVideoSceneRegenerated(data) {
+    data = data || {};
+    const sceneNumber = data.scene_number;
+    // 关闭该分镜的加载态（转转效果）。
+    clearVideoItemLoading(sceneNumber);
+
+    if (data.success) {
+        if (data.url) {
+            setVideoItemUrl(sceneNumber, data.url);
+        }
+        hideSkipSceneButton(sceneNumber);
+        markVideoGenerated(sceneNumber);
+        if (data.review) {
+            displayVideoReviewResult(data.review);
+        }
+        renderStatusBar(t('messages.sceneVideoRegenerated', { scene: sceneNumber }), 'info', t('steps.video'));
+        addAgentMessage(t('messages.sceneVideoRegenerated', { scene: sceneNumber }));
+    } else {
+        console.error('Regenerate failed:', data.error);
+        maybeStartPendingStepCountdown();
+        if (data.can_skip_scene) {
+            showSkipSceneButton(sceneNumber);
+            const skipMessage = data.skip_message || t('messages.skipSceneAvailable', {
+                scene: sceneNumber,
+                limit: data.max_generation_count || 0
+            });
+            renderStatusBar(skipMessage, 'info', t('steps.video'));
+            addAgentMessage(skipMessage);
+        } else {
+            renderStatusBar(t('messages.regenerateFailedWithError', { error: data.error || t('labels.unknown') }), 'info', t('steps.video'));
+            addAgentMessage(t('messages.regenerateFailedWithError', { error: data.error || t('labels.unknown') }));
+        }
     }
 }
 
@@ -4090,6 +4139,12 @@ async function regenerateVideo(sceneNumber) {
         }
 
         const result = await response.json();
+
+        if (result.success && result.async) {
+            // 后台异步生成：视频重生成+审核耗时可达数分钟，超过云端网关超时。
+            // 保持该分镜的加载态，最终结果通过 WebSocket（video_scene_regenerated）推送后再更新。
+            return;
+        }
 
         if (result.success) {
             // 更新视频显示并关闭转转效果

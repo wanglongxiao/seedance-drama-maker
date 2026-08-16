@@ -78,6 +78,8 @@ class Script(BaseModel):
     """剧本数据模型"""
     title: str
     style: str
+    # 剧本所处的时代/年代，如 上古洪荒/古代/民国/现代都市/近未来/架空异世界 等
+    era: Optional[str] = None
     background: str
     # 剧本背景基调，如 恐怖/爱情/悬疑/爽剧/历史/情欲 等更细分的基调
     tone: Optional[str] = None

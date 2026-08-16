@@ -422,6 +422,7 @@ class ScriptAgent:
         script = Script(
             title=script_data['title'],
             style=script_data['style'],
+            era=script_data.get('era'),
             background=script_data['background'],
             tone=script_data.get('tone'),
             characters=characters,
@@ -541,6 +542,7 @@ class ScriptAgent:
         return Script(
             title=script_data['title'],
             style=script_data['style'],
+            era=script_data.get('era'),
             background=script_data['background'],
             tone=script_data.get('tone'),
             characters=characters,
@@ -666,6 +668,11 @@ class ScriptAgent:
 2. tone 要贯穿全篇：剧情节奏、氛围、镜头与对白都必须与该基调保持一致。
 3. 若用户在输入中明确指定了基调/题材，tone 必须尊重用户指定，不得擅自更换。
 
+【时代规则】
+1. 必须输出 era 字段，明确剧本所处的时代/年代，例如上古洪荒、先秦、汉唐、宋明、民国、现代都市、近未来、赛博未来、末世废土、架空异世界等，可根据剧情给出更具体的年代设定。
+2. era 要与 style、background、tone 相互契合：服化道、场景陈设、科技水平、社会风貌、语言用词都必须符合该时代设定，全篇保持一致。
+3. 若用户在输入中明确指定了时代/年代，era 必须尊重用户指定，不得擅自更换。
+
 【角色与布景】
 1. 角色设定最多 {self.max_characters} 个，需包含外貌、声音特征、性格特点。
 2. 每个角色都必须输出 personality（性格侧写）字段：用简要文字刻画其性格特征、动机与内在矛盾，体现角色的真实性与人性的复杂性（如优点与缺点并存、立场随剧情动摇）；主角的 personality 尤其要写得立体、可信，避免脸谱化。
@@ -703,6 +710,7 @@ class ScriptAgent:
 【输出格式】
 - title: 剧本标题
 - style: 整体风格
+- era: 剧本所处的时代/年代（如上古洪荒/汉唐/民国/现代都市/近未来/末世废土/架空异世界，或更具体的年代设定），必须为非空字符串
 - background: 故事背景设定
 - tone: 剧本背景基调（如恐怖/爱情/悬疑/爽剧/历史/情欲，或更细分的组合基调），必须为非空字符串
 - characters: 角色列表，每个角色包含 name, age, gender, face_features, skin_tone, clothing, voice_type, voice_features, voice_style, personality
@@ -803,6 +811,7 @@ class ScriptAgent:
         prompt_parts.append(f"- 所有分镜的出场角色总数与角色设定共用同一个上限，最多{self.max_characters}个；凡是出现在 characters_present 的角色，都必须在 characters 中给出设定")
         prompt_parts.append("- 每个布景设定都必须输出 scene_features 数组，写清该场景的稳定特征，例如灯光、陈设、建筑材质、空间布局、环境符号")
         prompt_parts.append("- 必须输出 tone 字段，明确剧本背景基调（如恐怖/爱情/悬疑/爽剧/历史/情欲，或更细分的组合基调），并让剧情、氛围、镜头与对白贯穿该基调；用户已指定基调/题材时须尊重用户")
+        prompt_parts.append("- 必须输出 era 字段，明确剧本所处的时代/年代（如上古洪荒/汉唐/民国/现代都市/近未来/末世废土/架空异世界，或更具体的年代），并让服化道、场景陈设、科技水平、社会风貌、语言用词都契合该时代；用户已指定时代/年代时须尊重用户")
         prompt_parts.append("- 每个角色都必须输出 personality（性格侧写）：简要刻画其性格特征、动机与内在矛盾，体现真实性与人性的复杂性，主角尤其要立体可信、避免脸谱化")
         prompt_parts.append("- ‘角色装扮’与‘场景状态’都必须使用区别明显的文字描述，使同一角色/同一布景在不同分镜的不同状态之间可从文字上清晰区分")
 
@@ -1202,6 +1211,10 @@ class ScriptAgent:
             # 确保剧本基调(tone)为字符串（模型可能漏字段或输出为数组/对象）
             if 'tone' in data and data['tone'] is not None:
                 data['tone'] = self._coerce_scene_text_field(data['tone'])
+
+            # 确保剧本时代(era)为字符串（模型可能输出为数组/对象或漏字段）
+            if 'era' in data and data['era'] is not None:
+                data['era'] = self._coerce_scene_text_field(data['era'])
 
             # 确保角色age字段是字符串类型
             if 'characters' in data:
@@ -2202,6 +2215,7 @@ class ScriptAgent:
         return Script(
             title=script_data['title'],
             style=script_data['style'],
+            era=script_data.get('era'),
             background=script_data['background'],
             tone=script_data.get('tone'),
             characters=characters,

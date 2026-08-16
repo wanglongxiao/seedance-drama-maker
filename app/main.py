@@ -772,40 +772,37 @@ async def regenerate(
             logger.info(f"Total scenes in script: {len(project.script.scenes)}")
             logger.info(f"Total videos: {len(project.videos)}")
 
-            # 登记「正在重新生成」的分镜：只要该集合非空，就会阻塞 merge 步骤。
-            # 生成+审核在本请求内同步完成，无论成功失败都会在 finally 中移除。
-            if scene_number not in project.regenerating_scene_numbers:
-                project.regenerating_scene_numbers.append(scene_number)
-            main_agent.save_project_state(project_id)
+            # 需要有效的 WebSocket 连接以推送最终结果。
+            effective_client_id = client_id
+            if not effective_client_id or effective_client_id not in websocket_connections:
+                if len(websocket_connections) == 0:
+                    return {"success": False, "error": translate(ui_language, "error.no_active_websocket")}
+                if effective_client_id and effective_client_id not in websocket_connections:
+                    return {
+                        "success": False,
+                        "error": translate(ui_language, "error.invalid_client_id", client_id=effective_client_id)
+                    }
+                # 兼容旧前端：未传 client_id 时退化为第一个连接。
+                effective_client_id = list(websocket_connections.keys())[0]
+                logger.warning(f"/regenerate: missing client_id, fallback to {effective_client_id}")
 
-            try:
-                result = await _regenerate_video_scene(
-                    project=project,
+            # 非阻塞：单个分镜视频重生成耗时可达数分钟，远超云端 API 网关约 60s 超时，
+            # 若在 HTTP 内同步 await 会触发网关 504 断连，前端误报“重新生成失败”（但后台仍在跑）。
+            # 改为后台任务执行，立即返回；最终结果统一通过 WebSocket（video_scene_regenerated）推送。
+            asyncio.create_task(
+                regenerate_video_scene_background(
                     project_id=project_id,
                     scene_number=scene_number,
-                    client_id=client_id,
+                    client_id=effective_client_id,
                     ui_language=ui_language,
                 )
-            finally:
-                if scene_number in project.regenerating_scene_numbers:
-                    project.regenerating_scene_numbers.remove(scene_number)
-                main_agent.save_project_state(project_id)
-
-            # 该分镜重新生成并通过审核后，若所有分镜都已完成且不再阻塞 merge，
-            # 主动重新下发 videos 的 step_complete，让前端重新进入 merge 倒计时并继续。
-            review_info = result.get("review") if isinstance(result, dict) else None
-            if (
-                isinstance(result, dict)
-                and result.get("success")
-                and isinstance(review_info, dict)
-                and review_info.get("approved")
-                and client_id
-            ):
-                project = main_agent.get_project(project_id)
-                lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
-                await notify_videos_step_complete_if_ready(client_id, project, lang)
-
-            return result
+            )
+            return {
+                "success": True,
+                "async": True,
+                "type": "video",
+                "scene_number": scene_number,
+            }
         else:
             return {"success": False, "error": translate(ui_language, "error.invalid_type")}
 
@@ -1022,6 +1019,85 @@ async def _regenerate_video_scene(
     except Exception as e:
         logger.error(f"Regenerate video failed: {str(e)}")
         return {"success": False, "error": translate(ui_language, "error.generation_failed", error=str(e))}
+
+
+
+async def regenerate_video_scene_background(
+    *,
+    project_id: str,
+    scene_number: int,
+    client_id: str,
+    ui_language: str,
+) -> None:
+    """后台执行单个分镜视频的重新生成 + 审核，结果统一通过 WebSocket 推送。
+
+    单个分镜视频重生成耗时可达数分钟，远超云端 API 网关约 60s 超时。若在 HTTP 请求内
+    同步 await，会触发网关 504 断连，前端误报“重新生成失败”，而后台任务其实仍在运行。
+    因此改为后台任务：/regenerate 立即返回，最终结果经 `video_scene_regenerated` 消息推送。
+    """
+    project = main_agent.get_project(project_id)
+    if not project:
+        websocket = websocket_connections.get(client_id) if client_id else None
+        if websocket:
+            await websocket.send_json(jsonable_encoder({
+                "type": "video_scene_regenerated",
+                "data": {
+                    "success": False,
+                    "scene_number": scene_number,
+                    "error": translate(ui_language, "error.project_not_found"),
+                },
+            }))
+        return
+
+    # 登记「正在重新生成」的分镜：只要该集合非空，就会阻塞 merge 步骤。
+    if scene_number not in project.regenerating_scene_numbers:
+        project.regenerating_scene_numbers.append(scene_number)
+    main_agent.save_project_state(project_id)
+
+    result: Dict[str, Any] = {"success": False, "scene_number": scene_number}
+    try:
+        result = await _regenerate_video_scene(
+            project=project,
+            project_id=project_id,
+            scene_number=scene_number,
+            client_id=client_id,
+            ui_language=ui_language,
+        )
+    except Exception as e:
+        logger.error(f"Background regenerate video failed: {str(e)}")
+        result = {
+            "success": False,
+            "scene_number": scene_number,
+            "error": translate(ui_language, "error.generation_failed", error=str(e)),
+        }
+    finally:
+        if scene_number in project.regenerating_scene_numbers:
+            project.regenerating_scene_numbers.remove(scene_number)
+        main_agent.save_project_state(project_id)
+
+    # 把最终结果推送给前端（无论成功/失败），前端据此更新缩略图、审核结论或错误提示。
+    websocket = websocket_connections.get(client_id) if client_id else None
+    if websocket:
+        payload = dict(result) if isinstance(result, dict) else {"success": False}
+        payload.setdefault("scene_number", scene_number)
+        await websocket.send_json(jsonable_encoder({
+            "type": "video_scene_regenerated",
+            "data": payload,
+        }))
+
+    # 该分镜重新生成并通过审核后，若所有分镜都已完成且不再阻塞 merge，
+    # 主动重新下发 videos 的 step_complete，让前端重新进入 merge 倒计时并继续。
+    review_info = result.get("review") if isinstance(result, dict) else None
+    if (
+        isinstance(result, dict)
+        and result.get("success")
+        and isinstance(review_info, dict)
+        and review_info.get("approved")
+        and client_id
+    ):
+        project = main_agent.get_project(project_id)
+        lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+        await notify_videos_step_complete_if_ready(client_id, project, lang)
 
 
 
