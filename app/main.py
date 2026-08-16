@@ -18,6 +18,7 @@ from app.config import config
 from app.utils.i18n import normalize_locale, translate
 from app.utils.logger import get_logger
 from app.utils.task_paths import ensure_project_temp_dir, cleanup_project_temp_dir
+from app.utils.thread_pools import run_interactive, run_generation, shutdown_pools
 from app.agents.main_agent import main_agent
 from app.services.asset_library_service import asset_library_service
 from app.services.tos_service import tos_service
@@ -70,6 +71,12 @@ websocket_connections: Dict[str, WebSocket] = {}
 step_confirmations: Dict[str, asyncio.Event] = {}
 project_client_owners: Dict[str, str] = {}
 disconnect_cleanup_tasks: Dict[str, asyncio.Task] = {}
+
+
+@app.on_event("shutdown")
+async def _shutdown_thread_pools() -> None:
+    """进程退出时优雅关闭交互式/生成线程池。"""
+    shutdown_pools()
 
 
 def parse_form_bool(value: Optional[str]) -> bool:
@@ -263,7 +270,7 @@ async def upload_file(
         # 磁盘写入与 TOS 上传均为阻塞式外部 IO。云端单实例在跑生成管线时，
         # 若在事件循环内同步执行会阻塞整个循环，导致 /upload 请求撞网关超时
         # （前端表现为 "upstream request timeout" 解析失败 / 发送失败）。
-        # 这里统一放到线程池执行，避免阻塞事件循环。
+        # 使用独立的「交互式线程池」执行，避免被生成管线的阻塞 IO 占满线程而排队超时。
         def _write_and_upload() -> str:
             with open(temp_path, "wb") as f:
                 f.write(content)
@@ -279,7 +286,7 @@ async def upload_file(
                 except OSError:
                     pass
 
-        url = await asyncio.to_thread(_write_and_upload)
+        url = await run_interactive(_write_and_upload)
 
         return UploadResponse(
             success=True,
@@ -299,7 +306,9 @@ async def upload_file(
 async def speech_to_text(audio_url: str = Form(...)) -> ASRResponse:
     """语音识别"""
     try:
-        text = asr_service.recognize(audio_url)
+        # ASR 为阻塞式网络调用，放到交互式线程池执行，避免阻塞事件循环
+        # 或与生成管线争抢线程导致排队超时。
+        text = await run_interactive(asr_service.recognize, audio_url)
         return ASRResponse(success=True, text=text)
     except Exception as e:
         logger.error(f"ASR failed: {str(e)}")
@@ -643,7 +652,7 @@ async def regenerate(
                     logger.info(f"Using reference image for scene {scene_number} regeneration: {reference_image_url}")
 
             # 重新生成图片，保持用户指定的比例和风格
-            new_image = await asyncio.to_thread(
+            new_image = await run_generation(
                 main_agent.image_agent.regenerate_image,
                 scene_number=scene_number,
                 script=project.script,
@@ -699,7 +708,7 @@ async def regenerate(
 
                 try:
                     # 重新生成视频，使用参考图保持人物一致性
-                    new_video = await asyncio.to_thread(
+                    new_video = await run_generation(
                         main_agent.video_agent.regenerate_video,
                         scene_number=scene_number,
                         script=project.script,
@@ -809,7 +818,7 @@ async def regenerate(
                 logger.warning(f"Video for scene {scene_number} not found in project, adding new video")
                 project.videos.append(new_video)
 
-            is_approved, feedback, score = await asyncio.to_thread(
+            is_approved, feedback, score = await run_generation(
                 main_agent.video_review_agent.review_video,
                 script_scene_description=project.script.scenes[scene_number - 1].description,
                 video_url=new_video.url,
@@ -1937,7 +1946,7 @@ async def cleanup_project_files(
 
     if cleanup_asset_library and getattr(project, "asset_group_id", None):
         try:
-            await asyncio.to_thread(
+            await run_generation(
                 asset_library_service.cleanup_asset_group,
                 group_id=project.asset_group_id,
                 project_name=getattr(project, "asset_project_name", None),

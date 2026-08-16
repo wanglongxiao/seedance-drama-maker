@@ -65,6 +65,9 @@ models:
     api_key: "${IMAGE_API_KEY}"
     default_params:
       size: "2K"
+    # 关闭深度思考（reasoning/thinking）以提升生图速度；
+    # 为 true 时在调用生图 API 时下发 {"thinking": {"type": "disabled"}}。
+    disable_thinking: true
 
   # 生视频模型：用于分镜视频生成
   # 对应代码：app/agents/video_agent.py
@@ -204,6 +207,10 @@ ui:
 server:
   # FastAPI 服务端口
   port: 8888
+  # 线程池隔离：交互式请求（上传/ASR）与生成管线阻塞 IO 使用独立线程池，
+  # 避免多项目并发时生成任务占满线程导致上传/ASR 排队撞网关超时。
+  interactive_pool_workers: 16   # 交互式请求专用线程池容量（上传/ASR）
+  generation_pool_workers: 0     # 生成管线线程池容量；0=按并发配置自动推导（(参考图并发+分镜并发)*2，下限16）
 
 merge:
   # 临时拼接裁帧逻辑开关：on=开启，off=关闭

@@ -221,6 +221,12 @@ class LLMService:
             **kwargs
         }
 
+        # 关闭深度思考（reasoning/thinking）以提升生图速度。
+        # 由 config.yaml -> models.image.disable_thinking 控制（默认开启关闭）。
+        # 调用方可通过 kwargs 显式传入 thinking 覆盖此默认行为。
+        if "thinking" not in payload and config.get("models.image.disable_thinking", True):
+            payload["thinking"] = {"type": "disabled"}
+
         if ratio:
             logger.info(f"Image generation requested with ratio: {ratio}, normalized size: {normalized_size}")
 

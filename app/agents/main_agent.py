@@ -14,6 +14,7 @@ from app.services.asr_service import asr_service
 from app.utils.i18n import normalize_locale, translate
 from app.utils.logger import get_logger
 from app.utils.task_paths import ensure_project_temp_dir
+from app.utils.thread_pools import run_generation
 from app.models.schemas import VideoProject, Script, GeneratedImage, GeneratedVideo, VideoSceneState, UploadedReferenceImage
 from app.agents.script_agent import ScriptAgent
 from app.agents.image_agent import ImageAgent
@@ -393,8 +394,8 @@ class MainAgent:
         # 前端表现为“发送失败”。这里改为后台任务执行，create_project 立即返回；
         # 真正需要 asset_id 的步骤（剧本/参考图生成）会先 await 该准备任务。
         async def _prepare_project_assets() -> None:
-            await asyncio.to_thread(self._ensure_project_asset_group, project)
-            await asyncio.to_thread(self._register_uploaded_reference_assets, project)
+            await run_generation(self._ensure_project_asset_group, project)
+            await run_generation(self._register_uploaded_reference_assets, project)
             self.save_project_state(project_id)
 
         prep_task = asyncio.create_task(
@@ -611,7 +612,7 @@ class MainAgent:
         index: int,
         used_original: bool = False,
     ) -> GeneratedImage:
-        return await asyncio.to_thread(
+        return await run_generation(
             self._store_reference_asset,
             project,
             image,
@@ -1171,7 +1172,7 @@ class MainAgent:
         video: GeneratedVideo,
         generation_count: Optional[int] = None,
     ) -> GeneratedVideo:
-        return await asyncio.to_thread(
+        return await run_generation(
             self.archive_scene_video,
             project,
             video,
@@ -1887,7 +1888,7 @@ class MainAgent:
 
             try:
                 scene_state.total_generation_count = attempt_number
-                current_video = await asyncio.to_thread(
+                current_video = await run_generation(
                     self.video_agent.generate_video_with_previous,
                     scene=scene,
                     scene_index=scene_number - 1,
@@ -2105,7 +2106,7 @@ class MainAgent:
                 )
             )
 
-            is_approved, feedback, score = await asyncio.to_thread(
+            is_approved, feedback, score = await run_generation(
                 self.video_review_agent.review_video,
                 script_scene_description=scene.description,
                 video_url=current_video.url,
@@ -2265,7 +2266,7 @@ class MainAgent:
         
         logger.info(f"Script generation input preview: {user_input[:500]}...")
 
-        return await asyncio.to_thread(
+        return await run_generation(
             self.script_agent.generate_script,
             user_input=user_input,
             reference_images=project.reference_images,
@@ -2294,7 +2295,7 @@ class MainAgent:
 
 剧本修改要求：{edit_request}"""
 
-        script = await asyncio.to_thread(
+        script = await run_generation(
             self.script_agent.rewrite_script,
             existing_script=project.script,
             edit_request=edit_request,
@@ -2438,7 +2439,7 @@ class MainAgent:
                         project, generated, "character", character.name, index, used_original=True
                     )
                 else:
-                    generated = await asyncio.to_thread(
+                    generated = await run_generation(
                         self.image_agent.generate_character_reference_image,
                         character=character,
                         script=project.script,
@@ -2468,7 +2469,7 @@ class MainAgent:
                         project, generated, "scene", scene_name, index, used_original=True
                     )
                 else:
-                    generated = await asyncio.to_thread(
+                    generated = await run_generation(
                         self.image_agent.generate_scene_reference_image,
                         scene_name=scene_name,
                         scene_description=scene_definition["description"],
@@ -2505,7 +2506,7 @@ class MainAgent:
                 )
                 return
             async with semaphore:
-                generated = await asyncio.to_thread(
+                generated = await run_generation(
                     self.image_agent.generate_character_outfit_image,
                     character=task["character"],
                     outfit=task["outfit"],
@@ -2531,7 +2532,7 @@ class MainAgent:
                 )
                 return
             async with semaphore:
-                generated = await asyncio.to_thread(
+                generated = await run_generation(
                     self.image_agent.generate_scene_state_image,
                     scene_name=task["scene_name"],
                     base_reference_image=base_image,
@@ -2839,7 +2840,7 @@ class MainAgent:
                 )
                 if not target_character:
                     raise ValueError(self._t(project, "error.reference_character_not_found", name=normalized_name))
-                generated = await asyncio.to_thread(
+                generated = await run_generation(
                     self.image_agent.regenerate_character_reference_image,
                     character=target_character,
                     script=project.script,
@@ -2861,7 +2862,7 @@ class MainAgent:
                 )
                 if not target_scene:
                     raise ValueError(self._t(project, "error.reference_scene_not_found", name=normalized_name))
-                generated = await asyncio.to_thread(
+                generated = await run_generation(
                     self.image_agent.regenerate_scene_reference_image,
                     scene_name=target_scene["name"],
                     scene_description=target_scene["description"],
@@ -3000,7 +3001,7 @@ class MainAgent:
                 )
                 if base_image is None:
                     raise ValueError(self._t(project, "error.reference_character_not_found", name=variant_key))
-                generated = await asyncio.to_thread(
+                generated = await run_generation(
                     self.image_agent.generate_character_outfit_image,
                     character=task["character"],
                     outfit=task["outfit"],
@@ -3031,7 +3032,7 @@ class MainAgent:
                 )
                 if base_image is None:
                     raise ValueError(self._t(project, "error.reference_scene_not_found", name=variant_key))
-                generated = await asyncio.to_thread(
+                generated = await run_generation(
                     self.image_agent.generate_scene_state_image,
                     scene_name=task["scene_name"],
                     base_reference_image=base_image,
@@ -3120,7 +3121,7 @@ class MainAgent:
         generated: Optional[GeneratedImage] = None
         for attempt in range(1, max_attempts + 1):
             self._raise_if_project_ended(project)
-            generated = await asyncio.to_thread(
+            generated = await run_generation(
                 self.image_agent.generate_scene_storyboard_image,
                 scene=scene,
                 script=project.script,
@@ -3133,7 +3134,7 @@ class MainAgent:
                 return generated
 
             self._raise_if_project_ended(project)
-            approved, feedback = await asyncio.to_thread(
+            approved, feedback = await run_generation(
                 self.storyboard_review_agent.review_storyboard,
                 image_url=generated.url,
                 scene_description=scene_desc,
