@@ -1,14 +1,37 @@
 # Changelog
 
-This document records the notable version changes of the project.
+## \[2.0.0] - 2026-08-16
 
-Notes:
+### Added
 
-- The early history of this repository is not fully traceable.
-- `1.0.0` and `1.1.0` are summarized from the current codebase, documentation, and the repository cleanup performed in this round.
-- Future entries should be appended in reverse chronological order.
+- Added support for upgrading to the `SeeDance-2.5` video generation model, with scene-video generation, reference-video inputs, and final merge flow aligned around `MOV` output.
+- Added dual video generation modes: `parallel` and `extend`:
+  - `parallel` generates multiple scenes concurrently according to the configured video-generation concurrency, improving throughput for long multi-scene videos.
+  - `extend` generates scenes sequentially and uses the previous scene video as `reference_video` starting from scene 2, improving continuity of characters, outfits, settings, and lighting.
+- Added comic PDF generation: when scene-video generation starts, the system exports a script-title PDF in parallel, including a cover page, character page, and one storyboard page per scene, then uploads it to `TOS` for download in the Web UI.
+- Added project refresh recovery through `sessionStorage` and `/project/{id}/restore`, restoring scripts, reference images, scenes, review status, and comic PDF download status.
 
-## [1.1.0] - 2026-05-09
+### Improved
+
+- Improved cloud stability for long-running scene generation and review tasks. Background tasks now route messages through the stable `client_id` to the latest WebSocket connection, reducing failures where API gateway 504s or browser reconnects prevent the frontend from receiving results.
+- Improved parallel scene processing by persisting project state as each scene completes, preventing late-index scene or review results from being lost during long-running jobs.
+- Improved auto-review fallback flow: when the retry limit is reached, the workflow can accept the highest-scoring result and continue merging, marking the scene as accepted over retry.
+- Improved thread-pool isolation by separating interactive requests from generation tasks, reducing upload and state-restore starvation during multi-window concurrent generation.
+
+### Fixed
+
+- Fixed auto mode not advancing after image upload because draft project ID initialization happened before the auto-start decision.
+- Fixed merge-blocking logic for regenerated scenes so final merge does not start while any regenerated scene is unfinished or has not passed review.
+- Fixed incomplete progress-bar and completed-step recovery after page refresh.
+- Fixed frontend crashes when project cleanup receives a non-JSON 504 response from upstream infrastructure.
+- Fixed tofu-box text corruption in cloud-generated comic PDFs for Chinese, Japanese, Korean, and emoji text. PDF generation now requires a CJK-capable font, and the runtime image must include `fonts-noto-cjk`, `fonts-noto-color-emoji`, `fontconfig`, and `ffmpeg` / `ffprobe`.
+
+### Documentation
+
+- Updated bilingual README files to document `SeeDance-2.5`, dual video generation modes, comic PDF export, cloud runtime font/media dependencies, credential governance, and deployment requirements.
+- Updated multilingual i18n copy for comic PDF download, generating, ready, and failure states.
+
+## \[1.1.0] - 2026-05-09
 
 ### Added
 
@@ -36,7 +59,7 @@ Notes:
 - Rewrote and aligned `README.md`, `README.en.md`, and related project description content.
 - Clarified credential governance rules, prerequisites, common commands, and changelog entry points for the open-source repository.
 
-## [1.0.0] - 2026-03-03
+## \[1.0.0] - 2026-03-03
 
 ### Initial Release
 
