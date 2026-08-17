@@ -682,21 +682,50 @@ class MainAgent:
 
     def _is_reference_stage_ready(self, project: VideoProject, stage: str) -> bool:
         """按子阶段判定是否就绪：category1=角色+场景；category2=装扮+状态；category3=故事版。"""
-        expected = self._expected_reference_counts(project)
-        actual_character_count = len(getattr(project, "character_reference_images", []) or [])
-        actual_scene_count = len(getattr(project, "scene_reference_images", []) or [])
-        actual_outfit_count = len(getattr(project, "character_outfit_images", []) or [])
-        actual_scene_state_count = len(getattr(project, "scene_state_images", []) or [])
-        actual_storyboard_count = len(getattr(project, "storyboard_images", []) or [])
         if stage == "category1":
+            character_limit = max(1, int(config.get("video_generation.reference_images.character_max_count", 30)))
+            scene_limit = max(1, int(config.get("video_generation.reference_images.scene_max_count", 30)))
+            expected_character_names = {
+                self._normalize_name_key(getattr(character, "name", ""))
+                for character in (getattr(project.script, "characters", None) or [])[:character_limit]
+            }
+            expected_scene_names = {
+                self._normalize_name_key(item["name"])
+                for item in self._extract_scene_reference_definitions(project.script, scene_limit)
+            }
+            actual_character_names = {
+                self._normalize_name_key(getattr(image, "name", ""))
+                for image in (getattr(project, "character_reference_images", []) or [])
+            }
+            actual_scene_names = {
+                self._normalize_name_key(getattr(image, "name", ""))
+                for image in (getattr(project, "scene_reference_images", []) or [])
+            }
             return (
-                actual_character_count >= expected["characters"]
-                and actual_scene_count >= expected["scenes"]
+                expected_character_names.issubset(actual_character_names)
+                and expected_scene_names.issubset(actual_scene_names)
             )
         if stage == "category2":
+            variant_plan = self._plan_scene_variant_assets(project)
+            expected_outfit_keys = {
+                str(task.get("dedup_key") or "")
+                for task in (variant_plan.get("outfits", []) or [])
+            }
+            expected_scene_state_keys = {
+                str(task.get("dedup_key") or "")
+                for task in (variant_plan.get("scene_states", []) or [])
+            }
+            actual_outfit_keys = {
+                str(getattr(image, "variant_key", "") or "")
+                for image in (getattr(project, "character_outfit_images", []) or [])
+            }
+            actual_scene_state_keys = {
+                str(getattr(image, "variant_key", "") or "")
+                for image in (getattr(project, "scene_state_images", []) or [])
+            }
             return (
-                actual_outfit_count >= expected["character_outfits"]
-                and actual_scene_state_count >= expected["scene_states"]
+                expected_outfit_keys.issubset(actual_outfit_keys)
+                and expected_scene_state_keys.issubset(actual_scene_state_keys)
             )
         if stage == "category3":
             expected_scene_numbers = {
@@ -938,11 +967,23 @@ class MainAgent:
             index = self._get_reference_slot_index(project, "scene", getattr(image, "name", ""))
             put("scenes", index, image)
 
+        variant_plan = self._plan_scene_variant_assets(project) if getattr(project, "script", None) else {"outfits": [], "scene_states": []}
+        outfit_index_by_key = {
+            str(task.get("dedup_key") or ""): index
+            for index, task in enumerate(variant_plan.get("outfits", []) or [])
+        }
+        scene_state_index_by_key = {
+            str(task.get("dedup_key") or ""): index
+            for index, task in enumerate(variant_plan.get("scene_states", []) or [])
+        }
+
         for index, image in enumerate(getattr(project, "character_outfit_images", []) or []):
-            put("character_outfits", index, image)
+            variant_key = str(getattr(image, "variant_key", "") or "")
+            put("character_outfits", outfit_index_by_key.get(variant_key, index), image)
 
         for index, image in enumerate(getattr(project, "scene_state_images", []) or []):
-            put("scene_states", index, image)
+            variant_key = str(getattr(image, "variant_key", "") or "")
+            put("scene_states", scene_state_index_by_key.get(variant_key, index), image)
 
         for image in getattr(project, "storyboard_images", []) or []:
             index = int(getattr(image, "scene_number", 0) or 0) - 1
@@ -2756,14 +2797,28 @@ class MainAgent:
             tasks = [
                 asyncio.create_task(generate_character_job(index, character))
                 for index, character in enumerate(target_characters)
+                if not (index < len(generated_character_images) and generated_character_images[index] is not None)
             ] + [
                 asyncio.create_task(generate_scene_job(index, scene_definition))
                 for index, scene_definition in enumerate(scene_definitions)
+                if not (index < len(generated_scene_images) and generated_scene_images[index] is not None)
             ]
+            logger.info(
+                f"Reference category1 stage for project {project.project_id}: "
+                f"characters_total={len(target_characters)}, scenes_total={len(scene_definitions)}, "
+                f"pending={len(tasks)}, "
+                f"skipped={len(target_characters) + len(scene_definitions) - len(tasks)}, "
+                f"max_concurrency={reference_max_concurrency}"
+            )
 
         try:
             if tasks:
+                started_at = time.monotonic()
                 await gather_or_raise("category1", tasks)
+                logger.info(
+                    f"Reference category1 stage completed for project {project.project_id}: "
+                    f"generated={len(tasks)}, elapsed={time.monotonic() - started_at:.2f}s"
+                )
 
             _sync_all()
 
@@ -2776,12 +2831,26 @@ class MainAgent:
                 variant_tasks = [
                     asyncio.create_task(generate_outfit_job(index, task))
                     for index, task in enumerate(outfit_tasks_plan)
+                    if not (index < len(generated_outfit_images) and generated_outfit_images[index] is not None)
                 ] + [
                     asyncio.create_task(generate_scene_state_job(index, task))
                     for index, task in enumerate(scene_state_tasks_plan)
+                    if not (index < len(generated_scene_state_images) and generated_scene_state_images[index] is not None)
                 ]
+                logger.info(
+                    f"Reference category2 stage for project {project.project_id}: "
+                    f"outfits_total={len(outfit_tasks_plan)}, scene_states_total={len(scene_state_tasks_plan)}, "
+                    f"pending={len(variant_tasks)}, "
+                    f"skipped={len(outfit_tasks_plan) + len(scene_state_tasks_plan) - len(variant_tasks)}, "
+                    f"max_concurrency={reference_max_concurrency}"
+                )
                 if variant_tasks:
+                    started_at = time.monotonic()
                     await gather_or_raise("category2", variant_tasks)
+                    logger.info(
+                        f"Reference category2 stage completed for project {project.project_id}: "
+                        f"generated={len(variant_tasks)}, elapsed={time.monotonic() - started_at:.2f}s"
+                    )
                     _sync_all()
 
             if run_category3:
@@ -2837,6 +2906,7 @@ class MainAgent:
         active_task = self._reference_generation_tasks.get(project.project_id)
         if active_task and not active_task.done():
             return await asyncio.shield(active_task)
+        self._reset_reference_library_state(project)
 
         async def run_generation() -> GeneratedImage:
             max_auto_retries = max(0, int(config.get("video_generation.reference_images.auto_retry_count", 2)))
@@ -2844,7 +2914,6 @@ class MainAgent:
 
             for attempt in range(max_auto_retries + 1):
                 self._raise_if_project_ended(project)
-                self._reset_reference_library_state(project)
                 try:
                     if attempt > 0:
                         logger.warning(
@@ -2888,8 +2957,7 @@ class MainAgent:
     ) -> GeneratedImage:
         """分阶段生成参考图（category1/category2/category3），含自动重试。
 
-        - 仅 category1 会调用 `_reset_reference_library_state` 清空全部五类；
-          category2/category3 重试不清空，只幂等重跑本阶段对应槽位。
+        - 分阶段重试不清空已成功图片，只幂等重跑本阶段缺失槽位。
         - 幂等表 key 使用 `f"{project_id}:{stage}"`，避免不同阶段互相 shield。
         - session 仅在 category3 完成后清理（见 `_generate_reference_image` finally）。
         """
@@ -2919,8 +2987,6 @@ class MainAgent:
 
             for attempt in range(max_auto_retries + 1):
                 self._raise_if_project_ended(project)
-                if stage == "category1":
-                    self._reset_reference_library_state(project)
                 try:
                     if attempt > 0:
                         logger.warning(
