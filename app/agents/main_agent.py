@@ -215,9 +215,12 @@ class MainAgent:
         project.status = "ended"
         project.current_step = "ended"
 
-        generation_task = self._reference_generation_tasks.pop(project_id, None)
-        if generation_task and not generation_task.done():
-            generation_task.cancel()
+        for task_key, generation_task in list(self._reference_generation_tasks.items()):
+            if task_key != project_id and not task_key.startswith(f"{project_id}:"):
+                continue
+            self._reference_generation_tasks.pop(task_key, None)
+            if generation_task and not generation_task.done():
+                generation_task.cancel()
 
         comic_task = self._comic_pdf_tasks.pop(project_id, None)
         if comic_task and not comic_task.done():
@@ -237,7 +240,9 @@ class MainAgent:
         self.projects.pop(project_id, None)
         self._reference_generation_slots.pop(project_id, None)
         self._reference_asset_cache.pop(project_id, None)
-        self._reference_generation_tasks.pop(project_id, None)
+        for task_key in list(self._reference_generation_tasks.keys()):
+            if task_key == project_id or task_key.startswith(f"{project_id}:"):
+                self._reference_generation_tasks.pop(task_key, None)
         self._project_prepare_tasks.pop(project_id, None)
         self._comic_pdf_tasks.pop(project_id, None)
         for task_key in list(self._reference_asset_regeneration_tasks.keys()):
@@ -694,7 +699,15 @@ class MainAgent:
                 and actual_scene_state_count >= expected["scene_states"]
             )
         if stage == "category3":
-            return actual_storyboard_count >= expected["storyboards"]
+            expected_scene_numbers = {
+                int(getattr(scene, "scene_number", 0) or index + 1)
+                for index, scene in enumerate(getattr(getattr(project, "script", None), "scenes", None) or [])
+            }
+            actual_scene_numbers = {
+                int(getattr(image, "scene_number", 0) or 0)
+                for image in (getattr(project, "storyboard_images", []) or [])
+            }
+            return bool(expected_scene_numbers) and expected_scene_numbers.issubset(actual_scene_numbers)
         return self._is_reference_library_ready_for_confirmation(project)
 
     def _serialize_reference_images(
@@ -898,7 +911,42 @@ class MainAgent:
             "storyboards": [None] * max(0, storyboard_count),
         }
         self._reference_generation_slots[project.project_id] = slots
+        self._hydrate_reference_generation_slots(project, slots)
         return slots
+
+    def _hydrate_reference_generation_slots(
+        self,
+        project: VideoProject,
+        slots: Dict[str, List[Optional[GeneratedImage]]],
+    ) -> None:
+        """Backfill generation slots from persisted project state.
+
+        Stage retries and browser reconnects may create a fresh in-memory session while
+        some assets have already been generated and persisted on the project. Hydrating
+        prevents retrying the entire storyboard batch when only a subset is missing.
+        """
+        def put(slot_name: str, index: int, image: GeneratedImage) -> None:
+            slot = slots.get(slot_name, [])
+            if 0 <= index < len(slot) and slot[index] is None:
+                slot[index] = image
+
+        for image in getattr(project, "character_reference_images", []) or []:
+            index = self._get_reference_slot_index(project, "character", getattr(image, "name", ""))
+            put("characters", index, image)
+
+        for image in getattr(project, "scene_reference_images", []) or []:
+            index = self._get_reference_slot_index(project, "scene", getattr(image, "name", ""))
+            put("scenes", index, image)
+
+        for index, image in enumerate(getattr(project, "character_outfit_images", []) or []):
+            put("character_outfits", index, image)
+
+        for index, image in enumerate(getattr(project, "scene_state_images", []) or []):
+            put("scene_states", index, image)
+
+        for image in getattr(project, "storyboard_images", []) or []:
+            index = int(getattr(image, "scene_number", 0) or 0) - 1
+            put("storyboards", index, image)
 
     def _get_reference_generation_session(
         self,
@@ -918,6 +966,7 @@ class MainAgent:
         """分阶段生成复用同一 session：已存在则直接返回，避免重建清空前阶段成果。"""
         existing = self._reference_generation_slots.get(project.project_id)
         if existing is not None:
+            self._hydrate_reference_generation_slots(project, existing)
             return existing
         return self._start_reference_generation_session(
             project,
@@ -2521,6 +2570,9 @@ class MainAgent:
 
         async def generate_character_job(index: int, character) -> None:
             self._raise_if_project_ended(project)
+            if index < len(generated_character_images) and generated_character_images[index] is not None:
+                logger.info(f"Skipping existing character reference slot {index} for project {project.project_id}")
+                return
             matched_assets = character_asset_map.get(character.name, [])
             matched_urls = [asset.url for asset in matched_assets]
             async with semaphore:
@@ -2552,6 +2604,9 @@ class MainAgent:
 
         async def generate_scene_job(index: int, scene_definition: Dict[str, str]) -> None:
             self._raise_if_project_ended(project)
+            if index < len(generated_scene_images) and generated_scene_images[index] is not None:
+                logger.info(f"Skipping existing scene reference slot {index} for project {project.project_id}")
+                return
             scene_name = scene_definition["name"]
             matched_assets = scene_asset_map.get(scene_name, [])
             matched_urls = [asset.url for asset in matched_assets]
@@ -2598,6 +2653,9 @@ class MainAgent:
 
         async def generate_outfit_job(index: int, task: Dict[str, Any]) -> None:
             self._raise_if_project_ended(project)
+            if index < len(generated_outfit_images) and generated_outfit_images[index] is not None:
+                logger.info(f"Skipping existing outfit reference slot {index} for project {project.project_id}")
+                return
             base_image = _find_character_base_image(task["character_key"])
             if base_image is None:
                 logger.warning(
@@ -2624,6 +2682,9 @@ class MainAgent:
 
         async def generate_scene_state_job(index: int, task: Dict[str, Any]) -> None:
             self._raise_if_project_ended(project)
+            if index < len(generated_scene_state_images) and generated_scene_state_images[index] is not None:
+                logger.info(f"Skipping existing scene-state reference slot {index} for project {project.project_id}")
+                return
             base_image = _find_scene_base_image(task["scene_key"])
             if base_image is None:
                 logger.warning(
@@ -2652,6 +2713,9 @@ class MainAgent:
 
         async def generate_storyboard_job(index: int, scene) -> None:
             self._raise_if_project_ended(project)
+            if index < len(generated_storyboard_images) and generated_storyboard_images[index] is not None:
+                logger.info(f"Skipping existing storyboard slot {index + 1} for project {project.project_id}")
+                return
             base_reference_images = self._select_base_reference_assets_for_scene(project, scene)
             async with semaphore:
                 storyboard = await self._generate_storyboard_with_review(
@@ -2675,6 +2739,18 @@ class MainAgent:
         run_category2 = stage in ("all", "category2")
         run_category3 = stage in ("all", "category3")
 
+        async def gather_or_raise(stage_name: str, pending_tasks: List[asyncio.Task]) -> None:
+            if not pending_tasks:
+                return
+            results = await asyncio.gather(*pending_tasks, return_exceptions=True)
+            errors = [result for result in results if isinstance(result, Exception)]
+            if errors:
+                logger.warning(
+                    f"Reference stage {stage_name} finished with {len(errors)} failed task(s) "
+                    f"for project {project.project_id}; successful tasks were preserved"
+                )
+                raise errors[0]
+
         tasks = []
         if run_category1:
             tasks = [
@@ -2687,7 +2763,7 @@ class MainAgent:
 
         try:
             if tasks:
-                await asyncio.gather(*tasks)
+                await gather_or_raise("category1", tasks)
 
             _sync_all()
 
@@ -2705,18 +2781,30 @@ class MainAgent:
                     for index, task in enumerate(scene_state_tasks_plan)
                 ]
                 if variant_tasks:
-                    await asyncio.gather(*variant_tasks)
+                    await gather_or_raise("category2", variant_tasks)
                     _sync_all()
 
             if run_category3:
                 # 所有角色图（含装扮图）+ 场景图（含状态图）生成完成后，再逐个分镜生成 6 宫格 storyboard。
                 # 多个分镜的 storyboard 并行生成，并发数由参考图库配置的 max_concurrency（semaphore）控制。
+                scenes = list(getattr(project.script, "scenes", None) or [])
                 storyboard_tasks = [
                     asyncio.create_task(generate_storyboard_job(index, scene))
-                    for index, scene in enumerate(getattr(project.script, "scenes", None) or [])
+                    for index, scene in enumerate(scenes)
+                    if not (index < len(generated_storyboard_images) and generated_storyboard_images[index] is not None)
                 ]
+                logger.info(
+                    f"Storyboard generation stage for project {project.project_id}: "
+                    f"total={len(scenes)}, pending={len(storyboard_tasks)}, "
+                    f"skipped={len(scenes) - len(storyboard_tasks)}, max_concurrency={reference_max_concurrency}"
+                )
                 if storyboard_tasks:
-                    await asyncio.gather(*storyboard_tasks)
+                    started_at = time.monotonic()
+                    await gather_or_raise("category3", storyboard_tasks)
+                    logger.info(
+                        f"Storyboard generation stage completed for project {project.project_id}: "
+                        f"generated={len(storyboard_tasks)}, elapsed={time.monotonic() - started_at:.2f}s"
+                    )
 
             _sync_all()
 
@@ -2811,6 +2899,19 @@ class MainAgent:
         active_task = self._reference_generation_tasks.get(stage_key)
         if active_task and not active_task.done():
             return await asyncio.shield(active_task)
+        if self._is_reference_stage_ready(project, stage):
+            logger.info(
+                f"Reference stage {stage} already ready for project {project.project_id}; "
+                "skipping duplicate generation"
+            )
+            if not project.reference_image:
+                project.reference_image = (
+                    (project.character_reference_images[0] if project.character_reference_images else None)
+                    or (project.scene_reference_images[0] if project.scene_reference_images else None)
+                    or (project.storyboard_images[0] if project.storyboard_images else None)
+                )
+            if project.reference_image:
+                return project.reference_image
 
         async def run_generation() -> GeneratedImage:
             max_auto_retries = max(0, int(config.get("video_generation.reference_images.auto_retry_count", 2)))
