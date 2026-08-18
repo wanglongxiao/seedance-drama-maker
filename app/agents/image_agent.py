@@ -8,6 +8,7 @@ import re
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.config import config
+from app.prompt_skill import load_optional_nsfw_prompt, load_prompt, nsfw_content_requested
 from app.services.llm_service import llm_service
 from app.utils.logger import get_logger
 from app.models.schemas import Script, GeneratedImage, Character
@@ -27,31 +28,48 @@ class ImageAgent:
         self.max_workers = config.get('generation.concurrency.image_workers', 10)
 
     def _should_apply_japanese_manga_live_action_style(self, user_style_info: str, script: Script) -> bool:
-        """未指定明确风格，或指定真人/写实时，参考图默认回落到写实漫画风格。"""
+        """未指定明确视觉风格时，参考图默认回落到写实漫画风格。"""
         combined = " ".join(filter(None, [user_style_info or "", getattr(script, "style", "") or ""])).lower()
         combined = combined.replace("：", ":")
 
-        realistic_keywords = [
-            "真人", "写实", "寫實", "realistic", "photoreal", "photorealistic",
-            "live action", "live-action", "cinematic realism", "真人电影", "真人電影"
+        explicit_visual_style_keywords = [
+            "风格", "樣式", "样式", "style", "真人", "写实", "寫實", "realistic",
+            "photoreal", "photorealistic", "live action", "live-action", "cinematic",
+            "电影感", "電影感", "电影风格", "電影風格", "日漫", "动漫", "動畫",
+            "anime", "cartoon", "水墨", "油画", "油畫", "水彩", "像素",
         ]
-        stylized_non_realistic_keywords = [
-            "美漫", "q版", "q版动漫", "q版動漫", "卡通", "动画", "動畫", "anime", "cartoon",
-            "watercolor", "水彩", "油画", "油畫", "pixel", "像素", "cyberpunk", "赛博", "賽博",
-            "国风", "國風", "水墨", "chibi", "disney", "ghibli"
-        ]
-
-        if any(keyword in combined for keyword in realistic_keywords):
-            return True
-        if any(keyword in combined for keyword in stylized_non_realistic_keywords):
+        if any(keyword in combined for keyword in explicit_visual_style_keywords):
             return False
         return True
 
     def _append_reference_style_guidance(self, prompt_parts: List[str], user_style_info: str, script: Script) -> None:
         if self._should_apply_japanese_manga_live_action_style(user_style_info, script):
-            prompt_parts.append("[CRITICAL] Reference character visual style: 写实漫画风格")
-            prompt_parts.append("[CRITICAL] Use a realistic comic-inspired look with natural facial anatomy, realistic skin detail, and cinematic character rendering")
-            prompt_parts.append("[CRITICAL] Keep the skin, facial features, eyes, and lighting realistic while preserving a polished realistic comic aesthetic")
+            prompt_parts.extend(load_prompt("image_reference_style_guidance.md").splitlines())
+
+    def _is_visual_style_segment(self, text: str) -> bool:
+        lowered = str(text or "").lower()
+        if not lowered:
+            return False
+        if re.fullmatch(r"\d+\s*:\s*\d+", lowered):
+            return True
+        style_keywords = [
+            "风格", "樣式", "样式", "style", "比例", "aspect ratio",
+            "真人", "写实", "寫實", "日漫", "电影", "電影", "美漫", "动漫", "動畫", "anime",
+            "live action", "live-action", "realistic", "photoreal", "photorealistic", "cinematic",
+            "水墨", "油画", "油畫", "水彩", "像素", "cartoon",
+        ]
+        return any(keyword in lowered for keyword in style_keywords)
+
+    def _is_non_visual_generation_parameter(self, text: str) -> bool:
+        lowered = str(text or "").lower()
+        if not lowered:
+            return True
+        non_visual_keywords = [
+            "对白", "對白", "旁白", "台词", "臺詞", "语音", "声音", "音色",
+            "时长", "時長", "秒", "分钟", "分鐘", "auto", "自动", "自動",
+            "bgm", "music", "dialogue", "narration", "voice", "duration",
+        ]
+        return any(keyword in lowered for keyword in non_visual_keywords)
 
     def _extract_reference_prompt_style(self, user_style_info: str) -> str:
         """从用户输入中仅提炼参考图需要的风格/比例/样式，不保留原始长文本。"""
@@ -62,19 +80,7 @@ class ImageAgent:
         text = re.sub(r'[*#>`_-]{2,}', '\n', text)
         text = text.replace("：", ":")
 
-        style_keywords = [
-            "风格", "樣式", "样式", "style", "比例", "aspect ratio",
-            "真人", "写实", "寫實", "日漫", "电影", "電影", "美漫", "动漫", "動畫", "anime",
-            "live action", "live-action", "realistic", "photoreal", "photorealistic", "cinematic",
-        ]
-        disallowed_keywords = [
-            "故事原文", "剧情", "故事线", "分场景", "场景一", "场景二", "场景三", "场景四", "场景五",
-            "对白", "旁白", "台词", "對白", "旁白", "鏡頭", "镜头", "钩子", "系统音",
-            "时长", "秒", "分钟", "音樂", "音乐", "配乐", "配樂", "bgm", "music", "voiceover",
-            "dialogue", "narration", "episode", "scene", "story", "plot",
-        ]
-
-        raw_segments = re.split(r'[\n]+|(?<=[。！？；;])', text)
+        raw_segments = re.split(r'[\n，,、；;。！？]+|(?<=\])', text)
         style_segments: List[str] = []
 
         for segment in raw_segments:
@@ -82,14 +88,10 @@ class ImageAgent:
             if not cleaned:
                 continue
 
-            lowered = cleaned.lower()
-            has_style = any(keyword in lowered for keyword in style_keywords)
-            has_disallowed = any(keyword in lowered for keyword in disallowed_keywords)
-
-            if has_disallowed and not has_style:
+            if self._is_non_visual_generation_parameter(cleaned) and not re.fullmatch(r"\d+\s*:\s*\d+", cleaned):
                 continue
 
-            if has_style:
+            if self._is_visual_style_segment(cleaned):
                 style_segments.append(cleaned)
 
         def _dedupe(items: List[str], limit: int) -> str:
@@ -107,6 +109,50 @@ class ImageAgent:
             f"Extracted reference prompt style from {len(user_style_info)} chars to {len(style_text)} chars"
         )
         return style_text
+
+    def _sanitize_image_private_prompt(self, text: str) -> str:
+        """Remove private prompt metadata and examples that can overpower the current scene."""
+        if not text:
+            return ""
+        kept_lines: List[str] = []
+        skipping_example = False
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if re.match(r"^#+\s*示例", line):
+                skipping_example = True
+                continue
+            if skipping_example:
+                continue
+            if not line:
+                kept_lines.append(raw_line)
+                continue
+            if re.search(r"本地私有扩展|NSFW\\?_?ENABLED|公开仓库|该文件|关闭.*跳过|仅当.*加载", line):
+                continue
+            if re.search(r"(\\?\[.+?\\?\]\s*\+\s*){2,}\\?\[.+?\\?\]", line):
+                continue
+            kept_lines.append(raw_line)
+        return "\n".join(kept_lines).strip()
+
+    def _append_image_private_extensions(
+        self,
+        prompt_parts: List[str],
+        names: List[str],
+        *trigger_texts: Any,
+    ) -> None:
+        if not nsfw_content_requested(*trigger_texts):
+            return
+        extensions: List[str] = []
+        for name in names:
+            text = self._sanitize_image_private_prompt(load_optional_nsfw_prompt(name))
+            if text:
+                extensions.append(text)
+        if extensions:
+            prompt_parts.extend([
+                "",
+                "[PRIVATE VISUAL EXTENSION - BOUNDED PRIORITY]",
+                "Use the following local private guidance only as supplemental visual-detail guidance. Do not override aspect ratio, identity preservation, full-body framing, background rules, storyboard line-art rules, reference usage rules, or the current scene context.",
+                "\n\n".join(extensions),
+            ])
 
     def _normalize_asset_name(self, name: Optional[str], fallback: str) -> str:
         normalized = re.sub(r"\s+", " ", str(name or "").strip())
@@ -231,11 +277,7 @@ class ImageAgent:
 
         prompt_parts.extend(self._build_character_profile_lines(character))
 
-        prompt_parts.append("[CRITICAL] Character framing: full-body front view only, showing the complete character from head to feet.")
-        prompt_parts.append("[CRITICAL] Face, facial features, eyes and identity must be sharp and clearly visible.")
-        prompt_parts.append("[CRITICAL] Do NOT crop the knees, waist, shoulders, head, hands or feet; the entire body must be visible.")
-        prompt_parts.append("Pure white background, no scenery, no props")
-        prompt_parts.append("High quality character reference image for consistent video generation")
+        prompt_parts.extend(load_prompt("character_reference_image.md").splitlines())
 
         prompt = "\n".join(prompt_parts)
         response = llm_service.generate_image(
@@ -294,12 +336,7 @@ class ImageAgent:
             prompt_parts.extend(self._infer_scene_time_guidance(scene_name, scene_description))
         if user_reference_images:
             prompt_parts.append("[CRITICAL] Preserve the major environment layout and landmark details from uploaded images.")
-        prompt_parts.append("[CRITICAL] Environment-only scene board. Do not show any person, face, body, crowd, character silhouette, or creature.")
-        prompt_parts.append("[CRITICAL] Focus on environment and scene atmosphere only.")
-        prompt_parts.append("Wide cinematic environment composition")
-        prompt_parts.append("Empty environment, no humans, no characters, no foreground person")
-        prompt_parts.append("No subtitles, no text overlay, no street sign text")
-        prompt_parts.append("High quality key scene reference image for consistent video generation")
+        prompt_parts.extend(load_prompt("scene_reference_image.md").splitlines())
 
         prompt = "\n".join(prompt_parts)
         response = llm_service.generate_image(
@@ -344,12 +381,15 @@ class ImageAgent:
         prompt_parts.append(f"[OUTFIT REQUIREMENT] Change ONLY the clothing/outfit to: {outfit}")
         if self._outfit_requires_visible_genitals(outfit):
             prompt_parts.append("[CRITICAL] The outfit requirement explicitly indicates bare lower body or full nudity, not merely bare upper body. If the character is male, generate a clearly nude male image with visible penis. If the character is female, generate a front-facing fully nude female image with visible vulva; pubic hair may be present or absent. Do NOT cover, censor, blur, crop out, hide with hands, or obscure the genital area.")
-        prompt_parts.append("[CRITICAL] The new outfit must fully replace the previous clothing while keeping the same character identity.")
-        prompt_parts.append("[CRITICAL] Character framing: full-body front view only, showing the complete character from head to feet.")
-        prompt_parts.append("[CRITICAL] Face, facial features, eyes and identity must be sharp and clearly visible.")
-        prompt_parts.append("[CRITICAL] Do NOT crop the knees, waist, shoulders, head, hands or feet; the entire body must be visible.")
-        prompt_parts.append("Pure white background, no scenery, no props")
-        prompt_parts.append("High quality character outfit reference image for consistent video generation")
+        prompt_parts.extend(load_prompt("character_outfit_image.md").splitlines())
+        self._append_image_private_extensions(
+            prompt_parts,
+            ["character_outfit_image.md"],
+            user_style_info,
+            getattr(script, "tone", ""),
+            getattr(script, "background", ""),
+            outfit,
+        )
 
         prompt = "\n".join(prompt_parts)
         base_url = getattr(base_reference_image, "url", None)
@@ -406,14 +446,7 @@ class ImageAgent:
             prompt_parts.append(f"Backdrop state label for naming only: {scene_state}")
         if state_parts:
             prompt_parts.append(f"[STATE REQUIREMENT] Adjust ONLY the time of day and weather to reflect: {', '.join(state_parts)}")
-        prompt_parts.append("[CRITICAL] The backdrop state has exactly two dimensions: time_of_day and weather. Use ONLY those two values for visual changes.")
-        prompt_parts.append("[CRITICAL] Do NOT add or change lighting, scent, emotion, plot events, character actions, character traces, blood, battle damage, destruction, temporary props, people, bodies, silhouettes, or creatures unless directly required by the time_of_day/weather.")
-        prompt_parts.append("[CRITICAL] Do not change the environment structure, landmark layout or camera composition.")
-        prompt_parts.append("[CRITICAL] Environment-only scene board. Do not show any person, face, body, crowd, character silhouette, or creature.")
-        prompt_parts.append("Wide cinematic environment composition")
-        prompt_parts.append("Empty environment, no humans, no characters, no foreground person")
-        prompt_parts.append("No subtitles, no text overlay, no street sign text")
-        prompt_parts.append("High quality backdrop state reference image for consistent video generation")
+        prompt_parts.extend(load_prompt("backdrop_state_image.md").splitlines())
 
         prompt = "\n".join(prompt_parts)
         base_url = getattr(base_reference_image, "url", None)
@@ -432,6 +465,97 @@ class ImageAgent:
             is_reference=True,
             name=self._normalize_asset_name(f"{scene_name} - {state_suffix}", "SceneState"),
             reference_type="scene_state",
+        )
+
+    def generate_key_action_reference_image(
+        self,
+        scene,
+        script: Script,
+        reference_images: Optional[List[GeneratedImage]] = None,
+        user_style_info: str = None,
+        aspect_ratio: str = None,
+    ) -> GeneratedImage:
+        """Generate a scene-level key action reference image for private adult-content enhancement."""
+        if not aspect_ratio:
+            aspect_ratio = self.default_aspect_ratio
+
+        reference_images = self._sort_key_action_reference_images(reference_images)
+        prompt_parts: List[str] = [f"Aspect ratio: {aspect_ratio}"]
+        reference_style_info = self._extract_reference_prompt_style(user_style_info)
+        self._append_reference_style_guidance(prompt_parts, reference_style_info, script)
+        if reference_style_info:
+            prompt_parts.append("[USER VISUAL STYLE]")
+            prompt_parts.append(reference_style_info)
+
+        prompt_parts.extend(load_prompt("key_action_reference_image.md").splitlines())
+
+        scene_context = self._resolve_scene_definition_context(getattr(scene, "scene_name", ""), script)
+        reference_context = self._build_scene_reference_context(reference_images)
+        has_character_reference = self._has_any_reference_type(reference_images, "character", "character_outfit")
+        has_scene_reference = self._has_any_reference_type(reference_images, "scene", "scene_state")
+        has_scene_state_reference = self._has_any_reference_type(reference_images, "scene_state")
+        if reference_context:
+            prompt_parts.extend(reference_context)
+            prompt_parts.extend(self._build_key_action_reference_priority_context(reference_images))
+        if not has_character_reference:
+            prompt_parts.extend(self._build_scene_character_context(scene, script))
+        if not has_scene_reference and getattr(scene, "scene_name", None):
+            prompt_parts.append(f"Scene name: {getattr(scene, 'scene_name', '')}")
+        if scene_context["descriptions"] and not has_scene_reference:
+            prompt_parts.append(f"Scene backdrop definition: {'; '.join(scene_context['descriptions'])}")
+        scene_state = str(getattr(scene, "scene_state", "") or "").strip()
+        if not scene_state:
+            scene_state = "，".join(
+                part
+                for part in [scene_context["time_of_day"], scene_context["weather"]]
+                if str(part or "").strip()
+            )
+        if scene_state and not has_scene_state_reference:
+            prompt_parts.append(f"Backdrop state: {scene_state}")
+        scene_outfits = getattr(scene, "character_outfits", None) or {}
+        if scene_outfits:
+            outfit_lines = [
+                f"{name}: {outfit}"
+                for name, outfit in scene_outfits.items()
+                if str(name or "").strip() and str(outfit or "").strip()
+            ]
+            if outfit_lines:
+                prompt_parts.append(f"Current character outfit and hairstyle state: {'; '.join(outfit_lines)}")
+        prompt_parts.append(f"Scene description: {getattr(scene, 'description', '')}")
+        prompt_parts.append(f"Character action: {getattr(scene, 'character_description', '')}")
+        prompt_parts.append(f"Mood: {getattr(scene, 'mood', '')}")
+        if getattr(scene, "camera_angle", None):
+            prompt_parts.append(f"Camera angle: {scene.camera_angle}")
+        if getattr(scene, "characters_present", None):
+            prompt_parts.append(f"Characters present: {', '.join(scene.characters_present)}")
+        self._append_image_private_extensions(
+            prompt_parts,
+            ["key_action_reference_image.md"],
+            user_style_info,
+            getattr(script, "tone", ""),
+            getattr(script, "background", ""),
+            getattr(scene, "description", ""),
+            getattr(scene, "character_description", ""),
+            getattr(scene, "dialogue", ""),
+            scene_outfits,
+        )
+
+        prompt = "\n".join(prompt_parts)
+        response = llm_service.generate_image(
+            prompt=prompt,
+            model=self.model,
+            size=self.size,
+            image_urls=[image.url for image in (reference_images or [])] or None,
+            ratio=aspect_ratio,
+        )
+        scene_number = max(1, int(getattr(scene, "scene_number", 1) or 1))
+        return GeneratedImage(
+            scene_number=scene_number,
+            url=response["data"][0]["url"],
+            prompt=prompt,
+            name=self._build_scene_asset_name(scene, "Key Action"),
+            reference_type="key_action",
+            is_reference=True,
         )
 
     def _build_scene_asset_name(self, scene, suffix: str) -> str:
@@ -531,6 +655,17 @@ class ImageAgent:
             lines.append(", ".join(summary))
         return lines
 
+    def _get_reference_type_set(self, reference_images: Optional[List[GeneratedImage]]) -> set:
+        return {
+            str(getattr(image, "reference_type", "") or "").strip().lower()
+            for image in (reference_images or [])
+            if str(getattr(image, "reference_type", "") or "").strip()
+        }
+
+    def _has_any_reference_type(self, reference_images: Optional[List[GeneratedImage]], *reference_types: str) -> bool:
+        type_set = self._get_reference_type_set(reference_images)
+        return any(str(reference_type).strip().lower() in type_set for reference_type in reference_types)
+
     def _build_storyboard_cast_constraints(self, scene, script: Script) -> List[str]:
         """构建故事版专用的角色数量/性别/防重复约束。
 
@@ -601,12 +736,72 @@ class ImageAgent:
                 label = "scene reference"
             elif reference_type == "scene_state":
                 label = "backdrop state reference"
+            elif reference_type == "key_action":
+                label = "key action reference"
             elif reference_type == "storyboard":
                 label = "9-panel storyboard"
             else:
                 label = reference_type
             prompt_parts.append(f"- Image {index}: {getattr(image, 'name', f'Reference {index}')} ({label})")
         return prompt_parts
+
+    def _sort_key_action_reference_images(
+        self,
+        reference_images: Optional[List[GeneratedImage]],
+    ) -> List[GeneratedImage]:
+        if not reference_images:
+            return []
+        priority = {
+            "character_outfit": 0,
+            "scene_state": 1,
+            "character": 2,
+            "scene": 3,
+            "key_action": 4,
+            "storyboard": 5,
+        }
+        return sorted(
+            list(reference_images),
+            key=lambda image: (
+                priority.get(str(getattr(image, "reference_type", "") or "").strip().lower(), 99),
+                str(getattr(image, "name", "") or ""),
+            ),
+        )
+
+    def _build_key_action_reference_priority_context(
+        self,
+        reference_images: Optional[List[GeneratedImage]],
+    ) -> List[str]:
+        ordered_images = self._sort_key_action_reference_images(reference_images)
+        if not ordered_images:
+            return []
+
+        indexed = list(enumerate(ordered_images, start=1))
+        outfit_refs = [f"Image {idx}" for idx, image in indexed if getattr(image, "reference_type", None) == "character_outfit"]
+        state_refs = [f"Image {idx}" for idx, image in indexed if getattr(image, "reference_type", None) == "scene_state"]
+        character_refs = [f"Image {idx}" for idx, image in indexed if getattr(image, "reference_type", None) == "character"]
+        scene_refs = [f"Image {idx}" for idx, image in indexed if getattr(image, "reference_type", None) == "scene"]
+
+        parts: List[str] = ["[KEY ACTION REFERENCE PRIORITY]"]
+        if outfit_refs:
+            parts.append(
+                f"Prefer {'/'.join(outfit_refs)} for the current character outfit, hairstyle, nudity level, damage, stains, and continuity."
+            )
+        if state_refs:
+            parts.append(
+                f"Prefer {'/'.join(state_refs)} for the current backdrop state, especially time of day, weather, and environment continuity."
+            )
+        if character_refs:
+            parts.append(
+                f"Use {'/'.join(character_refs)} only as fallback identity references when a matching character outfit reference is unavailable."
+            )
+        if scene_refs:
+            parts.append(
+                f"Use {'/'.join(scene_refs)} only as fallback environment references when a matching backdrop state reference is unavailable."
+            )
+        parts.append(
+            "Combine the scene script, the current outfit/state references above, and the NSFW key-action prompt rules to stage one decisive action frame."
+        )
+        return parts
 
     def generate_scene_storyboard_image(
         self,
@@ -624,17 +819,16 @@ class ImageAgent:
         # 故事版必须是白描线稿 9 宫格：把强制样式约束放在最前且最显著，
         # 且刻意不注入用户的彩色/写实/电影感风格要求（会与白描线稿冲突，
         # 曾导致模型偶发输出单张彩色写实图而非多宫格白描线稿）。
-        prompt_parts.append("[OUTPUT TYPE] Black-and-white nine-panel storyboard sheet (line-art sketch), NOT a finished color illustration.")
-        prompt_parts.append("[CRITICAL] Generate exactly ONE image containing NINE panels, preferably arranged in a clear 3 columns x 3 rows storyboard grid (nine equal storyboard cells).")
-        prompt_parts.append("[CRITICAL] Style MUST be monochrome black-and-white pencil line-art drawing (line-art storyboard sketch). Absolutely NO color, NO photorealistic rendering, NO single full portrait.")
-        prompt_parts.append("[CRITICAL] Ignore any color, lighting or photoreal styling from the reference images; use references ONLY for character identity, faces, costumes and scene layout.")
+        prompt_parts.extend(load_prompt("storyboard_image.md").splitlines())
 
         scene_context = self._resolve_scene_definition_context(getattr(scene, "scene_name", ""), script)
         reference_context = self._build_scene_reference_context(reference_images)
+        has_character_reference = self._has_any_reference_type(reference_images, "character", "character_outfit")
         if reference_context:
             prompt_parts.extend(reference_context)
             prompt_parts.append("[REFERENCE USAGE] The reference images above are content/identity references only. Do NOT copy their coloring or realistic finish — redraw everything as black-and-white line art.")
-        prompt_parts.extend(self._build_scene_character_context(scene, script))
+        if not has_character_reference:
+            prompt_parts.extend(self._build_scene_character_context(scene, script))
         prompt_parts.extend(self._build_storyboard_cast_constraints(scene, script))
         prompt_parts.append("[STORYBOARD SHEET]")
         prompt_parts.append(f"Scene name: {getattr(scene, 'scene_name', '')}")
@@ -662,22 +856,12 @@ class ImageAgent:
             if outfit_lines:
                 prompt_parts.append(f"Current character outfit and hairstyle state: {'; '.join(outfit_lines)}")
         prompt_parts.append(f"Scene description: {getattr(scene, 'description', '')}")
-        prompt_parts.append(f"Dialogue or narration: {getattr(scene, 'dialogue', '') or '无'}")
         prompt_parts.append(f"Character action: {getattr(scene, 'character_description', '')}")
         prompt_parts.append(f"Mood: {getattr(scene, 'mood', '')}")
-        if getattr(scene, "voice_description", None):
-            prompt_parts.append(f"Voice description: {scene.voice_description}")
         if getattr(scene, "camera_angle", None):
             prompt_parts.append(f"Camera angle: {scene.camera_angle}")
         if getattr(scene, "characters_present", None):
             prompt_parts.append(f"Characters present: {', '.join(scene.characters_present)}")
-        prompt_parts.append("[CRITICAL] Generate ONE nine-panel storyboard sheet for this exact scene.")
-        prompt_parts.append("[CRITICAL] Layout: 3 columns x 3 rows, nine equal storyboard panels in a single image.")
-        prompt_parts.append("[CRITICAL] Style: black-and-white line-art drawing, line-art storyboard sketch, storyboard pencil art.")
-        prompt_parts.append("[CRITICAL] Show the key beats, camera blocking, action flow, and emotional progression of the same scene.")
-        prompt_parts.append("[CRITICAL] No color, no subtitles, no text labels, no speech bubbles.")
-        prompt_parts.append("Professional production storyboard sheet for live-action shot planning.")
-
         prompt = "\n".join(prompt_parts)
         response = llm_service.generate_image(
             prompt=prompt,

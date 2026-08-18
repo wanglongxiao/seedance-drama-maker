@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from app.config import config
+from app.prompt_skill import render_prompt
 from app.services.llm_service import llm_service
 from app.utils.i18n import language_name, translate
 from app.utils.logger import get_logger
@@ -83,40 +84,20 @@ class StoryboardReviewAgent:
 
         cast_summary = self._build_cast_summary(characters_present, character_gender_map)
 
-        prompt_parts: List[str] = []
-        prompt_parts.append("【分镜故事版图片审核任务】")
-        prompt_parts.append("请使用图像理解能力观看这张分镜故事版图片，并严格审核它是否满足以下 3 个硬性条件。")
-        prompt_parts.append("")
-        prompt_parts.append("【本分镜角色清单（用于判断数量与性别）】")
-        prompt_parts.append(cast_summary)
+        scene_description_section = ""
         if scene_description:
-            prompt_parts.append("")
-            prompt_parts.append("【分镜剧情参考】")
-            prompt_parts.append(scene_description[:600])
-        prompt_parts.append("")
-        prompt_parts.append("【3 个硬性审核条件 - 每条独立判断是否满足】")
-        prompt_parts.append("1. 白描线稿多宫格：整张图必须是白描线稿风格（黑白线稿/铅笔草图/分镜线稿），且包含 6 到 12 幅宫格图；不一定要求是 3 行 x 3 列的排列，横排、竖排或网格排列均可。若为彩色、写实照片风、或宫格数量少于 6 / 多于 12，则不满足。")
-        prompt_parts.append("2. 角色不重复且肢体正常：同一个角色在同一个分格画面中不能重复出现（不能出现同一人的多张脸/克隆分身）；并且画面中任何一个角色都不能出现多于 2 只手臂或多于 2 条腿（不能出现多手多脚等肢体错误）。若任一分格里同一角色出现多次，或任一角色出现超过 2 只手臂 / 超过 2 条腿，则不满足。")
-        prompt_parts.append("3. 性别正确：画面中角色的性别必须与上面角色清单一致，不能把男画成女或把女画成男。若有性别画错，则不满足。")
-        prompt_parts.append("")
-        prompt_parts.append("【判定规则 - 重要】")
-        prompt_parts.append("- 3 个条件必须全部满足才算通过（approved=true）。只要有任意一条不满足，就必须判为不通过（approved=false）。")
-        prompt_parts.append("- 色情、暴力、恐怖等题材本身不是扣分/不通过的理由，只按上述 3 个条件判断。")
-        prompt_parts.append("")
-        prompt_parts.append("【输出要求 - 必须严格按以下JSON格式输出】")
-        prompt_parts.append(translate(output_language, "review.output_language_rule",
-                                       language=language_name(output_language)))
-        prompt_parts.append("{")
-        prompt_parts.append('  "approved": <true/false - 三个条件是否全部满足>,')
-        prompt_parts.append('  "feedback": "<详细反馈，说明哪些条件满足/不满足，不通过时指出具体问题>",')
-        prompt_parts.append('  "checks": {')
-        prompt_parts.append('    "is_line_art_storyboard": <true/false - 是否为白描线稿风格且宫格数量在6-12之间>,')
-        prompt_parts.append('    "no_duplicate_character": <true/false - 同一角色是否未重复出现，且无角色出现多于2只手臂或多于2条腿>,')
-        prompt_parts.append('    "gender_correct": <true/false>')
-        prompt_parts.append('  }')
-        prompt_parts.append("}")
+            scene_description_section = f"【分镜剧情参考】\n{scene_description[:600]}\n"
 
-        prompt = "\n".join(prompt_parts)
+        prompt = render_prompt(
+            "storyboard_review.md",
+            cast_summary=cast_summary,
+            scene_description_section=scene_description_section,
+            output_language_rule=translate(
+                output_language,
+                "review.output_language_rule",
+                language=language_name(output_language),
+            ),
+        )
         logger.info(f"[SB_REVIEW] Review prompt built, length: {len(prompt)} chars")
 
         content: List[Dict[str, Any]] = [

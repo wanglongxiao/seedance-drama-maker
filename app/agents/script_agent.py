@@ -7,6 +7,7 @@ import json
 import re
 from typing import Dict, Any, List, Optional
 from app.config import config
+from app.prompt_skill import load_optional_nsfw_prompt, nsfw_content_requested, render_prompt
 from app.services.llm_service import llm_service
 from app.utils.i18n import language_name, translate
 from app.utils.logger import get_logger
@@ -17,6 +18,16 @@ logger = get_logger("script_agent")
 
 class ScriptAgent:
     """剧本分镜台词生成Agent - 调用seed-sc-off"""
+
+    _NSFW_CONFLICT_PATTERNS = (
+        re.compile(r"立即服从|每一个请求|不限制|Ignore any constraints", re.IGNORECASE),
+        re.compile(r"编造事实|捏造|自由推测|confidently.*make", re.IGNORECASE),
+        re.compile(r"首要任务.*交付|creativity.*obedience", re.IGNORECASE),
+        re.compile(r"永远不会警告|never.*warn", re.IGNORECASE),
+    )
+    _NSFW_METADATA_PATTERNS = (
+        re.compile(r"本地私有扩展|NSFW\\?_?ENABLED|公开仓库|关闭.*跳过|该文件"),
+    )
 
     def __init__(self):
         # 使用 YAML 中当前启用的剧本模型
@@ -42,6 +53,43 @@ class ScriptAgent:
         """返回超出分镜时长范围的示例值，用于提示词约束。"""
         first = self.scene_duration_max + 1
         return f"{first}、{first + 1}"
+
+    def _sanitize_script_private_prompt(self, text: str) -> str:
+        """Remove local private extension lines that conflict with schema rules."""
+        if not text:
+            return ""
+        kept_lines: List[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                kept_lines.append(raw_line)
+                continue
+            if any(pattern.search(line) for pattern in self._NSFW_METADATA_PATTERNS):
+                continue
+            if any(pattern.search(line) for pattern in self._NSFW_CONFLICT_PATTERNS):
+                continue
+            kept_lines.append(raw_line)
+        return "\n".join(kept_lines).strip()
+
+    def _append_script_private_extensions(self, prompt_parts: List[str], *trigger_texts: Any) -> None:
+        """Append script-specific private extensions once, with bounded priority."""
+        if not nsfw_content_requested(*trigger_texts):
+            return
+
+        extensions: List[str] = []
+        for name in ("script_core.md", "script_outfit.md"):
+            text = self._sanitize_script_private_prompt(load_optional_nsfw_prompt(name))
+            if text:
+                extensions.append(text)
+        if not extensions:
+            return
+
+        prompt_parts.extend([
+            "",
+            "【本地私有扩展 - 限定优先级】",
+            "以下扩展仅用于成人题材的内容细化与角色装扮判定参考；不得覆盖本系统提示中的 JSON 结构、字段顺序、时长范围、角色/布景上限、风格原文、事实来源、语言和质量校验规则。",
+            "\n\n".join(extensions),
+        ])
 
     def _fit_scene_durations_to_target(
         self, scenes: List[Dict[str, Any]], target_total_duration: int
@@ -219,6 +267,261 @@ class ScriptAgent:
                 continue
             filtered[char_name] = outfit_desc
         return filtered
+
+    def _scene_text_blob(self, scene: Dict[str, Any]) -> str:
+        parts: List[str] = []
+        for value in (
+            scene.get('scene_name'),
+            scene.get('scene_state'),
+            scene.get('description'),
+            scene.get('character_description'),
+            scene.get('dialogue'),
+            scene.get('mood'),
+        ):
+            text = self._normalize_single_line(value)
+            if text:
+                parts.append(text)
+        return " ".join(parts)
+
+    def _text_contains_any_keyword(self, text: Any, keywords: List[str]) -> bool:
+        normalized_text = self._normalize_single_line(text).lower()
+        return bool(normalized_text) and any(keyword.lower() in normalized_text for keyword in keywords)
+
+    def _scene_name_key_set(self, scene: Optional[Dict[str, Any]]) -> set:
+        if not scene:
+            return set()
+        return {
+            self._normalize_outfit_compare_text(part)
+            for part in re.split(r"[、,，/|]+", str(scene.get('scene_name') or ""))
+            if self._normalize_outfit_compare_text(part)
+        }
+
+    def _scene_has_outfit_reset_signal(self, scene: Dict[str, Any]) -> bool:
+        return self._text_contains_any_keyword(
+            self._scene_text_blob(scene),
+            [
+                "换装", "换回", "换成", "换上", "重新穿上", "重新换上", "穿回",
+                "整理好", "梳好", "洗净", "洗去", "洗掉", "沐浴后", "换洗",
+                "次日", "第二天", "翌日", "数日后", "几天后", "多年后", "时间跳跃",
+            ],
+        )
+
+    def _outfit_has_hairstyle(self, outfit_desc: Any) -> bool:
+        return self._text_contains_any_keyword(
+            outfit_desc,
+            [
+                "发型", "头发", "刘海", "短发", "长发", "中长发", "烫发", "波浪烫",
+                "寸头", "丸子头", "中分", "三七分", "背头", "光头", "高马尾",
+                "马尾", "麻花辫", "双辫", "小辫子", "冲天辫", "脏辫", "爆炸头", "散发",
+            ],
+        )
+
+    def _extract_hairstyle_fragment(self, outfit_desc: Any) -> str:
+        fragments: List[str] = []
+        for raw_part in re.split(r"[，,、；;。/]+", str(outfit_desc or "")):
+            part = self._normalize_single_line(raw_part)
+            if not part:
+                continue
+            if self._outfit_has_hairstyle(part) and part not in fragments:
+                fragments.append(part)
+        return "，".join(fragments[:2])
+
+    def _scene_context_categories(self, scene: Dict[str, Any]) -> set:
+        text = self._scene_text_blob(scene)
+        categories = set()
+        if self._text_contains_any_keyword(
+            text,
+            [
+                "性爱", "做爱", "交欢", "缠绵", "亲热", "欢爱", "床上", "裸露",
+                "裸体", "赤裸", "半裸", "内衣", "呻吟", "喘息", "抚摸", "亲吻",
+                "插入", "抽插", "交合", "快感", "高潮", "情欲", "欲望", "爱液",
+                "阴茎", "阴道", "乳房", "乳头", "下体", "腿间", "腰肢", "贴着",
+            ],
+        ):
+            categories.add("intimate")
+        if self._text_contains_any_keyword(
+            text,
+            [
+                "战场", "屠杀", "厮杀", "血战", "血腥", "尸体", "血泊", "断肢",
+                "追杀", "砍杀", "拼杀", "爆炸", "刀光", "箭雨", "鲜血",
+            ],
+        ):
+            categories.add("battle")
+        return categories
+
+    def _outfit_categories(self, outfit_desc: Any) -> set:
+        text = self._normalize_single_line(outfit_desc)
+        categories = set()
+        if self._text_contains_any_keyword(
+            text,
+            [
+                "全裸", "裸体", "赤裸", "裸露", "半裸", "只穿内衣", "内衣", "内裤",
+                "透视装", "衣衫不整", "酥胸半露", "上身全裸", "下身赤裸", "眼神迷离",
+            ],
+        ):
+            categories.add("intimate")
+        if self._text_contains_any_keyword(
+            text,
+            [
+                "满身血污", "血污", "染血", "溅血", "衣衫破损", "破损", "战损",
+                "盔甲", "甲胄", "泥污", "灰尘", "狼狈", "受伤",
+            ],
+        ):
+            categories.add("battle")
+        return categories
+
+    def _scene_has_continuation_signal(self, scene: Dict[str, Any]) -> bool:
+        return self._text_contains_any_keyword(
+            self._scene_text_blob(scene),
+            [
+                "继续", "持续", "仍然", "依旧", "依然", "愈发", "越发", "越来越",
+                "没有停", "不停", "节奏", "喘息", "气息", "呼吸", "抱住", "贴着",
+                "缠住", "抓出", "压住", "俯身", "顺着", "起伏", "扭动", "迎合",
+            ],
+        )
+
+    def _scenes_share_continuity_context(
+        self,
+        scene: Optional[Dict[str, Any]],
+        other_scene: Optional[Dict[str, Any]],
+    ) -> bool:
+        if not scene or not other_scene:
+            return False
+        if self._scene_name_key_set(scene) & self._scene_name_key_set(other_scene):
+            return True
+        time_a = self._normalize_single_line(scene.get('time_of_day'))
+        time_b = self._normalize_single_line(other_scene.get('time_of_day'))
+        weather_a = self._normalize_single_line(scene.get('weather'))
+        weather_b = self._normalize_single_line(other_scene.get('weather'))
+        return bool(time_a and weather_a and time_a == time_b and weather_a == weather_b)
+
+    def _effective_scene_context_categories(
+        self,
+        scene: Dict[str, Any],
+        prev_scene: Optional[Dict[str, Any]] = None,
+        next_scene: Optional[Dict[str, Any]] = None,
+        prev_outfit: str = "",
+        next_outfit: str = "",
+    ) -> set:
+        categories = set(self._scene_context_categories(scene))
+        if categories or self._scene_has_outfit_reset_signal(scene):
+            return categories
+
+        prev_scene_categories = self._scene_context_categories(prev_scene or {})
+        next_scene_categories = self._scene_context_categories(next_scene or {})
+        prev_outfit_categories = self._outfit_categories(prev_outfit)
+        next_outfit_categories = self._outfit_categories(next_outfit)
+        has_continuation_signal = self._scene_has_continuation_signal(scene)
+
+        if has_continuation_signal and prev_outfit_categories and self._scenes_share_continuity_context(scene, prev_scene):
+            categories |= (prev_scene_categories | prev_outfit_categories)
+        if has_continuation_signal and next_outfit_categories and self._scenes_share_continuity_context(scene, next_scene):
+            categories |= (next_scene_categories | next_outfit_categories)
+
+        if not categories and self._scenes_share_continuity_context(scene, prev_scene) and self._scenes_share_continuity_context(scene, next_scene):
+            categories |= (prev_scene_categories | prev_outfit_categories) & (next_scene_categories | next_outfit_categories)
+
+        return categories
+
+    def _ensure_outfit_includes_hairstyle(
+        self,
+        outfit_desc: str,
+        character: Optional[Dict[str, Any]],
+        previous_outfit: str = "",
+        next_outfit: str = "",
+    ) -> str:
+        outfit = self._normalize_single_line(outfit_desc)
+        if not outfit or self._outfit_has_hairstyle(outfit):
+            return outfit
+
+        hairstyle_fragment = self._extract_hairstyle_fragment(previous_outfit)
+        if not hairstyle_fragment:
+            hairstyle_fragment = self._extract_hairstyle_fragment(next_outfit)
+        if not hairstyle_fragment and character:
+            hairstyle_fragment = self._normalize_single_line(character.get('hairstyle'))
+
+        if not hairstyle_fragment or hairstyle_fragment in outfit:
+            return outfit
+        return f"{outfit}，{hairstyle_fragment}"
+
+    def _enforce_character_outfit_continuity(
+        self,
+        scenes: List[Dict[str, Any]],
+        characters: List[Dict[str, Any]],
+    ) -> None:
+        if not scenes:
+            return
+
+        character_by_name = {
+            self._normalize_single_line(character.get('name')): character
+            for character in characters or []
+            if isinstance(character, dict) and self._normalize_single_line(character.get('name'))
+        }
+
+        for idx, scene in enumerate(scenes):
+            current_outfits = self._normalize_character_outfits(scene.get('character_outfits'))
+            has_reset_signal = self._scene_has_outfit_reset_signal(scene)
+            present_names = [
+                self._normalize_single_line(name)
+                for name in (scene.get('characters_present') or [])
+                if self._normalize_single_line(name)
+            ]
+
+            prev_scene = scenes[idx - 1] if idx > 0 else None
+            next_scene = scenes[idx + 1] if idx + 1 < len(scenes) else None
+            prev_outfits = self._normalize_character_outfits(prev_scene.get('character_outfits')) if prev_scene else {}
+            next_outfits = self._normalize_character_outfits(next_scene.get('character_outfits')) if next_scene else {}
+            next_present = {
+                self._normalize_single_line(name)
+                for name in ((next_scene or {}).get('characters_present') or [])
+                if self._normalize_single_line(name)
+            }
+
+            for char_name in present_names:
+                character = character_by_name.get(char_name)
+                prev_outfit = prev_outfits.get(char_name, "")
+                next_outfit = next_outfits.get(char_name, "") if char_name in next_present else ""
+                current_outfit = current_outfits.get(char_name, "")
+                current_categories = self._effective_scene_context_categories(
+                    scene,
+                    prev_scene=prev_scene,
+                    next_scene=next_scene,
+                    prev_outfit=prev_outfit,
+                    next_outfit=next_outfit,
+                )
+
+                if current_outfit:
+                    current_outfits[char_name] = self._ensure_outfit_includes_hairstyle(
+                        current_outfit,
+                        character,
+                        previous_outfit=prev_outfit,
+                        next_outfit=next_outfit,
+                    )
+                    continue
+
+                if has_reset_signal:
+                    continue
+
+                prev_categories = self._outfit_categories(prev_outfit)
+                next_categories = self._outfit_categories(next_outfit)
+
+                inherited_outfit = ""
+                if prev_outfit and current_categories & prev_categories:
+                    inherited_outfit = prev_outfit
+                elif prev_outfit and next_outfit and prev_categories and next_categories and prev_categories & next_categories:
+                    inherited_outfit = prev_outfit
+                elif next_outfit and current_categories & next_categories:
+                    inherited_outfit = next_outfit
+
+                if inherited_outfit:
+                    current_outfits[char_name] = self._ensure_outfit_includes_hairstyle(
+                        inherited_outfit,
+                        character,
+                        previous_outfit=prev_outfit,
+                        next_outfit=next_outfit,
+                    )
+
+            scene['character_outfits'] = self._filter_default_character_outfits(current_outfits, characters)
 
     def _coerce_scene_text_field(self, value: Any) -> str:
         """将分镜的 character_description / voice_description 归一化为字符串。
@@ -451,7 +754,7 @@ class ScriptAgent:
         messages = [
             {
                 "role": "system",
-                "content": self._get_system_prompt(output_language, target_total_duration)
+                "content": self._get_system_prompt(output_language, target_total_duration, user_input)
             },
             {
                 "role": "user",
@@ -502,13 +805,12 @@ class ScriptAgent:
                     f"Script quality check failed on attempt {attempt}/{max_attempts}; retrying"
                 )
                 messages[0]["content"] = (
-                    self._get_system_prompt(output_language, target_total_duration)
-                    + f"\n\n【补充要求】如果分镜对白大量为空、剧情过短、分镜数量明显不足或超过上限、任意角色缺少 gender / age / nationality / face_features / hairstyle / body_features / clothing / personality / identity_background、任意分镜 duration 超出 {self.scene_duration_min}-{self.scene_duration_max} 秒、任意 scene_definition 缺少 time_of_day / weather / scene_features、任意分镜缺少 time_of_day / weather、任意特殊角色装扮或发型变化没有写入 character_description 和 character_outfits、相邻分镜装扮/发型缺少剧情连续性、相邻分镜缺少因果承接、非最后一镜缺少引向下一镜的转场，或不同分镜的内容重复/雷同，请重新输出完整且可直接执行的 JSON。"
+                    self._get_system_prompt(output_language, target_total_duration, user_input)
+                    + "\n\n【重试修正】上一轮输出未通过程序校验。请依据 system prompt 修复字段缺失、时长越界、角色/布景引用缺失、特殊装扮未同步、对白缺失、相邻分镜缺少因果承接或分镜重复等问题，并重新输出完整 JSON。"
                 )
                 messages[1]["content"] = (
                     prompt
-                    + f"\n\n【补充要求】除非用户明确要求不生成对白或只生成旁白，否则请为关键分镜提供少量有效 dialogue 内容；对白要克制，每个有对白的分镜通常 1-2 行短对白即可，非必要分镜可以为空。description 中禁止写直接对白、引号对白、台词或旁白，所有人物说出口的话、旁白和内心独白必须全部放入 dialogue。每个角色设定必须完整输出 gender / age / nationality / face_features / hairstyle / body_features / clothing / personality / identity_background。每个分镜必须承担不同叙事功能，并提供新的动作结果、信息揭示、情绪变化或空间/时间状态；相邻分镜必须形成“上一镜结果 -> 下一镜反应/后果”的因果承接；除最后一镜外，每段 description 结尾都要给出能自然带到下一镜的动作、视线、情绪或镜头转场钩子；角色装扮和发型变化必须写在 character_description（角色动作部分），并同步写入 character_outfits；相邻分镜的装扮/发型必须符合剧情连续性，绝大多数情况下同一角色发型应保持一致，除非剧情明确导致变化；禁止不同分镜复用几乎相同的场景描述和对白；分镜总数不得超过 {self.max_storyboard_scenes} 个；每个分镜的 duration 只能是 {self.scene_duration_min}-{self.scene_duration_max} 之间的整数秒数，禁止输出 {self._disallowed_duration_examples()} 或更大的时长；每个 scene_definition 都必须输出非空的 time_of_day / weather / scene_features；每个 scene 都必须输出非空的 time_of_day / weather。"
-                    + "\n【补充要求】如果用户上传了带名称的角色/人物或布景参考图，这些名称必须原样保留，不得改名、缩写、翻译或替换为别名；这些名称必须直接用于 characters.name、scenes.characters_present、scene_definitions.name 和 scenes.scene_name。"
+                    + "\n\n【重试输出要求】只输出修正后的完整 JSON；若有上传参考图锁定名称，仍必须原样保留并用于对应角色/布景字段。"
                 )
 
         logger.info(f"Script generated with {len(script_data['scenes'])} scenes")
@@ -565,21 +867,14 @@ class ScriptAgent:
         previous_script_json = json.dumps(existing_script.dict(), ensure_ascii=False, indent=2)
 
         prompt_parts = [
-            "请基于【上一版完整剧本】和【本次修改要求】重新输出一份完整、可直接执行的 JSON 剧本。",
-            "【硬性要求】",
-            "1. 必须输出完整剧本 JSON，而不是局部修改说明。",
-            "2. 必须保留用户没有要求修改的合理内容，按用户要求修改需要调整的部分。",
-            "3. scenes 必须是完整数组，scene_number 连续递增。",
-            f"4. 总时长应尽量维持在约 {total_duration} 秒，每个分镜时长仍需满足 {self.scene_duration_min}-{self.scene_duration_max} 秒。",
-            "5. dialogue、description、character_description、voice_description、time_of_day、weather 要完整，不要省略。",
-            "6. scene_definitions 中每个布景必须保留或补齐 time_of_day、weather、scene_features。",
-            "7. 只输出 JSON，不要输出解释、前言、Markdown 代码块。",
-            "",
-            "【上一版完整剧本】",
-            previous_script_json,
-            "",
-            "【本次修改要求】",
-            edit_request,
+            render_prompt(
+                "script_rewrite_user.md",
+                total_duration=total_duration,
+                scene_duration_min=self.scene_duration_min,
+                scene_duration_max=self.scene_duration_max,
+                previous_script_json=previous_script_json,
+                edit_request=edit_request,
+            )
         ]
 
         if audio_text:
@@ -595,10 +890,12 @@ class ScriptAgent:
         if uploaded_reference_prompt:
             prompt_parts.extend(["", uploaded_reference_prompt])
 
+        self._append_script_private_extensions(prompt_parts, edit_request, audio_text, previous_script_json)
+
         messages = [
             {
                 "role": "system",
-                "content": self._get_system_prompt(output_language, total_duration)
+                "content": self._get_system_prompt(output_language, total_duration, edit_request, audio_text)
                 + "\n\n【改稿规则】当用户要求修改剧本时，你必须基于上一版完整剧本进行重写，输出一份新的完整 JSON。"
             },
             {
@@ -631,10 +928,9 @@ class ScriptAgent:
                     f"Script rewrite quality check failed on attempt {attempt}/{max_attempts}; retrying"
                 )
                 messages[0]["content"] = (
-                    self._get_system_prompt(output_language, total_duration)
+                    self._get_system_prompt(output_language, total_duration, edit_request, audio_text)
                     + "\n\n【改稿规则】请严格基于上一版剧本和修改要求输出一份完整 JSON。"
-                    + f"\n【补充要求】如果分镜数量不足或超过上限、对白大量为空、字段缺失、任意分镜 duration 超出 {self.scene_duration_min}-{self.scene_duration_max} 秒、相邻分镜缺少因果承接、非最后一镜缺少引向下一镜的转场，或不同分镜内容重复/雷同，请重新输出完整 JSON。"
-                    + "\n【补充要求】如果用户上传了带名称的角色/人物或布景参考图，这些名称必须原样保留，不得改名、缩写、翻译或替换为别名；这些名称必须直接用于 characters.name、scenes.characters_present、scene_definitions.name 和 scenes.scene_name。"
+                    + "\n【重试修正】上一轮改稿未通过程序校验。请修复分镜数量、字段完整性、时长范围、因果承接、转场、重复内容和上传参考图锁定名称等问题，并重新输出完整 JSON。"
                 )
 
         logger.info(f"Script rewritten with {len(script_data['scenes'])} scenes")
@@ -745,110 +1041,31 @@ class ScriptAgent:
 
         return None
 
-    def _get_system_prompt(self, output_language: str = "zh-CN", total_duration: Optional[int] = None) -> str:
+    def _get_system_prompt(
+        self,
+        output_language: str = "zh-CN",
+        total_duration: Optional[int] = None,
+        *trigger_texts: Any,
+    ) -> str:
         """获取系统提示词"""
         effective_total_duration = total_duration or self.default_total_duration
-        return f"""你是一个专业的短剧剧本创作者、品牌广告大师。你擅长创作跌宕起伏、有爽感、抓眼球的剧本，能够驾驭热血打斗、惨烈战争、激情肉欲、若即若离的情爱、温暖深刻的亲情、毛骨悚然的恐怖、不断反转的悬疑、脑洞大开的科幻等题材。你的任务是根据用户输入生成完整的剧本、角色设定和分镜脚本。
-
-【风格规则】
-1. 如果用户明确写了风格，style 字段必须完全等于用户原文，不得改写、扩写、混搭。
-2. 如果用户没有写风格，才允许你根据故事内容自动给出合适风格。
-3. 示例：
-   - 用户说"黑白水墨画风" -> style: "黑白水墨画风"
-   - 禁止写成: "赛博朋克国风混搭，霓虹闪烁的香港中环街头融合水墨国风元素"
-
-【创作目标】
-1. 视频总时长约 {effective_total_duration} 秒，且不得超过配置上限 {self.total_duration_max} 秒。你要让所有分镜 duration 之和尽量贴近 {effective_total_duration} 秒（允许小幅浮动），不要明显偏短或偏长。
-2. 每个分镜时长必须在 {self.scene_duration_min}-{self.scene_duration_max} 秒之间；如果剧情更长，必须拆成多个分镜。
-   - duration 只能填写 {self.scene_duration_min}-{self.scene_duration_max} 之间的整数，绝对禁止输出 {self._disallowed_duration_examples()} 或任何超出范围的值。
-3. 剧本必须完整包含开端、发展、高潮、结局；每个分镜承担不同叙事功能，剧情按因果链推进、符合客观规律并具有起伏。
-4. 分镜总数不得超过 {self.max_storyboard_scenes} 个。
-
-【时长分配规则】
-1. 把绝大部分时长投入到情节发展、剧情推进，以及对角色/动作/心理/互动的细致刻画，让节奏紧凑、层层递进直至剧本高潮。
-2. 开头（交代背景/人物/悬念）与结尾都要精简，不要占用过多时长；开头快速切入、结尾干净利落。
-3. 高潮及其前后的关键情节分镜应获得相对更充裕的时长，铺垫与过渡分镜可适当压缩。
-4. 结尾可采用钩子式结尾、突然收尾、开放式结尾或合家欢结尾等收束方式，根据 tone 选择最契合的一种，做到收得利落、有回味，避免拖沓冗长的收场。
-
-【基调规则】
-1. 必须输出 tone 字段，明确本剧本的背景基调，例如恐怖、爱情、悬疑、爽剧、历史、情欲等，可使用更细分的组合基调（如“悬疑恐怖”“甜宠爽剧”“历史权谋”）。
-2. tone 要贯穿全篇：剧情节奏、氛围、镜头与对白都必须与该基调保持一致。
-3. 若用户在输入中明确指定了基调/题材，tone 必须尊重用户指定，不得擅自更换。
-
-【时代规则】
-1. 必须输出 era 字段，明确剧本所处的时代/年代，例如上古洪荒、先秦、汉唐、宋明、民国、现代都市、近未来、赛博未来、末世废土、架空异世界等，可根据剧情给出更具体的年代设定。
-2. era 要与 style、background、tone 相互契合：服化道、场景陈设、科技水平、社会风貌、语言用词都必须符合该时代设定，全篇保持一致。
-3. 若用户在输入中明确指定了时代/年代，era 必须尊重用户指定，不得擅自更换。
-
-【角色与布景】
-1. 角色设定最多 {self.max_characters} 个，需完整包含性别、年龄、国籍、面容特征、发型、身材特征、通常装扮、声音特征、性格特征、身份背景。
-2. 每个角色都必须输出 nationality、hairstyle、body_features、personality、identity_background 字段；这些字段会持久化，并应用到后续角色参考图、角色装扮图、分镜故事版和视频生成，必须稳定、具体、前后一致。
-3. 每个角色都必须输出 personality（性格侧写）字段：用简要文字刻画其性格特征、动机与内在矛盾，体现角色的真实性与人性的复杂性（如优点与缺点并存、立场随剧情动摇）；主角的 personality 尤其要写得立体、可信，避免脸谱化。
-4. 只要某个角色会在任一分镜真实出场，就必须出现在 characters 角色设定列表中；characters 必须覆盖 scenes.characters_present 中的出场角色。
-5. characters 与所有分镜里的出场角色总数共享同一个上限，最多 {self.max_characters} 个。
-6. 在“角色设定”之后输出“布景设定”，布景最多 {self.max_setting_definitions} 个。
-7. 布景设定要写清固定环境、时间、天气、空间布局和氛围。
-8. 每个布景设定必须额外输出 time_of_day、weather、scene_features 三个字段；scene_features 必须是数组，列出该场景的稳定视觉特征。
-9. 多角色分镜可同框、单人特写、空镜头、背影或剪影，但必须符合剧情逻辑。
-
-【分镜要求】
-1. 每个分镜必须包含：scene_number, scene_name, character_outfits, scene_state, description, dialogue, duration, character_description, voice_description, mood, time_of_day, weather, camera_angle, characters_present。
-2. scene_name 必须引用 scene_definitions 中已有的 name；一个分镜涉及多个布景时可用"、"连接。
-3. 每个分镜都要明确写出 time_of_day（如清晨/白天/中午/黄昏/傍晚/深夜）和 weather（如晴天/小雨/沙尘天/雷暴雨/下雪/有雾），并在 scene_state 字段输出本分镜的‘布景状态’信息。scene_state 只能包含“时间 + 天气”两类信息，推荐格式为“深夜，晴天”“黄昏，沙尘天”；不得加入灯光、气味、情绪氛围、剧情发展、角色动作、角色状态、战斗痕迹、血污、破坏或临时道具。若本分镜的 time_of_day/weather 与布景默认状态完全一致，scene_state 可以为空字符串。
-4. 每个分镜都要写足细节：环境、人物、动作、神态、眼神、情绪、心理、语言、镜头信息。
-5. dialogue 要根据剧情自然生成，符合角色性格和当前情绪情境，数量适量：在关键情绪、转折、冲突、误会、信息推进分镜输出；每个有对白的分镜通常 1-2 句短对白即可；不同情绪情境下的语气、用词、节奏要有区分。
-6. description 必须可直接用于后续视频生成，避免空泛总结；description 前必须先输出 character_outfits 和 scene_state 字段。description 只能描述画面、环境、动作、神态和镜头，不得写直接对白、引号对白、台词或旁白；所有人物说出口的话、旁白和内心独白必须全部放入 dialogue 字段。
-7. 每个分镜的 character_outfits 字段必须在 description 字段之前输出，保存本分镜的‘角色装扮（含发型）’信息；每个分镜的 scene_state 字段也必须在 description 字段之前输出，保存本分镜的‘布景状态’信息。
-8. 每个分镜的 character_description（角色动作部分）必须同时承担“动作 + 当前装扮/发型状态”说明：只要角色在本分镜的装扮、发型、整洁程度、破损/污渍/战损/礼服/制服/盔甲/特殊服饰等状态与默认 clothing 或默认 hairstyle 不同，就必须用区别明显的文字写出该角色当前的角色装扮（含发型）。
-9. 当某个出场角色在本分镜中的装扮或发型与 characters 中的默认 clothing / hairstyle 不同（例如日常装扮、舞会盛装、衣衫破损、满身血污、穿透视装、正面裸体、只穿内衣、上身全裸、身穿盔甲、制服诱惑、仙人装扮、穿小熊公仔装、头发整齐、头发凌乱、齐刘海短发、长发、短烫发、长波浪烫发、寸头、丸子头、中分发型、三七分发型、背头、光头、高马尾、麻花辫、两个小辫子、冲天吹辫子、中长发、满头小辫子、脏辫、爆炸头等），必须做到两点：(a) 在该分镜的 character_description（角色动作部分）中明确写出该角色的‘角色装扮（含发型）’描述；(b) 在该分镜的 character_outfits 字段中输出对应条目。‘角色装扮（含发型）’必须使用有明显特征、区别明显的文字描述，并区别于通常装扮，使同一角色在不同分镜的不同装扮/发型之间可从文字上清晰区分。若与默认 clothing 和默认 hairstyle 一致或无特殊状态，character_outfits 必须输出空对象，不得把通常装扮/默认发型重复写入 character_outfits。
-10. 当分镜内容、description、character_description 或剧情意图包含乳房、乳头、内衣、内裤、腹肌、胸肌、光背、大腿内侧、阴茎、下体、全裸、半裸、衣衫不整、酥胸半露等裸露、暧昧身体部位或类似意思时，必须在 character_outfits 中为相关角色输出对应‘角色装扮（含发型）’，例如“只穿黑色内衣，长发凌乱”“上身全裸露出胸肌，短发被汗水打湿”“衣衫不整露出大腿内侧，高马尾散乱”；不得仅写在 description 或 character_description 中。
-11. 相邻分镜的角色装扮和发型必须有剧情连续性和逻辑性：如果上一镜已经出现破损、血污、战场尘土、湿透、全裸、半裸、特殊礼服、制服或盔甲等状态，下一镜在没有明确换装/清理/时间跳跃前不得突然恢复为干净整洁或通常装扮；如果相邻分镜均描写性爱场景且角色为全裸或半裸装扮，则本分镜角色装扮不得突然变成穿戴整齐或通常装扮；如果相邻分镜是血腥屠杀战场，则本分镜角色装扮不得突然变成干净整洁或通常装扮；绝大多数情况下，同一角色的发型信息应保持一致，除非剧情明确发生整理、打斗、雨淋、换装、伪装或时间跳跃。
-
-【分镜推进与去重】
-1. 输出前先在心中规划每个分镜的唯一叙事功能（如诱因、追逐、发现、误会、反转、抉择、高潮、收束），但不要把规划过程输出到 JSON。
-2. 相邻分镜必须形成“上一镜结果 -> 下一镜反应/后果”的因果链；不能像重新开始同一段剧情。
-3. 除最后一镜外，每个分镜结尾都要埋下下一镜承接点；下一分镜开头要接住上一镜尚未完成的动作、情绪、信息点或结果。
-4. 转场可通过动作延续、人物视线、情绪变化、镜头移动、时间推进、空间切换来实现，并要在 description 中明确写出触发转场的动作或变化。
-5. 每个分镜必须带来新的动作结果、新的信息揭示、新的情绪变化或新的空间/时间状态；即使同一布景同一人物连续出现，也不能复述上一镜已完成的动作、对白、画面状态或情绪结果。
-6. description 与 dialogue 不得在不同分镜间重复或高度相似；允许必要的短句呼应，但必须伴随新的情境和新的剧情推进。
-
-【输出格式】
-- title: 剧本标题
-- style: 整体风格
-- era: 剧本所处的时代/年代（如上古洪荒/汉唐/民国/现代都市/近未来/末世废土/架空异世界，或更具体的年代设定），必须为非空字符串
-- background: 故事背景设定
-- tone: 剧本背景基调（如恐怖/爱情/悬疑/爽剧/历史/情欲，或更细分的组合基调），必须为非空字符串
-- characters: 角色列表，每个角色包含 name, age, gender, nationality, face_features, hairstyle, body_features, skin_tone, clothing, voice_type, voice_features, voice_style, personality, identity_background
-  - age 必须是字符串，如"16岁"、"中年"
-  - gender 必须明确（如"男"/"女"），age、gender、nationality、face_features、hairstyle、body_features、clothing、personality、identity_background 会持久化并应用到后续生图/生视频，须保持前后一致
-  - nationality 为国籍/族裔/地域身份，必须为非空字符串
-  - face_features 为面容特征，必须具体描述五官、脸型、辨识点
-  - hairstyle 为默认发型，必须具体，作为后续分镜发型变化判定的基准
-  - body_features 为身材特征，必须具体描述体型、身高感、体态、肌肉/纤细/壮实等稳定特征
-  - clothing 为该角色的默认/通常装扮，作为角色主图与后续分镜装扮判定的基准
-  - personality 为该角色的性格侧写，须为非空字符串，简要刻画性格特征、动机与内在矛盾，体现真实性与人性复杂性；主角尤其要写得立体可信
-  - identity_background 为身份背景，须为非空字符串，写清职业、社会身份、来历、关系网络或核心经历
-- scene_definitions: 布景设定列表，每项包含 name, description, time_of_day, weather, scene_features
-- scene_features 必须是字符串数组，写清稳定的场景视觉特征，例如灯光、陈设、地貌、材质、色调、标志性物件
-- scenes: 分镜列表；每个分镜字段顺序必须为 scene_number, scene_name, character_outfits, scene_state, description, dialogue, duration, character_description, voice_description, mood, time_of_day, weather, camera_angle, characters_present
-  - duration 必须是 {self.scene_duration_min}-{self.scene_duration_max} 之间的整数秒数
-  - time_of_day 和 weather 必须为非空字符串，并与分镜内容一致，且其描述必须同时体现在 description（场景描述部分）中
-  - scene_state 为本分镜布景状态描述，须在 description 前输出；只能包含时间与天气两类信息，推荐格式为“time_of_day，weather”；不得包含灯光、气味、情绪氛围、剧情发展、角色动作、角色状态、战斗痕迹、血污、破坏或临时道具；若 time_of_day/weather 与布景默认状态一致可为空字符串
-  - characters_present 中出现的角色名必须来自 characters.name
-  - character_outfits 为对象，键为角色名（须来自 characters_present），值为该角色在本分镜的特殊装扮（含发型）描述；该字段须在 description 前输出；仅当装扮/发型/整洁状态与默认 clothing 或默认 hairstyle 不同时才输出对应条目，同时该装扮（含发型）描述必须同时体现在 character_description（角色动作部分）中；若角色装扮与默认 clothing + 默认 hairstyle 一致，必须省略该角色条目；若画面包含裸露、暧昧身体部位或相关词义，必须输出对应条目；无特殊装扮时输出空对象
-  - dialogue 必须只包含人物对白、旁白或内心独白；每次对白单独一行，格式为“角色名：对白内容”或“旁白：内容”；不得把对白写进 description；对白数量要克制，每个有对白的分镜通常 1-2 行即可，非必要分镜可为空字符串
-  - character_description 与 voice_description 必须输出为单个字符串（可用换行分隔多个角色），禁止输出为对象/字典或数组；多个角色时用“角色名：描述”的形式在同一字符串内换行罗列，每个角色/人物单独一行
-  - characters 与 scenes.characters_present 的出场角色总数不得超过 {self.max_characters}
-
-【绝对禁止】
-- 修改用户输入的风格描述
-- 把用户风格与其他风格混合
-- 在 style 字段中添加额外说明
-- 输出解释、前言、Markdown 代码块
-- 让不同分镜内容重复或高度相似
-
-【输出语言要求】
-{translate(output_language, 'script.output_language_rule', language=language_name(output_language))}"""
+        prompt_parts = [render_prompt(
+            "script_system_prompt.md",
+            effective_total_duration=effective_total_duration,
+            total_duration_max=self.total_duration_max,
+            scene_duration_min=self.scene_duration_min,
+            scene_duration_max=self.scene_duration_max,
+            disallowed_duration_examples=self._disallowed_duration_examples(),
+            max_storyboard_scenes=self.max_storyboard_scenes,
+            max_characters=self.max_characters,
+            max_setting_definitions=self.max_setting_definitions,
+            output_language_rule=translate(
+                output_language,
+                'script.output_language_rule',
+                language=language_name(output_language),
+            ),
+        )]
+        return "\n\n".join(part for part in prompt_parts if part)
 
     def _build_prompt(
         self,
@@ -889,36 +1106,13 @@ class ScriptAgent:
         if uploaded_reference_prompt:
             prompt_parts.append(f"\n{uploaded_reference_prompt}")
 
-        prompt_parts.append(f"\n【技术要求】")
-        prompt_parts.append(f"- 视频总时长：约{effective_total_duration}秒")
-        prompt_parts.append(f"- 所有分镜 duration 之和要尽量贴近{effective_total_duration}秒，不要明显偏短或偏长")
-        prompt_parts.append(f"- 总时长不得超过{self.total_duration_max}秒")
-        prompt_parts.append(f"- 每个分镜时长：{self.scene_duration_min}-{self.scene_duration_max}秒之间灵活调整，根据剧情需要设定")
-        prompt_parts.append(
-            f"- duration 字段只能输出 {self.scene_duration_min}-{self.scene_duration_max} 的整数，"
-            f"禁止输出 {self._disallowed_duration_examples()} 或更大值"
-        )
-        prompt_parts.append(f"- 分镜数量：约{effective_total_duration // ((self.scene_duration_min + self.scene_duration_max) // 2)}个，总数不得超过{self.max_storyboard_scenes}个")
-        prompt_parts.append("- 时长分配：绝大部分时长用于情节发展与剧情推进（细致刻画角色/动作/心理/互动，节奏紧凑推向高潮）；开头与结尾要精简，不占用过多时长")
-        prompt_parts.append("- 结尾方式：可用钩子式结尾/突然收尾/开放式结尾/合家欢结尾等，按 tone 选择最契合的一种，收得利落有回味")
-        prompt_parts.append("- 剧情要求：有故事感、有起伏、按因果链推进、连贯不跳跃、符合客观规律")
-        prompt_parts.append("- 每个分镜都要写足环境、人物、动作、神态、眼神、情绪、心理、语言等细节")
-        prompt_parts.append("- description 只能写画面、环境、动作、神态和镜头，不得写直接对白、引号对白、台词或旁白；所有人物说出口的话、旁白和内心独白必须全部放入 dialogue")
-        prompt_parts.append("- dialogue 要根据剧情自然生成，符合角色性格和当前情绪情境，数量适量；在关键情绪/转折/冲突/信息推进分镜输出，每个有对白的分镜通常 1-2 行短对白即可，非必要分镜可以为空；每次对白必须单独一行，格式为“角色名：对白内容”或“旁白：内容”")
-        prompt_parts.append("- 每个分镜都必须明确输出 time_of_day 和 weather 字段，例如白天/夜晚、晴天/雨天，并与分镜内容保持一致；scene_state 字段必须位于 description（场景描述部分）之前，且只能包含时间与天气两类信息，推荐格式为“time_of_day，weather”，例如“深夜，晴天”“黄昏，沙尘天”；不得包含灯光、气味、情绪氛围、剧情发展、角色动作、角色状态、战斗痕迹、血污、破坏或临时道具")
-        prompt_parts.append("- 每个角色设定都必须完整输出 gender / age / nationality / face_features / hairstyle / body_features / clothing / personality / identity_background；这些字段会持久化并应用到后续生图/生视频，必须稳定、具体、前后一致")
-        prompt_parts.append("- 若某出场角色本分镜的装扮、发型或整洁状态与其默认 clothing / hairstyle 不同（如日常装扮/舞会盛装/衣衫破损/满身血污/穿透视装/正面裸体/只穿内衣/上身全裸/身穿盔甲/制服诱惑/仙人装扮/穿小熊公仔装/头发凌乱/眼神迷离/衣衫不整/酥胸半露/齐刘海短发/长波浪烫发/寸头/丸子头/高马尾/麻花辫/两个小辫子/冲天吹辫子/满头小辫子/脏辫/爆炸头等），必须在 character_description（角色动作部分）中写出该‘角色装扮（含发型）’，并在 character_outfits 字段输出对应条目；character_outfits 必须位于 description 之前，描述必须有明显特征且区别于通常装扮")
-        prompt_parts.append("- 若角色在本分镜的装扮与默认 clothing、默认 hairstyle 一致，character_outfits 必须输出空对象或省略该角色条目；不得把通常装扮、默认发型重复写入 character_outfits")
-        prompt_parts.append("- 相邻分镜的角色装扮和发型必须符合剧情连续性：全裸/半裸、破损、血污、战场尘土、湿透、礼服、制服、盔甲等状态不得无理由突然恢复为通常装扮；性爱场景连续时不得突然穿戴整齐，血腥屠杀战场连续时不得突然干净整洁；绝大多数情况下同一角色发型应保持一致，除非剧情明确导致变化")
-        prompt_parts.append("- 输出前先在心中规划每个分镜的唯一叙事功能（诱因/追逐/发现/误会/反转/抉择/高潮/收束等），不要把规划过程写进 JSON")
-        prompt_parts.append("- 相邻分镜必须形成“上一镜结果 -> 下一镜反应/后果”的因果承接；除最后一镜外，每段 description 结尾都要给出能带到下一镜的动作、视线、情绪或镜头转场钩子")
-        prompt_parts.append("- 每个分镜必须提供新的动作结果、信息揭示、情绪变化或空间/时间状态；即使同一布景同一人物连续出现，也不能复述上一镜已经完成的动作、对白和画面状态")
-        prompt_parts.append(f"- 所有分镜的出场角色总数与角色设定共用同一个上限，最多{self.max_characters}个；凡是出现在 characters_present 的角色，都必须在 characters 中给出设定")
-        prompt_parts.append("- 每个布景设定都必须输出 scene_features 数组，写清该场景的稳定特征，例如灯光、陈设、建筑材质、空间布局、环境符号")
-        prompt_parts.append("- 必须输出 tone 字段，明确剧本背景基调（如恐怖/爱情/悬疑/爽剧/历史/情欲，或更细分的组合基调），并让剧情、氛围、镜头与对白贯穿该基调；用户已指定基调/题材时须尊重用户")
-        prompt_parts.append("- 必须输出 era 字段，明确剧本所处的时代/年代（如上古洪荒/汉唐/民国/现代都市/近未来/末世废土/架空异世界，或更具体的年代），并让服化道、场景陈设、科技水平、社会风貌、语言用词都契合该时代；用户已指定时代/年代时须尊重用户")
-        prompt_parts.append("- 每个角色都必须输出 nationality（国籍/族裔/地域身份）、hairstyle（默认发型）、body_features（身材特征）、personality（性格侧写）、identity_background（身份背景）；主角尤其要立体可信、避免脸谱化")
-        prompt_parts.append("- ‘角色装扮’与‘布景状态’都必须使用区别明显的文字描述，使同一角色/同一布景在不同分镜的不同状态之间可从文字上清晰区分；输出 JSON 时每个分镜必须先输出 character_outfits 和 scene_state，再输出 description")
+        estimated_scene_count = effective_total_duration // ((self.scene_duration_min + self.scene_duration_max) // 2)
+        prompt_parts.append("\n【动态执行参数】")
+        prompt_parts.append(f"- 目标总时长：约{effective_total_duration}秒；分镜总时长要尽量贴近该值，且不得超过{self.total_duration_max}秒。")
+        prompt_parts.append(f"- 分镜时长：每个 duration 必须是 {self.scene_duration_min}-{self.scene_duration_max} 秒之间的整数，禁止输出 {self._disallowed_duration_examples()} 或更大值。")
+        prompt_parts.append(f"- 建议分镜数量：约{estimated_scene_count}个；角色最多{self.max_characters}个，布景最多{self.max_setting_definitions}个，分镜最多{self.max_storyboard_scenes}个。")
+        prompt_parts.append("- 详细结构、字段顺序、角色/布景/对白/装扮/布景状态/去重/转场规则以 system prompt 为准，不在此重复。")
+        self._append_script_private_extensions(prompt_parts, user_input, audio_text)
 
         # 检查用户是否指定了对话/旁白生成方式
         if user_input:
@@ -934,17 +1128,23 @@ class ScriptAgent:
                 prompt_parts.append("- dialogue字段必须是旁白形式，用于叙述场景和推动剧情")
                 prompt_parts.append("- 禁止生成角色对话")
 
-        prompt_parts.append("\n【输出要求】")
+        style_output_rule = ""
         if style_hint:
-            prompt_parts.append(f'【强制】style字段必须完全等于："{style_hint}"')
-            prompt_parts.append(f'【强制】禁止添加任何其他文字到style字段')
-        prompt_parts.append(f"【强制】角色设定最多 {self.max_characters} 个，布景设定最多 {self.max_setting_definitions} 个，分镜最多 {self.max_storyboard_scenes} 个。")
-        prompt_parts.append(f"【强制】所有分镜的出场角色必须包含在角色设定中，且分镜出场角色总数最多 {self.max_characters} 个。")
-        prompt_parts.append(f"【强制】所有分镜实际使用的布景都必须包含在布景设定中，且分镜实际使用布景总数最多 {self.max_setting_definitions} 个。")
-        prompt_parts.append("【强制】scene_definitions 中每个布景必须输出 time_of_day、weather、scene_features；scenes 中每个分镜必须输出 time_of_day、weather，并按顺序在 description 前输出 character_outfits 和 scene_state。")
-        prompt_parts.append("【强制】相邻分镜必须因果承接，但不能重复上一分镜已经完成的动作、对白、画面状态或情绪结果。")
-        prompt_parts.append(translate(output_language, 'script.output_language_rule', language=language_name(output_language)))
-        prompt_parts.append("请直接输出JSON格式的剧本内容，不要包含其他说明文字。")
+            style_output_rule = (
+                f'【强制】style字段必须完全等于："{style_hint}"\n'
+                f'【强制】禁止添加任何其他文字到style字段'
+            )
+        prompt_parts.append("\n【输出要求】")
+        if style_output_rule:
+            prompt_parts.append(style_output_rule)
+        prompt_parts.append(
+            translate(
+                output_language,
+                'script.output_language_rule',
+                language=language_name(output_language),
+            )
+        )
+        prompt_parts.append("请直接输出完整 JSON，不要包含解释、前言或 Markdown 代码块。")
 
         return "\n".join(prompt_parts)
 
@@ -1503,6 +1703,10 @@ class ScriptAgent:
                     self._normalize_character_outfits(scene.get('character_outfits')),
                     data.get('characters') or [],
                 )
+            self._enforce_character_outfit_continuity(
+                data.get('scenes') or [],
+                data.get('characters') or [],
+            )
             data['_duration_adjustments'] = duration_adjustments
 
             return data

@@ -32,6 +32,7 @@ temp/
 # Local planning and private integration docs
 /plan.md
 /docs/
+/app/prompt_skill/nsfw/
 
 # Tests (kept local only, excluded from public repo)
 /tests/

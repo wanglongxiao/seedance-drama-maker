@@ -70,7 +70,7 @@
     "storyboardImage": "絵コンテ画像",
     "storyboardImageTitle": "🧩 絵コンテ画像生成",
     "referenceCategory1": "キャラクター/人物ライブラリと背景参考ライブラリ",
-    "referenceCategory2": "キャラクター衣装画像と背景セット状態画像",
+    "referenceCategory2": "キャラクター衣装画像・背景セット状態画像・キーアクション参考画像",
     "referenceCategory3": "各シーンの絵コンテ"
   },
   "status": {
@@ -199,6 +199,8 @@
     "variantSceneStates": "背景セット状態画像",
     "variantTypeCharacterOutfit": "キャラ衣装",
     "variantTypeSceneState": "背景セット状態",
+    "keyActionReferenceLibrary": "🎬 キーアクション参考画像",
+    "keyActionReferenceImage": "キーアクション参考画像",
     "sceneSettings": "🏞️ 背景セット設定 ({count})",
     "sceneUsage": "🏷️ 使用背景セット:",
     "referenceLibraryUnified": "🎨 統合参照画像ライブラリ",
@@ -238,7 +240,7 @@
     "autoEnterNextNewFlow": "次のステップへ自動で進みます: {step}...（新フロー：シーンごとに生成＋レビュー）",
     "autoEnterNextReferenceStage": "次の段階へ自動で進みます: {stage}...",
     "referenceCategory1Complete": "🎨 キャラクター/人物ライブラリと背景参考ライブラリが生成されました！\n\nチャット欄に入力してください：\n• \"続行\" / \"次へ\" / \"ok\" / \"go\" / \"開始\" - 次の段階へ進む\n• \"再生成\" / \"やり直し\" / \"regen\" - この段階を作り直す\nまたは任意の画像で「再生成」をクリックして微調整できます",
-    "referenceCategory2Complete": "🎨 キャラクター衣装画像と背景セット状態画像が生成されました！\n\nチャット欄に入力してください：\n• \"続行\" / \"次へ\" / \"ok\" / \"go\" / \"開始\" - 次の段階へ進む\n• \"再生成\" / \"やり直し\" / \"regen\" - この段階を作り直す\nまたは任意の画像で「再生成」をクリックして微調整できます",
+    "referenceCategory2Complete": "🎨 キャラクター衣装画像・背景セット状態画像・キーアクション参考画像が生成されました！\n\nチャット欄に入力してください：\n• \"続行\" / \"次へ\" / \"ok\" / \"go\" / \"開始\" - 次の段階へ進む\n• \"再生成\" / \"やり直し\" / \"regen\" - この段階を作り直す\nまたは任意の画像で「再生成」をクリックして微調整できます",
     "referenceCategory3Complete": "🧩 各シーンの絵コンテが生成されました！\n\nチャット欄に入力してください：\n• \"続行\" / \"次へ\" / \"ok\" / \"go\" / \"開始\" - 次のステップへ：🎬 動画生成\n• \"再生成\" / \"やり直し\" / \"regen\" - この段階を作り直す\nまたは任意の画像で「再生成」をクリックして微調整できます",
     "exitAutoRun": "⛔ 自動モードを終了しました。\n\nチャットに入力してください：\n• 「続ける」 / 「次へ」 / 「ok」 / 「go」 / 「start」 - 続行\n• 「再生成」 / 「やり直し」 / 「regen」 - 現在のステップを再生成",
     "exitAutoRunStatus": "自動モードを終了しました。チャットでコマンドを入力してください",

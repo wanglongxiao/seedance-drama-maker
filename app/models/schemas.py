@@ -101,7 +101,7 @@ class GeneratedImage(BaseModel):
     url: str
     prompt: str
     name: Optional[str] = None
-    reference_type: Optional[Literal["character", "scene", "character_outfit", "scene_state", "storyboard"]] = None
+    reference_type: Optional[Literal["character", "scene", "character_outfit", "scene_state", "key_action", "storyboard"]] = None
     variant_key: Optional[str] = None  # 装扮图/布景状态图去重键，如 "角色key::装扮key" 或 "场景key::时间key::天气key"
     source: str = "generated"
     used_original: bool = False
@@ -181,6 +181,7 @@ class VideoProject(BaseModel):
     scene_reference_images: List[GeneratedImage] = Field(default_factory=list)
     character_outfit_images: List[GeneratedImage] = Field(default_factory=list)
     scene_state_images: List[GeneratedImage] = Field(default_factory=list)
+    key_action_reference_images: List[GeneratedImage] = Field(default_factory=list)
     storyboard_images: List[GeneratedImage] = Field(default_factory=list)
     reference_image_library: Dict[str, Any] = Field(default_factory=dict)
     scene_reference_mappings: Dict[int, Dict[str, Any]] = Field(default_factory=dict)

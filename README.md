@@ -485,6 +485,13 @@ http://localhost:8888
 - README、`config.yaml`、`.env.example` 只保留占位符示例，不写入真实凭证
 - 提交前请确认测试音频、测试图片、服务日志、临时导出文件没有进入暂存区
 
+## Prompt 与 Skill 统一管理
+
+- 可复用的 LLM prompt、图像/视频生成约束、审核规则与脚本生成规则统一存放在 `app/prompt_skill/*.md`
+- 代码通过 `app.prompt_skill.load_prompt()` 或 `app.prompt_skill.render_prompt()` 读取 Markdown 模板；新增稳定 prompt 时优先新增 `.md` 文件，不再把大段规则硬编码在 Agent 中
+- Markdown 模板使用 `$变量名` 注入动态值，避免与 JSON 示例中的 `{}` 冲突
+- 仍需根据运行时条件决定是否追加的动态上下文（用户输入、语音识别结果、参考图 URL、分镜字段、角色/布景名等）保留在代码中拼接
+
 ## 开源使用规则
 
 - Copyright (c) 2026 Alex Wang

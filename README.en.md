@@ -304,7 +304,14 @@ Key rules:
 - Manual `Regenerate` clicks do not consume the automatic failure budget
 - The video prompt appends a no-background-music constraint by default unless the user explicitly requests a music style
 
-### 4.1 Project Ending And Cleanup
+### 4.1 Prompt And Skill Management
+
+- Reusable LLM prompts, image/video generation constraints, review rubrics, and script-generation rules live in `app/prompt_skill/*.md`
+- Agents load Markdown templates through `app.prompt_skill.load_prompt()` or `app.prompt_skill.render_prompt()`; stable prompt text should be added as `.md` files instead of being hard-coded in Agent classes
+- Markdown templates use `$variable` placeholders so JSON examples can keep literal `{}` braces without escaping
+- Runtime context such as user input, ASR text, reference image URLs, scene fields, character names, and backdrop names is still assembled in code
+
+### 4.2 Project Ending And Cleanup
 
 When the workflow enters scene-video generation, the system starts comic PDF generation in parallel:
 

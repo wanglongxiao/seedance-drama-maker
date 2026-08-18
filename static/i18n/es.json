@@ -70,7 +70,7 @@
     "storyboardImage": "Storyboard",
     "storyboardImageTitle": "🧩 Imagenes del storyboard",
     "referenceCategory1": "Galería de personajes y de referencias de escenarios",
-    "referenceCategory2": "Imágenes de vestuario y estado de escenografía",
+    "referenceCategory2": "Imágenes de vestuario, estado de escenografía y referencia de acción clave",
     "referenceCategory3": "Storyboards de cada escena"
   },
   "status": {
@@ -199,6 +199,8 @@
     "variantSceneStates": "Imagenes de estado de escenografía",
     "variantTypeCharacterOutfit": "Vestuario",
     "variantTypeSceneState": "Estado de escenografía",
+    "keyActionReferenceLibrary": "🎬 Referencias de acción clave",
+    "keyActionReferenceImage": "Referencia de acción clave",
     "sceneSettings": "🏞️ Diseno de escenografia ({count})",
     "sceneUsage": "🏷️ Escenografia usada:",
     "referenceLibraryUnified": "🎨 Biblioteca unificada de referencias",
@@ -238,7 +240,7 @@
     "autoEnterNextNewFlow": "Entrando automáticamente al siguiente paso: {step}... (nuevo flujo: generar y revisar escena por escena)",
     "autoEnterNextReferenceStage": "Entrando automáticamente a la siguiente etapa: {stage}...",
     "referenceCategory1Complete": "🎨 ¡La galería de personajes y la galería de referencias de escenarios están listas!\n\nEscribe en el chat:\n• \"continuar\" / \"siguiente\" / \"ok\" / \"go\" / \"empezar\" - avanzar a la siguiente etapa\n• \"regenerar\" / \"rehacer\" / \"regen\" - rehacer esta etapa\no haz clic en \"Regenerar\" en cualquier imagen para ajustarla",
-    "referenceCategory2Complete": "🎨 ¡Las imágenes de vestuario de personajes y de estado de escenografía están listas!\n\nEscribe en el chat:\n• \"continuar\" / \"siguiente\" / \"ok\" / \"go\" / \"empezar\" - avanzar a la siguiente etapa\n• \"regenerar\" / \"rehacer\" / \"regen\" - rehacer esta etapa\no haz clic en \"Regenerar\" en cualquier imagen para ajustarla",
+    "referenceCategory2Complete": "🎨 ¡Las imágenes de vestuario de personajes, de estado de escenografía y de referencia de acción clave están listas!\n\nEscribe en el chat:\n• \"continuar\" / \"siguiente\" / \"ok\" / \"go\" / \"empezar\" - avanzar a la siguiente etapa\n• \"regenerar\" / \"rehacer\" / \"regen\" - rehacer esta etapa\no haz clic en \"Regenerar\" en cualquier imagen para ajustarla",
     "referenceCategory3Complete": "🧩 ¡Los storyboards de cada escena están listos!\n\nEscribe en el chat:\n• \"continuar\" / \"siguiente\" / \"ok\" / \"go\" / \"empezar\" - siguiente paso: 🎬 Generación de video\n• \"regenerar\" / \"rehacer\" / \"regen\" - rehacer esta etapa\no haz clic en \"Regenerar\" en cualquier imagen para ajustarla",
     "exitAutoRun": "⛔ Se salió del modo automático.\n\nEscribe en el chat:\n• \"continuar\" / \"siguiente\" / \"ok\" / \"go\" / \"start\" - continuar\n• \"regenerar\" / \"rehacer\" / \"regen\" - regenerar el paso actual",
     "exitAutoRunStatus": "Se salió del modo automático. Introduce un comando en el chat para continuar",

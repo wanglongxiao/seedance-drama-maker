@@ -10,6 +10,7 @@ from collections import OrderedDict
 from typing import Dict, List, Optional, Any, Callable, Awaitable
 from fastapi.encoders import jsonable_encoder
 from app.config import config
+from app.prompt_skill import nsfw_content_requested, private_nsfw_enabled
 from app.services.asr_service import asr_service
 from app.utils.i18n import normalize_locale, translate
 from app.utils.logger import get_logger
@@ -651,16 +652,18 @@ class MainAgent:
         character_count = len(list((getattr(getattr(project, "script", None), "characters", None) or [])[:character_limit]))
         scene_count = len(self._extract_scene_reference_definitions(getattr(project, "script", None), scene_limit))
         scene_story_count = len(getattr(getattr(project, "script", None), "scenes", None) or [])
-        variant_plan = self._plan_scene_variant_assets(project) if getattr(project, "script", None) else {"outfits": [], "scene_states": []}
+        variant_plan = self._plan_scene_variant_assets(project) if getattr(project, "script", None) else {"outfits": [], "scene_states": [], "key_actions": []}
         outfit_count = len(variant_plan.get("outfits", []))
         scene_state_count = len(variant_plan.get("scene_states", []))
+        key_action_count = len(variant_plan.get("key_actions", []))
         return {
             "characters": character_count,
             "scenes": scene_count,
             "character_outfits": outfit_count,
             "scene_states": scene_state_count,
+            "key_actions": key_action_count,
             "storyboards": scene_story_count,
-            "total": character_count + scene_count + outfit_count + scene_state_count + scene_story_count,
+            "total": character_count + scene_count + outfit_count + scene_state_count + key_action_count + scene_story_count,
         }
 
     def _is_reference_library_ready_for_confirmation(self, project: VideoProject) -> bool:
@@ -668,7 +671,7 @@ class MainAgent:
         if session_slots is not None:
             return all(
                 image is not None
-                for key in ("characters", "scenes", "character_outfits", "scene_states", "storyboards")
+                for key in ("characters", "scenes", "character_outfits", "scene_states", "key_actions", "storyboards")
                 for image in session_slots.get(key, [])
             )
 
@@ -677,19 +680,21 @@ class MainAgent:
         actual_scene_count = len(getattr(project, "scene_reference_images", []) or [])
         actual_outfit_count = len(getattr(project, "character_outfit_images", []) or [])
         actual_scene_state_count = len(getattr(project, "scene_state_images", []) or [])
+        actual_key_action_count = len(getattr(project, "key_action_reference_images", []) or [])
         actual_storyboard_count = len(getattr(project, "storyboard_images", []) or [])
         return (
             actual_character_count >= expected["characters"]
             and actual_scene_count >= expected["scenes"]
             and actual_outfit_count >= expected["character_outfits"]
             and actual_scene_state_count >= expected["scene_states"]
+            and actual_key_action_count >= expected["key_actions"]
             and actual_storyboard_count >= expected["storyboards"]
         )
 
     def _reference_stage_has_category2(self, project: VideoProject) -> bool:
-        """判断分类2（角色装扮图/布景状态图）是否存在。"""
+        """判断分类2（角色装扮图/布景状态图/关键动作参考图）是否存在。"""
         expected = self._expected_reference_counts(project)
-        return (expected["character_outfits"] + expected["scene_states"]) > 0
+        return (expected["character_outfits"] + expected["scene_states"] + expected["key_actions"]) > 0
 
     def _is_reference_stage_ready(self, project: VideoProject, stage: str) -> bool:
         """按子阶段判定是否就绪：category1=角色+场景；category2=装扮+状态；category3=故事版。"""
@@ -726,6 +731,10 @@ class MainAgent:
                 str(task.get("dedup_key") or "")
                 for task in (variant_plan.get("scene_states", []) or [])
             }
+            expected_key_action_keys = {
+                str(task.get("dedup_key") or "")
+                for task in (variant_plan.get("key_actions", []) or [])
+            }
             actual_outfit_keys = {
                 str(getattr(image, "variant_key", "") or "")
                 for image in (getattr(project, "character_outfit_images", []) or [])
@@ -734,9 +743,14 @@ class MainAgent:
                 str(getattr(image, "variant_key", "") or "")
                 for image in (getattr(project, "scene_state_images", []) or [])
             }
+            actual_key_action_keys = {
+                str(getattr(image, "variant_key", "") or "")
+                for image in (getattr(project, "key_action_reference_images", []) or [])
+            }
             return (
                 expected_outfit_keys.issubset(actual_outfit_keys)
                 and expected_scene_state_keys.issubset(actual_scene_state_keys)
+                and expected_key_action_keys.issubset(actual_key_action_keys)
             )
         if stage == "category3":
             expected_scene_numbers = {
@@ -761,8 +775,8 @@ class MainAgent:
             item = image.model_dump()
             if reference_type == "storyboard":
                 slot_index = max(0, int(getattr(image, "scene_number", 1) or 1) - 1)
-            elif reference_type in ("character_outfit", "scene_state"):
-                # 装扮图/布景状态图为去重复用列表，直接按顺序索引
+            elif reference_type in ("character_outfit", "scene_state", "key_action"):
+                # 装扮图/布景状态图/关键动作参考图为去重复用列表，直接按顺序索引
                 slot_index = fallback_index
             else:
                 slot_index = self._get_reference_slot_index(
@@ -795,6 +809,7 @@ class MainAgent:
                 ),
                 None,
             )
+            key_action = self._find_key_action_asset_for_scene(project, scene_number)
             scene_feature_names: List[str] = []
             seen_scene_feature_keys = set()
             for part in re.split(r"[、,，/|]+", str(getattr(scene, "scene_name", "") or "")):
@@ -825,6 +840,10 @@ class MainAgent:
                     for image in base_assets
                     if getattr(image, "reference_type", None) in ("scene", "scene_state")
                 ],
+                "key_action": (
+                    {"name": key_action.name, "asset_id": key_action.asset_id, "url": key_action.url}
+                    if key_action else None
+                ),
                 "storyboard": (
                     {"name": storyboard.name, "asset_id": storyboard.asset_id, "url": storyboard.url}
                     if storyboard else None
@@ -843,12 +862,14 @@ class MainAgent:
         scene_images = list(getattr(project, "scene_reference_images", []) or [])
         outfit_images = list(getattr(project, "character_outfit_images", []) or [])
         scene_state_images = list(getattr(project, "scene_state_images", []) or [])
+        key_action_images = list(getattr(project, "key_action_reference_images", []) or [])
         storyboard_images = list(getattr(project, "storyboard_images", []) or [])
-        images = character_images + scene_images + outfit_images + scene_state_images + storyboard_images
+        images = character_images + scene_images + outfit_images + scene_state_images + key_action_images + storyboard_images
         serialized_character_images = self._serialize_reference_images(project, character_images, "character")
         serialized_scene_images = self._serialize_reference_images(project, scene_images, "scene")
         serialized_outfit_images = self._serialize_reference_images(project, outfit_images, "character_outfit")
         serialized_scene_state_images = self._serialize_reference_images(project, scene_state_images, "scene_state")
+        serialized_key_action_images = self._serialize_reference_images(project, key_action_images, "key_action")
         serialized_storyboard_images = self._serialize_reference_images(project, storyboard_images, "storyboard")
         expected_counts = self._expected_reference_counts(project)
         resolved_message = message
@@ -863,18 +884,21 @@ class MainAgent:
                 + serialized_scene_images
                 + serialized_outfit_images
                 + serialized_scene_state_images
+                + serialized_key_action_images
                 + serialized_storyboard_images
             ),
             "character_images": serialized_character_images,
             "scene_images": serialized_scene_images,
             "character_outfit_images": serialized_outfit_images,
             "scene_state_images": serialized_scene_state_images,
+            "key_action_reference_images": serialized_key_action_images,
             "storyboard_images": serialized_storyboard_images,
             "library": {
                 "characters": serialized_character_images,
                 "scenes": serialized_scene_images,
                 "character_outfits": serialized_outfit_images,
                 "scene_states": serialized_scene_state_images,
+                "key_actions": serialized_key_action_images,
                 "storyboards": serialized_storyboard_images,
             },
             "scene_reference_mappings": self._build_scene_reference_mappings(project),
@@ -887,6 +911,7 @@ class MainAgent:
             "expected_scene_count": expected_counts["scenes"],
             "expected_character_outfit_count": expected_counts["character_outfits"],
             "expected_scene_state_count": expected_counts["scene_states"],
+            "expected_key_action_count": expected_counts["key_actions"],
             "expected_storyboard_count": expected_counts["storyboards"],
             "message": resolved_message,
         }
@@ -899,22 +924,26 @@ class MainAgent:
         storyboard_images: List[Optional[GeneratedImage]],
         outfit_images: Optional[List[Optional[GeneratedImage]]] = None,
         scene_state_images: Optional[List[Optional[GeneratedImage]]] = None,
+        key_action_images: Optional[List[Optional[GeneratedImage]]] = None,
     ) -> None:
         completed_character_images = [image for image in character_images if image is not None]
         completed_scene_images = [image for image in scene_images if image is not None]
         completed_storyboards = [image for image in storyboard_images if image is not None]
         completed_outfit_images = [image for image in (outfit_images or []) if image is not None]
         completed_scene_state_images = [image for image in (scene_state_images or []) if image is not None]
+        completed_key_action_images = [image for image in (key_action_images or []) if image is not None]
         project.character_reference_images = completed_character_images
         project.scene_reference_images = completed_scene_images
         project.character_outfit_images = completed_outfit_images
         project.scene_state_images = completed_scene_state_images
+        project.key_action_reference_images = completed_key_action_images
         project.storyboard_images = completed_storyboards
         project.reference_image_library = {
             "characters": completed_character_images,
             "scenes": completed_scene_images,
             "character_outfits": completed_outfit_images,
             "scene_states": completed_scene_state_images,
+            "key_actions": completed_key_action_images,
             "storyboards": completed_storyboards,
         }
         project.scene_reference_mappings = self._build_scene_reference_mappings(project)
@@ -923,6 +952,7 @@ class MainAgent:
             + completed_scene_images
             + completed_outfit_images
             + completed_scene_state_images
+            + completed_key_action_images
             + completed_storyboards
         )
         project.reference_image = (
@@ -943,12 +973,14 @@ class MainAgent:
         storyboard_count: int,
         outfit_count: int = 0,
         scene_state_count: int = 0,
+        key_action_count: int = 0,
     ) -> Dict[str, List[Optional[GeneratedImage]]]:
         slots = {
             "characters": [None] * max(0, character_count),
             "scenes": [None] * max(0, scene_count),
             "character_outfits": [None] * max(0, outfit_count),
             "scene_states": [None] * max(0, scene_state_count),
+            "key_actions": [None] * max(0, key_action_count),
             "storyboards": [None] * max(0, storyboard_count),
         }
         self._reference_generation_slots[project.project_id] = slots
@@ -979,7 +1011,7 @@ class MainAgent:
             index = self._get_reference_slot_index(project, "scene", getattr(image, "name", ""))
             put("scenes", index, image)
 
-        variant_plan = self._plan_scene_variant_assets(project) if getattr(project, "script", None) else {"outfits": [], "scene_states": []}
+        variant_plan = self._plan_scene_variant_assets(project) if getattr(project, "script", None) else {"outfits": [], "scene_states": [], "key_actions": []}
         outfit_index_by_key = {
             str(task.get("dedup_key") or ""): index
             for index, task in enumerate(variant_plan.get("outfits", []) or [])
@@ -987,6 +1019,10 @@ class MainAgent:
         scene_state_index_by_key = {
             str(task.get("dedup_key") or ""): index
             for index, task in enumerate(variant_plan.get("scene_states", []) or [])
+        }
+        key_action_index_by_key = {
+            str(task.get("dedup_key") or ""): index
+            for index, task in enumerate(variant_plan.get("key_actions", []) or [])
         }
 
         for index, image in enumerate(getattr(project, "character_outfit_images", []) or []):
@@ -996,6 +1032,10 @@ class MainAgent:
         for index, image in enumerate(getattr(project, "scene_state_images", []) or []):
             variant_key = str(getattr(image, "variant_key", "") or "")
             put("scene_states", scene_state_index_by_key.get(variant_key, index), image)
+
+        for index, image in enumerate(getattr(project, "key_action_reference_images", []) or []):
+            variant_key = str(getattr(image, "variant_key", "") or "")
+            put("key_actions", key_action_index_by_key.get(variant_key, index), image)
 
         for image in getattr(project, "storyboard_images", []) or []:
             index = int(getattr(image, "scene_number", 0) or 0) - 1
@@ -1015,6 +1055,7 @@ class MainAgent:
         storyboard_count: int,
         outfit_count: int = 0,
         scene_state_count: int = 0,
+        key_action_count: int = 0,
     ) -> Dict[str, List[Optional[GeneratedImage]]]:
         """分阶段生成复用同一 session：已存在则直接返回，避免重建清空前阶段成果。"""
         existing = self._reference_generation_slots.get(project.project_id)
@@ -1028,6 +1069,7 @@ class MainAgent:
             storyboard_count=storyboard_count,
             outfit_count=outfit_count,
             scene_state_count=scene_state_count,
+            key_action_count=key_action_count,
         )
 
     def _finish_reference_generation_session(self, project: VideoProject) -> None:
@@ -1053,6 +1095,27 @@ class MainAgent:
 
     def _build_reference_asset_task_key(self, project_id: str, reference_type: str, asset_name: str) -> str:
         return f"{project_id}:{reference_type}:{self._normalize_name_key(asset_name)}"
+
+    def _nsfw_enhancement_active(self, project: VideoProject) -> bool:
+        """Private NSFW enhancement is opt-in and additionally gated by project content."""
+        if not private_nsfw_enabled():
+            return False
+        script = getattr(project, "script", None)
+        trigger_values: List[Any] = [
+            getattr(project, "user_input", ""),
+            getattr(project, "combined_input", ""),
+            getattr(script, "tone", ""),
+            getattr(script, "background", ""),
+        ]
+        for scene in getattr(script, "scenes", None) or []:
+            trigger_values.extend([
+                getattr(scene, "description", ""),
+                getattr(scene, "dialogue", ""),
+                getattr(scene, "character_description", ""),
+                getattr(scene, "mood", ""),
+                getattr(scene, "character_outfits", None),
+            ])
+        return nsfw_content_requested(*trigger_values)
 
     def _plan_scene_variant_assets(
         self,
@@ -1081,9 +1144,18 @@ class MainAgent:
 
         outfit_tasks: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         scene_state_tasks: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        key_action_tasks: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        nsfw_active = self._nsfw_enhancement_active(project)
 
         for scene in getattr(script, "scenes", None) or []:
             scene_number = max(1, int(getattr(scene, "scene_number", 1) or 1))
+            if nsfw_active:
+                dedup_key = f"scene_{scene_number:03d}::key_action"
+                key_action_tasks[dedup_key] = {
+                    "dedup_key": dedup_key,
+                    "scene": scene,
+                    "scene_number": scene_number,
+                }
             outfits = getattr(scene, "character_outfits", None) or {}
             for character_name, outfit in outfits.items():
                 outfit_desc = str(outfit or "").strip()
@@ -1140,6 +1212,7 @@ class MainAgent:
         return {
             "outfits": list(outfit_tasks.values()),
             "scene_states": list(scene_state_tasks.values()),
+            "key_actions": list(key_action_tasks.values()),
         }
 
     def _find_outfit_asset_for_scene(
@@ -1167,6 +1240,82 @@ class MainAgent:
             if getattr(image, "variant_key", None) == dedup_key:
                 return image
         return None
+
+    def _select_key_action_reference_assets_for_scene(self, project: VideoProject, scene) -> List[GeneratedImage]:
+        """关键动作参考图专用参考资产选择。
+
+        优先级固定为：
+        1. 角色装扮图
+        2. 布景状态图
+        3. 角色主图（仅在对应装扮图缺失时兜底）
+        4. 布景主图（仅在对应状态图缺失时兜底）
+        """
+        preferred_assets: List[GeneratedImage] = []
+        fallback_assets: List[GeneratedImage] = []
+
+        outfits = getattr(scene, "character_outfits", None) or {}
+        outfit_key_by_char = {
+            self._normalize_name_key(name): str(outfit or "").strip()
+            for name, outfit in outfits.items()
+            if str(outfit or "").strip()
+        }
+        character_ref_map = {
+            self._normalize_name_key(getattr(image, "name", "")): image
+            for image in (getattr(project, "character_reference_images", []) or [])
+            if self._normalize_name_key(getattr(image, "name", ""))
+        }
+        present_characters = [
+            self._normalize_name_key(name)
+            for name in (getattr(scene, "characters_present", None) or [])
+            if str(name or "").strip()
+        ]
+        for character_key in present_characters:
+            outfit_desc = outfit_key_by_char.get(character_key, "")
+            outfit_image = self._find_outfit_asset_for_scene(project, character_key, outfit_desc) if outfit_desc else None
+            if outfit_image is not None:
+                preferred_assets.append(outfit_image)
+                continue
+            base_character_image = character_ref_map.get(character_key)
+            if base_character_image is not None:
+                fallback_assets.append(base_character_image)
+
+        scene_ref_map = {
+            self._normalize_name_key(getattr(image, "name", "")): image
+            for image in (getattr(project, "scene_reference_images", []) or [])
+            if self._normalize_name_key(getattr(image, "name", ""))
+        }
+        raw_scene_name = str(getattr(scene, "scene_name", "") or "")
+        scene_name_keys = [
+            self._normalize_name_key(part)
+            for part in re.split(r"[、,，/|]+", raw_scene_name)
+            if str(part or "").strip()
+        ]
+        scene_tod = str(getattr(scene, "time_of_day", "") or "").strip()
+        scene_weather = str(getattr(scene, "weather", "") or "").strip()
+        scene_state = str(getattr(scene, "scene_state", "") or "").strip()
+        for scene_key in scene_name_keys:
+            state_image = self._find_scene_state_asset(project, scene_key, scene_state, scene_tod, scene_weather)
+            if state_image is not None:
+                preferred_assets.append(state_image)
+                continue
+            base_scene_image = scene_ref_map.get(scene_key)
+            if base_scene_image is not None:
+                fallback_assets.append(base_scene_image)
+
+        if not preferred_assets and not fallback_assets:
+            fallback_assets.extend((getattr(project, "scene_reference_images", []) or [])[:2])
+        if not preferred_assets and not fallback_assets:
+            fallback_assets.extend((getattr(project, "character_reference_images", []) or [])[:2])
+
+        selected: List[GeneratedImage] = []
+        seen_keys = set()
+        for image in preferred_assets + fallback_assets:
+            unique_key = str(getattr(image, "asset_id", "") or getattr(image, "url", "") or "")
+            if not unique_key or unique_key in seen_keys:
+                continue
+            seen_keys.add(unique_key)
+            selected.append(image)
+        return selected
 
     def _select_base_reference_assets_for_scene(self, project: VideoProject, scene) -> List[GeneratedImage]:
         selected: List[GeneratedImage] = []
@@ -1228,9 +1377,25 @@ class MainAgent:
                 return image
         return None
 
+    def _find_key_action_asset_for_scene(
+        self,
+        project: VideoProject,
+        scene_number: int,
+    ) -> Optional[GeneratedImage]:
+        dedup_key = f"scene_{max(1, int(scene_number or 1)):03d}::key_action"
+        for image in getattr(project, "key_action_reference_images", []) or []:
+            if getattr(image, "variant_key", None) == dedup_key:
+                return image
+            if int(getattr(image, "scene_number", 0) or 0) == scene_number:
+                return image
+        return None
+
     def _select_reference_assets_for_scene(self, project: VideoProject, scene) -> List[GeneratedImage]:
         selected = self._select_base_reference_assets_for_scene(project, scene)
         scene_number = max(1, int(getattr(scene, "scene_number", 1) or 1))
+        key_action_image = self._find_key_action_asset_for_scene(project, scene_number)
+        if key_action_image is not None:
+            selected.append(key_action_image)
         scene_level_image = self._get_scene_level_reference_asset(project, scene_number)
         if scene_level_image is not None:
             selected.append(scene_level_image)
@@ -1675,6 +1840,9 @@ class MainAgent:
             project.images = (
                 list(getattr(project, "character_reference_images", []) or [])
                 + list(getattr(project, "scene_reference_images", []) or [])
+                + list(getattr(project, "character_outfit_images", []) or [])
+                + list(getattr(project, "scene_state_images", []) or [])
+                + list(getattr(project, "key_action_reference_images", []) or [])
                 + list(getattr(project, "storyboard_images", []) or [])
             )
             project.current_step = "images_generated"
@@ -2518,6 +2686,9 @@ class MainAgent:
         project.images = []
         project.character_reference_images = []
         project.scene_reference_images = []
+        project.character_outfit_images = []
+        project.scene_state_images = []
+        project.key_action_reference_images = []
         project.storyboard_images = []
         project.reference_image_library = {}
         project.scene_reference_mappings = {}
@@ -2569,11 +2740,13 @@ class MainAgent:
         variant_plan = self._plan_scene_variant_assets(project)
         outfit_tasks_plan = variant_plan["outfits"]
         scene_state_tasks_plan = variant_plan["scene_states"]
+        key_action_tasks_plan = variant_plan["key_actions"]
 
         logger.info(
             f"Reference library target for project {project.project_id}: "
             f"{len(target_characters)} character refs, {len(scene_definitions)} scene refs, "
             f"{len(outfit_tasks_plan)} outfit refs, {len(scene_state_tasks_plan)} scene-state refs, "
+            f"{len(key_action_tasks_plan)} key-action refs, "
             f"max_concurrency={reference_max_concurrency}"
         )
 
@@ -2584,11 +2757,13 @@ class MainAgent:
             storyboard_count=len(getattr(project.script, "scenes", None) or []),
             outfit_count=len(outfit_tasks_plan),
             scene_state_count=len(scene_state_tasks_plan),
+            key_action_count=len(key_action_tasks_plan),
         )
         generated_character_images = session_slots["characters"]
         generated_scene_images = session_slots["scenes"]
         generated_outfit_images = session_slots["character_outfits"]
         generated_scene_state_images = session_slots["scene_states"]
+        generated_key_action_images = session_slots["key_actions"]
         generated_storyboard_images = session_slots["storyboards"]
         semaphore = asyncio.Semaphore(reference_max_concurrency)
         progress_lock = asyncio.Lock()
@@ -2601,6 +2776,7 @@ class MainAgent:
                 generated_storyboard_images,
                 outfit_images=generated_outfit_images,
                 scene_state_images=generated_scene_state_images,
+                key_action_images=generated_key_action_images,
             )
 
         async def finalize_generated_image(
@@ -2618,6 +2794,8 @@ class MainAgent:
                     generated_outfit_images[index] = stored_image
                 elif category == "scene_state":
                     generated_scene_state_images[index] = stored_image
+                elif category == "key_action":
+                    generated_key_action_images[index] = stored_image
                 else:
                     generated_storyboard_images[index] = stored_image
                 _sync_all()
@@ -2768,12 +2946,45 @@ class MainAgent:
                 stored.variant_key = task["dedup_key"]
             await finalize_generated_image("scene_state", index, stored)
 
+        async def generate_key_action_job(index: int, task: Dict[str, Any]) -> None:
+            self._raise_if_project_ended(project)
+            if index < len(generated_key_action_images) and generated_key_action_images[index] is not None:
+                logger.info(f"Skipping existing key-action reference slot {index + 1} for project {project.project_id}")
+                return
+            scene = task["scene"]
+            reference_images = self._select_key_action_reference_assets_for_scene(project, scene)
+            async with semaphore:
+                generated = await run_generation(
+                    self.image_agent.generate_key_action_reference_image,
+                    scene=scene,
+                    script=project.script,
+                    reference_images=reference_images,
+                    user_style_info=user_style_info,
+                    aspect_ratio=aspect_ratio,
+                )
+                generated.variant_key = task["dedup_key"]
+                stored = await self._store_reference_asset_async(
+                    project,
+                    generated,
+                    "key_action",
+                    generated.name or f"scene_{index + 1:02d}_key_action",
+                    index,
+                )
+                stored.variant_key = task["dedup_key"]
+            await finalize_generated_image("key_action", index, stored)
+
         async def generate_storyboard_job(index: int, scene) -> None:
             self._raise_if_project_ended(project)
             if index < len(generated_storyboard_images) and generated_storyboard_images[index] is not None:
                 logger.info(f"Skipping existing storyboard slot {index + 1} for project {project.project_id}")
                 return
             base_reference_images = self._select_base_reference_assets_for_scene(project, scene)
+            key_action_image = self._find_key_action_asset_for_scene(
+                project,
+                max(1, int(getattr(scene, "scene_number", index + 1) or index + 1)),
+            )
+            if key_action_image is not None:
+                base_reference_images.append(key_action_image)
             async with semaphore:
                 storyboard = await self._generate_storyboard_with_review(
                     project=project,
@@ -2852,12 +3063,17 @@ class MainAgent:
                     asyncio.create_task(generate_scene_state_job(index, task))
                     for index, task in enumerate(scene_state_tasks_plan)
                     if not (index < len(generated_scene_state_images) and generated_scene_state_images[index] is not None)
+                ] + [
+                    asyncio.create_task(generate_key_action_job(index, task))
+                    for index, task in enumerate(key_action_tasks_plan)
+                    if not (index < len(generated_key_action_images) and generated_key_action_images[index] is not None)
                 ]
                 logger.info(
                     f"Reference category2 stage for project {project.project_id}: "
                     f"outfits_total={len(outfit_tasks_plan)}, scene_states_total={len(scene_state_tasks_plan)}, "
+                    f"key_actions_total={len(key_action_tasks_plan)}, "
                     f"pending={len(variant_tasks)}, "
-                    f"skipped={len(outfit_tasks_plan) + len(scene_state_tasks_plan) - len(variant_tasks)}, "
+                    f"skipped={len(outfit_tasks_plan) + len(scene_state_tasks_plan) + len(key_action_tasks_plan) - len(variant_tasks)}, "
                     f"max_concurrency={reference_max_concurrency}"
                 )
                 if variant_tasks:
@@ -2905,6 +3121,7 @@ class MainAgent:
         project.scene_reference_images = []
         project.character_outfit_images = []
         project.scene_state_images = []
+        project.key_action_reference_images = []
         project.storyboard_images = []
         project.reference_image_library = {}
         project.scene_reference_mappings = {}
@@ -3180,6 +3397,7 @@ class MainAgent:
                     session_slots.get("storyboards", []),
                     outfit_images=session_slots.get("character_outfits", []),
                     scene_state_images=session_slots.get("scene_states", []),
+                    key_action_images=session_slots.get("key_actions", []),
                 )
             else:
                 image_list[image_index] = stored
@@ -3193,6 +3411,7 @@ class MainAgent:
                     + list(getattr(project, "scene_reference_images", []) or [])
                     + list(getattr(project, "character_outfit_images", []) or [])
                     + list(getattr(project, "scene_state_images", []) or [])
+                    + list(getattr(project, "key_action_reference_images", []) or [])
                     + list(getattr(project, "storyboard_images", []) or [])
                 )
                 project.reference_image = (
@@ -3224,22 +3443,23 @@ class MainAgent:
         variant_key: str,
         feedback: str = "用户要求重新生成",
     ) -> GeneratedImage:
-        """重新生成指定的角色装扮图或布景状态图（按 variant_key 定位并保留去重复用）。"""
+        """重新生成指定的角色装扮图、布景状态图或关键动作参考图。"""
         self._raise_if_project_ended(project)
         reference_type = str(reference_type or "").strip().lower()
         variant_key = str(variant_key or "").strip()
         if reference_type == "scene_state":
             reference_type = "scene_state"
-        if reference_type not in {"character_outfit", "scene_state"}:
+        if reference_type not in {"character_outfit", "scene_state", "key_action"}:
             raise ValueError(self._t(project, "error.unsupported_reference_type", reference_type=reference_type or "unknown"))
         if not variant_key:
             raise ValueError(self._t(project, "error.reference_asset_name_required"))
 
-        image_list = (
-            project.character_outfit_images
-            if reference_type == "character_outfit"
-            else project.scene_state_images
-        )
+        if reference_type == "character_outfit":
+            image_list = project.character_outfit_images
+        elif reference_type == "scene_state":
+            image_list = project.scene_state_images
+        else:
+            image_list = project.key_action_reference_images
         target_index = next(
             (
                 index for index, image in enumerate(image_list)
@@ -3299,7 +3519,7 @@ class MainAgent:
                 stored = await self._store_reference_asset_async(
                     project, generated, "character_outfit", generated.name or f"outfit_{target_index + 1:02d}", target_index
                 )
-            else:
+            elif reference_type == "scene_state":
                 task = next(
                     (item for item in variant_plan.get("scene_states", []) if item["dedup_key"] == variant_key),
                     None,
@@ -3333,6 +3553,29 @@ class MainAgent:
                 stored = await self._store_reference_asset_async(
                     project, generated, "scene_state", generated.name or f"scene_state_{target_index + 1:02d}", target_index
                 )
+            else:
+                task = next(
+                    (item for item in variant_plan.get("key_actions", []) if item["dedup_key"] == variant_key),
+                    None,
+                )
+                if task is None:
+                    raise ValueError(
+                        self._t(project, "error.reference_asset_not_found", reference_type=reference_type, name=variant_key)
+                    )
+                scene = task["scene"]
+                reference_images = self._select_key_action_reference_assets_for_scene(project, scene)
+                generated = await run_generation(
+                    self.image_agent.generate_key_action_reference_image,
+                    scene=scene,
+                    script=project.script,
+                    reference_images=reference_images,
+                    user_style_info=user_style_info,
+                    aspect_ratio=aspect_ratio,
+                )
+                generated.variant_key = variant_key
+                stored = await self._store_reference_asset_async(
+                    project, generated, "key_action", generated.name or f"key_action_{target_index + 1:02d}", target_index
+                )
             stored.variant_key = variant_key
 
             if reference_type == "character_outfit":
@@ -3340,11 +3583,19 @@ class MainAgent:
                 if 0 <= target_index < len(outfit_images):
                     outfit_images[target_index] = stored
                 scene_state_images = list(getattr(project, "scene_state_images", []) or [])
-            else:
+                key_action_images = list(getattr(project, "key_action_reference_images", []) or [])
+            elif reference_type == "scene_state":
                 scene_state_images = list(getattr(project, "scene_state_images", []) or [])
                 if 0 <= target_index < len(scene_state_images):
                     scene_state_images[target_index] = stored
                 outfit_images = list(getattr(project, "character_outfit_images", []) or [])
+                key_action_images = list(getattr(project, "key_action_reference_images", []) or [])
+            else:
+                key_action_images = list(getattr(project, "key_action_reference_images", []) or [])
+                if 0 <= target_index < len(key_action_images):
+                    key_action_images[target_index] = stored
+                outfit_images = list(getattr(project, "character_outfit_images", []) or [])
+                scene_state_images = list(getattr(project, "scene_state_images", []) or [])
 
             self._sync_reference_library_state(
                 project,
@@ -3353,6 +3604,7 @@ class MainAgent:
                 list(getattr(project, "storyboard_images", []) or []),
                 outfit_images=outfit_images,
                 scene_state_images=scene_state_images,
+                key_action_images=key_action_images,
             )
             return stored
 
@@ -3490,6 +3742,9 @@ class MainAgent:
             self._raise_if_project_ended(project)
             index = scene_number - 1 if scene_number >= 1 else 0
             base_reference_images = self._select_base_reference_assets_for_scene(project, target_scene)
+            key_action_image = self._find_key_action_asset_for_scene(project, scene_number)
+            if key_action_image is not None:
+                base_reference_images.append(key_action_image)
             user_style_info = getattr(project, "combined_input", None)
             aspect_ratio = getattr(project, "aspect_ratio", None)
 
@@ -3526,6 +3781,7 @@ class MainAgent:
                 storyboards,
                 outfit_images=list(getattr(project, "character_outfit_images", []) or []),
                 scene_state_images=list(getattr(project, "scene_state_images", []) or []),
+                key_action_images=list(getattr(project, "key_action_reference_images", []) or []),
             )
             return stored
 

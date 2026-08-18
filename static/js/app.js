@@ -86,7 +86,7 @@ function getPersistedProjectId() {
         return null;
     }
 }
-const I18N_VERSION = '20260818d';
+const I18N_VERSION = '20260818f';
 const FRONTEND_CONFIG_VERSION = '20260811c';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
@@ -506,6 +506,8 @@ function rerenderPreviewCards() {
     if (scriptCard) scriptCard.remove();
     const referenceCard = document.getElementById('reference-image-card');
     if (referenceCard) referenceCard.remove();
+    const keyActionReferenceCard = document.getElementById('key-action-reference-card');
+    if (keyActionReferenceCard) keyActionReferenceCard.remove();
     const storyboardCard = document.getElementById('storyboard-card');
     if (storyboardCard) storyboardCard.remove();
     const comicPdfCard = document.getElementById('comic-pdf-card');
@@ -2005,6 +2007,9 @@ function clearPreviewFromStep(targetStep) {
                 break;
             case 'reference_image':
                 document.getElementById('reference-image-card')?.remove();
+                document.getElementById('variant-assets-card')?.remove();
+                document.getElementById('key-action-reference-card')?.remove();
+                document.getElementById('storyboard-card')?.remove();
                 break;
             case 'videos':
                 document.querySelectorAll('.video-item[id^="video-item-"]').forEach(item => item.remove());
@@ -3495,7 +3500,9 @@ function displayReferenceImage(output) {
 
     // 在布景参考图库之后渲染“各分镜-角色装扮-布景状态”模块。
     displayVariantAssets(output);
-    // 在角色装扮/布景状态模块之后、分镜视频之前渲染“各分镜故事版”模块。
+    // 在角色装扮/布景状态模块之后、分镜故事版之前渲染“关键动作参考图”模块。
+    displayKeyActionReferenceImages(output);
+    // 在关键动作参考图之后、分镜视频之前渲染“各分镜故事版”模块。
     displayStoryboards(output);
 
     contentDisplay.scrollTop = contentDisplay.scrollHeight;
@@ -3610,6 +3617,7 @@ function finishReferenceAssetRegeneration(referenceAssetKey, force = false) {
             // 仍在等待 WebSocket 推送结果，保持锁定，仅刷新状态。
             refreshReferenceImageActionState();
             refreshVariantAssetsActionState();
+            refreshKeyActionReferenceActionState();
             refreshStoryboardActionState();
             return;
         }
@@ -3619,6 +3627,7 @@ function finishReferenceAssetRegeneration(referenceAssetKey, force = false) {
     referenceImageRegenerating = regeneratingReferenceAssetKeys.size > 0;
     refreshReferenceImageActionState();
     refreshVariantAssetsActionState();
+    refreshKeyActionReferenceActionState();
     refreshStoryboardActionState();
     // 处于参考图子阶段等待（category1/category2 完成后）时，重启该子阶段倒计时；
     // 否则走主步骤（videos/merge）倒计时逻辑。
@@ -3696,7 +3705,7 @@ function handleVideoSceneRegenerated(data) {
     }
 }
 
-// 重新生成单张角色装扮图/布景状态图
+// 重新生成单张角色装扮图/布景状态图/关键动作参考图
 async function regenerateVariantAsset(referenceType, encodedVariantKey) {
     if (!currentProjectId) {
         alert(t('messages.createProjectFirst'));
@@ -3713,6 +3722,7 @@ async function regenerateVariantAsset(referenceType, encodedVariantKey) {
     cancelAutoRunCountdown();
     refreshReferenceImageActionState();
     refreshVariantAssetsActionState();
+    refreshKeyActionReferenceActionState();
     renderStatusBar(t('labels.referenceImageRegeneratingText'), 'loading', t('steps.referenceImageTitle'));
 
     try {
@@ -3761,6 +3771,88 @@ async function regenerateVariantAsset(referenceType, encodedVariantKey) {
     }
 }
 
+// 刷新“关键动作参考图”模块内重新生成按钮状态。
+function refreshKeyActionReferenceActionState() {
+    const card = document.getElementById('key-action-reference-card');
+    if (!card) return;
+    const regenerateButtons = card.querySelectorAll('button.reference-regenerate-btn');
+    regenerateButtons.forEach((regenerateBtn) => {
+        const assetKey = regenerateBtn.dataset.referenceKey || '';
+        const enabled = canRegenerateReferenceImage(false, assetKey);
+        regenerateBtn.disabled = !enabled;
+        regenerateBtn.style.opacity = enabled ? '' : '0.65';
+        regenerateBtn.style.cursor = enabled ? 'pointer' : 'not-allowed';
+    });
+}
+
+// 渲染“关键动作参考图”模块：位于角色装扮/布景状态与分镜故事版之间。
+function displayKeyActionReferenceImages(output) {
+    const keyActionImages = (output && output.key_action_reference_images) || [];
+    const existing = document.getElementById('key-action-reference-card');
+
+    if (!keyActionImages.length) {
+        if (existing) existing.remove();
+        return;
+    }
+
+    let card = existing;
+    if (!card) {
+        card = document.createElement('div');
+        card.className = 'content-card';
+        card.id = 'key-action-reference-card';
+    }
+
+    const anchorCard = document.getElementById('variant-assets-card') || document.getElementById('reference-image-card');
+    if (anchorCard && anchorCard.parentNode === contentDisplay) {
+        if (anchorCard.nextSibling !== card) {
+            contentDisplay.insertBefore(card, anchorCard.nextSibling);
+        }
+    } else if (card.parentNode !== contentDisplay) {
+        contentDisplay.appendChild(card);
+    }
+
+    const linkAttrs = getExternalLinkAttrs();
+    const sortedImages = [...keyActionImages].sort(
+        (a, b) => (Number(a.scene_number) || 0) - (Number(b.scene_number) || 0)
+    );
+
+    const items = sortedImages.map((item) => {
+        const sceneNumber = Number(item.scene_number) || 0;
+        const sceneLabel = t('labels.scene', { scene: sceneNumber });
+        const variantKey = item.variant_key || `scene_${String(sceneNumber).padStart(3, '0')}::key_action`;
+        const title = item.name || sceneLabel;
+        return `
+            <div class="reference-item" style="display:flex; flex-direction:column; gap:8px; padding: 12px; border: 1px solid #f0f0f0; border-radius: 10px; background: #fff; font-size: 13px; line-height: 1.5;">
+                <div style="position: relative; width: 100%; cursor: pointer; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.12);" onclick="openMediaModal('image', '${item.url}')">
+                    <img src="${item.url}" alt="${escapeHtml(title)}" style="width:100%; height:180px; object-fit:cover; display:block;">
+                    <div style="position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.6); color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px;">
+                        ${t('labels.clickToZoom')}
+                    </div>
+                </div>
+                <div style="font-size: 13px; color: #888;">${t('labels.keyActionReferenceImage')}</div>
+                <div style="font-size: 16px; font-weight:600; color:#333; line-height: 1.4;">${escapeHtml(sceneLabel)}</div>
+                <div class="item-actions" style="display:flex; gap:8px; flex-wrap: wrap;">
+                    <button
+                        class="item-btn regenerate reference-regenerate-btn"
+                        data-locked="false"
+                        data-reference-key="${escapeHtml(buildReferenceAssetKey('key_action', variantKey))}"
+                        onclick="event.stopPropagation(); regenerateVariantAsset('key_action', '${encodeURIComponent(variantKey)}')"
+                        style="background: #faad14; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer;"
+                    >${t('actions.regenerate')}</button>
+                    <a href="${item.url}" ${linkAttrs} class="item-btn download" style="background: #1890ff; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; width: fit-content;">${t('actions.download')}</a>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    card.innerHTML = `
+        <h4 style="margin: 0 0 15px 0; font-size: 18px; font-weight: 600; color: #333; border-bottom: 2px solid #1890ff; padding-bottom: 10px;">${t('labels.keyActionReferenceLibrary')}</h4>
+        <div class="reference-grid">${items}</div>
+    `;
+
+    refreshKeyActionReferenceActionState();
+}
+
 // 刷新“各分镜故事版”模块内重新生成按钮状态。
 function refreshStoryboardActionState() {
     const card = document.getElementById('storyboard-card');
@@ -3792,8 +3884,8 @@ function displayStoryboards(output) {
         card.id = 'storyboard-card';
     }
 
-    // 保证顺序：参考图库 → 角色装扮/布景状态 → 故事版 → 分镜视频。插入到装扮/状态卡片（若无则参考图库卡片）之后。
-    const anchorCard = document.getElementById('variant-assets-card') || document.getElementById('reference-image-card');
+    // 保证顺序：参考图库 → 角色装扮/布景状态 → 关键动作参考图 → 故事版 → 分镜视频。
+    const anchorCard = document.getElementById('key-action-reference-card') || document.getElementById('variant-assets-card') || document.getElementById('reference-image-card');
     if (anchorCard && anchorCard.parentNode === contentDisplay) {
         if (anchorCard.nextSibling !== card) {
             contentDisplay.insertBefore(card, anchorCard.nextSibling);

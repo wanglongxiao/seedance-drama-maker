@@ -27,6 +27,11 @@ asset_library:
   connection_timeout: 30
   socket_timeout: 300
 
+prompt_skill:
+  nsfw:
+    enabled: "${NSFW_ENABLED:-off}"
+    directory: "nsfw"
+
 # Speech ASR 认证信息
 speech:
   appid: "${SPEECH_APPID}"

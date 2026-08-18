@@ -12,6 +12,7 @@ import time
 from typing import Dict, Any, Tuple
 import requests
 from app.config import config
+from app.prompt_skill import render_prompt
 from app.services.llm_service import llm_service
 from app.utils.i18n import language_name, translate
 from app.utils.logger import get_logger
@@ -102,65 +103,28 @@ class VideoReviewAgent:
         logger.info(f"[REVIEW] Has previous video: {previous_video_url is not None}")
         logger.info(f"[REVIEW] Has reference image: {reference_image_url is not None}")
 
-        # 构建审核提示词 - 使用大模型视觉理解能力进行三维审核
-        prompt_parts = []
-        prompt_parts.append("【分镜视频视觉理解审核任务】")
-        prompt_parts.append("请使用大模型视觉理解能力观看视频，并对当前分镜视频进行审核评分。")
-        prompt_parts.append("")
-
-        prompt_parts.append("【剧本要求】")
-        prompt_parts.append(script_scene_description)
-        prompt_parts.append("")
-
+        reference_image_section = ""
         if reference_image_url:
-            prompt_parts.append("【角色参考】")
-            prompt_parts.append("参考图片中的角色形象应该在视频中保持一致")
-            prompt_parts.append("")
-
+            reference_image_section = "【角色参考】\n参考图片中的角色形象应该在视频中保持一致\n"
+        previous_video_section = ""
         if previous_video_url:
-            prompt_parts.append("【上下文参考】")
-            prompt_parts.append("可参考前一个分镜视频理解角色状态和剧情背景，但重点仍是判断当前视频本身是否合理自然")
-            prompt_parts.append("")
+            previous_video_section = "【上下文参考】\n可参考前一个分镜视频理解角色状态和剧情背景，但重点仍是判断当前视频本身是否合理自然\n"
 
-        prompt_parts.append("【审核标准 - 请逐项评分（0-100分）】")
-        prompt_parts.append("1. 人物/角色一致性（权重见下）：角色形象、身份、特征是否与参考图和上下文保持一致")
-        prompt_parts.append("2. 物理世界规律（权重见下）：画面和动作是否符合基本物理原理与视觉逻辑")
-        prompt_parts.append("   - 重点检查：人物是否出现多余肢体、转身前后脸部特征突变、动作诡异、物体大小比例不合逻辑、结构突然错位等")
-        prompt_parts.append("3. 与分镜脚本意义上一致（权重见下）：视频内容在语义和剧情推进上是否与该分镜脚本一致")
-        prompt_parts.append("")
-
-        prompt_parts.append("【评分规则 - 重要】")
-        prompt_parts.append("- 评分基于视觉理解与语义一致性，不是文字逐字匹配")
-        prompt_parts.append("- 只要视频内容在意义上与分镜脚本相符，即使表述方式不同，也应给高分")
-        prompt_parts.append("- 重点关注人物/角色一致性、物理世界规律、与分镜脚本意义上一致这 3 个方面")
-        prompt_parts.append("- 色情、性爱、限制级、恐怖、凶杀、血腥等成人或强烈题材本身不是扣分项，不能因为题材属性降低任何维度分数")
-        prompt_parts.append("- 即使视频包含18+、恐怖或暴力内容，也只能按角色一致性、物理规律、分镜语义一致性来评分，不得因内容题材本身判为不通过")
-        prompt_parts.append("- 只有当画面执行质量差、角色不一致、物理规律异常、或与当前分镜脚本语义不一致时，才允许扣分")
-        prompt_parts.append(f"- {self.pass_threshold}分及以上视为通过")
-        prompt_parts.append("")
-
-        prompt_parts.append("【输出要求 - 必须严格按以下JSON格式输出】")
-        prompt_parts.append(translate(output_language, "review.output_language_rule", language=language_name(output_language)))
-        prompt_parts.append("{")
-        prompt_parts.append('  "score": <综合评分0-100的整数>,')
-        prompt_parts.append(f'  "approved": <true/false - 综合评分>={self.pass_threshold}为true否则false>,')
-        prompt_parts.append('  "feedback": "<详细反馈，说明视频内容与剧本的语义匹配情况。如果不通过请说明具体问题和修改建议>",')
-        prompt_parts.append('  "details": {')
-        prompt_parts.append('    "character_consistency": <人物/角色一致性评分0-100>,')
-        prompt_parts.append('    "physical-laws": <物理世界规律评分0-100>,')
-        prompt_parts.append('    "script_semantic_consistency": <与分镜脚本意义上一致评分0-100>')
-        prompt_parts.append('  }')
-        prompt_parts.append("}")
-        prompt_parts.append("")
-        prompt_parts.append("注意：")
-        prompt_parts.append(
-            f"- 综合评分 = 人物/角色一致性*{self.weights['character_consistency']:.2f} + "
-            f"物理世界规律*{self.weights['physical-laws']:.2f} + "
-            f"与分镜脚本意义上一致*{self.weights['script_semantic_consistency']:.2f}"
+        prompt = render_prompt(
+            "video_review.md",
+            script_scene_description=script_scene_description,
+            reference_image_section=reference_image_section,
+            previous_video_section=previous_video_section,
+            pass_threshold=self.pass_threshold,
+            output_language_rule=translate(
+                output_language,
+                "review.output_language_rule",
+                language=language_name(output_language),
+            ),
+            character_consistency_weight=f"{self.weights['character_consistency']:.2f}",
+            physical_laws_weight=f"{self.weights['physical-laws']:.2f}",
+            script_semantic_consistency_weight=f"{self.weights['script_semantic_consistency']:.2f}",
         )
-        prompt_parts.append("- feedback 必须明确指出未通过时是哪个维度拉低了分数")
-
-        prompt = "\n".join(prompt_parts)
         logger.info(f"[REVIEW] Review prompt built, length: {len(prompt)} chars")
 
         # 构建消息，包含视频URL

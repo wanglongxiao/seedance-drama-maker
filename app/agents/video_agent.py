@@ -8,6 +8,7 @@ import re
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.config import config
+from app.prompt_skill import load_optional_nsfw_prompt, load_prompt, nsfw_content_requested
 from app.services.llm_service import llm_service
 from app.utils.logger import get_logger
 from app.models.schemas import Script, GeneratedImage, GeneratedVideo
@@ -42,6 +43,54 @@ class VideoAgent:
         # 参考图URL（用于人物一致性）
         self.reference_image_url = None
 
+    def _sanitize_video_private_prompt(self, text: str) -> str:
+        """Remove private prompt metadata and example timelines that can conflict with the current scene."""
+        if not text:
+            return ""
+        kept_lines: List[str] = []
+        skipping_example = False
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                if not skipping_example:
+                    kept_lines.append(raw_line)
+                continue
+            if re.search(r"^示例[:：]?$|^#+\s*示例|^\d+\s*-\s*\d+\s*秒", line):
+                skipping_example = True
+                continue
+            if skipping_example:
+                continue
+            if re.search(r"本地私有扩展|NSFW\\?_?ENABLED|公开仓库|关闭.*跳过|该文件|仅用于.*本地私有", line):
+                continue
+            if "图片：" in line or "图片：" in raw_line or "图片：" in line.replace(" ", ""):
+                continue
+            if "图片" in line and ("增加" in line or "尝试" in line):
+                continue
+            kept_lines.append(raw_line)
+        return "\n".join(kept_lines).strip()
+
+    def _append_video_private_extensions(
+        self,
+        prompt_parts: List[str],
+        names: List[str],
+        *trigger_texts,
+    ) -> None:
+        """Append bounded private video extensions only when enabled and adult content is requested."""
+        if not nsfw_content_requested(*trigger_texts):
+            return
+        extensions: List[str] = []
+        for name in names:
+            text = self._sanitize_video_private_prompt(load_optional_nsfw_prompt(name))
+            if text:
+                extensions.append(text)
+        if extensions:
+            prompt_parts.extend([
+                "",
+                "【本地私有视频扩展 - 限定优先级】",
+                "以下内容仅作为当前分镜的视频动作节奏、视角或互动细节补充；不得覆盖参考图顺序、角色身份、布景状态、故事版顺序、关键动作参考图、无字幕、音色一致、镜头时长、背景音乐限制或当前分镜文本。",
+                "\n\n".join(extensions),
+            ])
+
     def _parse_resolution(self, user_input: str) -> str:
         """
         从用户输入中解析分辨率
@@ -67,6 +116,73 @@ class VideoAgent:
 
         logger.info(f"No valid resolution found in user input, using default: {self.default_resolution}")
         return self.default_resolution
+
+    def _extract_video_visual_style(self, user_style_info: Optional[str]) -> str:
+        """Keep only visual style/aspect-ratio phrases from user input for the video style line."""
+        text = str(user_style_info or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\s+", " ", text)
+        segments = re.split(r"[\n，,、；;。！？]+", text)
+        visual_segments: List[str] = []
+        visual_keywords = [
+            "风格", "樣式", "样式", "style", "比例", "aspect ratio",
+            "真人", "写实", "寫實", "电影", "電影", "电影感", "電影感",
+            "live action", "live-action", "realistic", "photoreal", "cinematic",
+            "日漫", "动漫", "動畫", "anime", "cartoon", "水墨", "油画", "油畫", "水彩", "像素",
+        ]
+        non_visual_keywords = [
+            "对白", "對白", "旁白", "台词", "臺詞", "语音", "声音", "音色",
+            "时长", "時長", "秒", "分钟", "分鐘", "auto", "自动", "自動",
+            "bgm", "music", "dialogue", "narration", "voice", "duration",
+        ]
+        for segment in segments:
+            cleaned = segment.strip(" \t,，。；;:-")
+            if not cleaned:
+                continue
+            lowered = cleaned.lower()
+            is_aspect_ratio = bool(re.fullmatch(r"\d+\s*:\s*\d+", lowered))
+            has_visual = is_aspect_ratio or any(keyword in lowered for keyword in visual_keywords)
+            has_non_visual = any(keyword in lowered for keyword in non_visual_keywords)
+            if has_visual and (is_aspect_ratio or not has_non_visual):
+                visual_segments.append(cleaned)
+        style_text = "，".join(dict.fromkeys(visual_segments))
+        return style_text[:300]
+
+    def _extract_video_dialogue_voice_requirements(
+        self,
+        *values: Optional[str],
+    ) -> str:
+        """Keep dialogue language and voice/timbre requirements out of the visual style line."""
+        text = "，".join(str(value or "").strip() for value in values if str(value or "").strip())
+        if not text:
+            return ""
+        text = re.sub(r"\s+", " ", text)
+        segments = re.split(r"[\n，,、；;。！？]+", text)
+        requirement_segments: List[str] = []
+        voice_keywords = [
+            "对白", "對白", "旁白", "台词", "臺詞", "语言", "語言",
+            "中文", "汉语", "漢語", "普通话", "普通話", "英文", "英语", "英語",
+            "日文", "日语", "日語", "粤语", "粵語", "声音", "聲音", "音色",
+            "声线", "聲線", "语气", "語氣", "口音", "配音", "呻吟", "喘息",
+            "voice", "dialogue",
+            "narration", "timbre", "tone of voice", "accent",
+        ]
+        duration_or_mode_keywords = [
+            "时长", "時長", "秒", "分钟", "分鐘", "auto", "自动", "自動",
+            "duration",
+        ]
+        for segment in segments:
+            cleaned = segment.strip(" \t,，。；;:-")
+            if not cleaned:
+                continue
+            lowered = cleaned.lower()
+            has_voice = any(keyword in lowered for keyword in voice_keywords)
+            has_duration_or_mode = any(keyword in lowered for keyword in duration_or_mode_keywords)
+            if has_voice and not has_duration_or_mode:
+                requirement_segments.append(cleaned)
+        requirement_text = "，".join(dict.fromkeys(requirement_segments))
+        return requirement_text[:500]
 
     def generate_videos(
         self,
@@ -485,16 +601,19 @@ class VideoAgent:
             # 角色装扮图归入角色组，布景状态图归入场景组
             character_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] in {"character", "character_outfit"})
             scene_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] in {"scene", "scene_state"})
+            key_action_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] == "key_action")
             storyboard_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] == "storyboard")
 
             if character_tags and scene_tags:
-                parts.append(f"结合{character_tags}人物/角色参考图中的出场角色设定与布景设定{scene_tags}生成当前分镜。")
+                parts.append(f"结合{character_tags}人物/角色参考图中的出场角色形象与布景设定{scene_tags}生成当前分镜。")
             elif character_tags:
-                parts.append(f"结合{character_tags}人物/角色参考图中的出场角色设定生成当前分镜。")
+                parts.append(f"结合{character_tags}人物/角色参考图中的出场角色形象生成当前分镜。")
             elif scene_tags:
                 parts.append(f"结合布景设定{scene_tags}生成当前分镜。")
             if storyboard_tags:
                 parts.append(f"严格参考{storyboard_tags}中的9宫格白描线稿分镜故事版图片，按照故事版图的顺序，运镜合理连贯，遵循其节奏、镜头拆分和动作推进。")
+            if key_action_tags:
+                parts.append(f"重点参考{key_action_tags}中的关键动作参考图，保持该分镜的核心动作姿态、人物相对位置、镜头构图和情绪张力。")
             mapping_parts = []
             for spec in reference_specs:
                 mapping_parts.append(
@@ -506,16 +625,17 @@ class VideoAgent:
         # 但当前分镜是一段“全新镜头”，必须立刻推进到本分镜的新剧情，
         # 严禁把上一分镜结尾的画面、构图、动作原样回放/复制到开头（这会导致首帧与前半段雷同）。
         if previous_video_url:
-            parts.append(
-                "延长模式衔接要求："
-                "仅参考上一分镜生成视频中的角色形象、服装、场景环境与光线，保持这些元素一致；"
-                "但本分镜是一段全新镜头，必须从新的机位/构图开始，开场即呈现下方‘场景描述’和‘角色动作’中的新事件与新动作，"
-                "禁止复制、回放或长时间停留在上一分镜结尾的相同画面、相同姿势或相同动作；"
-                "只需在衔接处做到人物与场景连贯即可，随后立即向本分镜的新剧情推进，避免与上一分镜首尾雷同。"
-            )
+            parts.append(load_prompt("video_extend_continuity.md"))
 
-        if user_style_info:
-            parts.append(f"风格：{user_style_info}")
+        visual_style = self._extract_video_visual_style(user_style_info)
+        if visual_style:
+            parts.append(f"视觉风格：{visual_style}")
+        dialogue_voice_requirements = self._extract_video_dialogue_voice_requirements(
+            user_style_info,
+            user_requirement_text,
+        )
+        if dialogue_voice_requirements:
+            parts.append(f"对白与声音要求：{dialogue_voice_requirements}")
 
         scene_name = getattr(scene, 'scene_name', '') or ''
         if scene_name:
@@ -543,7 +663,7 @@ class VideoAgent:
             if outfit_lines:
                 parts.append(f"本分镜角色装扮（含发型）：{'；'.join(outfit_lines)}")
         parts.append(f"场景描述：{getattr(scene, 'description', '')}")
-        parts.append("保持无字幕，避免画面生成字幕。不生成街边招牌的文字。限定主要人物/角色在不同分镜视频中的各自音色保持一致。")
+        parts.append(load_prompt("video_scene_static_rules.md"))
 
         dialogue = getattr(scene, 'dialogue', '') or ''
         parts.append(f"对白/旁白：{dialogue if dialogue else '无'}")
@@ -566,9 +686,20 @@ class VideoAgent:
         chars_present = getattr(scene, 'characters_present', None) or []
         if isinstance(chars_present, list) and chars_present:
             parts.append(f"出场角色：{self._annotate_character_names_with_reference_tags(chars_present, reference_specs)}")
-            parts.extend(self._build_scene_character_details(chars_present, characters))
+            parts.extend(self._build_scene_character_details(chars_present, characters, reference_specs))
 
         parts.append(f"镜头时长：{duration}秒。当前分镜序号：{scene_index + 1}/{total_scenes}。")
+
+        self._append_video_private_extensions(
+            parts,
+            ["video_action_closeup.md", "video_enhancement.md"],
+            user_requirement_text,
+            user_style_info,
+            getattr(scene, "description", ""),
+            getattr(scene, "character_description", ""),
+            getattr(scene, "dialogue", ""),
+            getattr(scene, "mood", ""),
+        )
 
         parts.append(self._extract_background_music_instruction(user_requirement_text))
 
@@ -601,11 +732,34 @@ class VideoAgent:
             return "场景"
         if reference_type == "scene_state":
             return "布景状态"
+        if reference_type == "key_action":
+            return "关键动作参考图"
         if reference_type == "storyboard":
             return "9宫格 storyboard"
         return "参考"
 
-    def _build_scene_character_details(self, character_names: List[str], characters) -> List[str]:
+    def _character_has_visual_reference(
+        self,
+        character_name: str,
+        reference_specs: Optional[List[Dict[str, str]]],
+    ) -> bool:
+        character_key = self._normalize_name_key(character_name)
+        if not character_key:
+            return False
+        for spec in reference_specs or []:
+            if spec.get("reference_type") not in {"character", "character_outfit"}:
+                continue
+            ref_key = spec.get("name_key") or ""
+            if ref_key == character_key or character_key in ref_key or ref_key in character_key:
+                return True
+        return False
+
+    def _build_scene_character_details(
+        self,
+        character_names: List[str],
+        characters,
+        reference_specs: Optional[List[Dict[str, str]]] = None,
+    ) -> List[str]:
         if not character_names or not characters:
             return []
 
@@ -615,6 +769,8 @@ class VideoAgent:
         }
         lines: List[str] = []
         for name in character_names:
+            if self._character_has_visual_reference(name, reference_specs):
+                continue
             character = character_map.get(self._normalize_name_key(name))
             if character is None:
                 continue

@@ -707,8 +707,8 @@ async def regenerate(
                 # 校验目标是否存在 / 是否被锁定（同步、轻量），实际生成放到后台执行。
                 if normalized_reference_type == "storyboard":
                     pass  # 故事版目标由后台任务按 scene_number 定位
-                elif normalized_reference_type in {"character_outfit", "scene_state"}:
-                    pass  # 装扮/状态目标由后台任务按 variant_key 定位
+                elif normalized_reference_type in {"character_outfit", "scene_state", "key_action"}:
+                    pass  # 装扮/状态/关键动作目标由后台任务按 variant_key 定位
                 else:
                     existing_reference_images = (
                         getattr(project, "character_reference_images", [])
@@ -1228,6 +1228,7 @@ async def rollback_step(request: Request):
             project.scene_reference_images = []
             project.character_outfit_images = []
             project.scene_state_images = []
+            project.key_action_reference_images = []
             project.storyboard_images = []
             project.reference_image_library = {}
             project.scene_reference_mappings = {}
@@ -1964,7 +1965,7 @@ async def regenerate_reference_asset_background(
                 feedback="用户要求重新生成",
             )
             logger.info(f"Regenerated storyboard for scene {target_scene_number}: {new_image.url}")
-        elif normalized_reference_type in {"character_outfit", "scene_state"}:
+        elif normalized_reference_type in {"character_outfit", "scene_state", "key_action"}:
             new_image = await main_agent.regenerate_variant_asset(
                 project,
                 reference_type=normalized_reference_type,
