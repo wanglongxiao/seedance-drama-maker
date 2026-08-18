@@ -7,6 +7,7 @@ import os
 import json
 import asyncio
 from typing import Optional, Dict, Any, List
+from urllib.parse import urlparse
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.staticfiles import StaticFiles
@@ -321,7 +322,8 @@ async def upload_file(
         content = await file.read()
 
         file_extension = os.path.splitext(file.filename or "")[1].lower()
-        file_category = "uploads/audio" if file_extension in {".wav", ".mp3", ".m4a", ".aac", ".ogg"} else "uploads/images"
+        audio_extensions = {".wav", ".mp3", ".m4a", ".mp4", ".aac", ".ogg", ".oga", ".opus", ".webm", ".weba"}
+        file_category = "uploads/audio" if file_extension in audio_extensions else "uploads/images"
 
         # 磁盘写入与 TOS 上传均为阻塞式外部 IO。云端单实例在跑生成管线时，
         # 若在事件循环内同步执行会阻塞整个循环，导致 /upload 请求撞网关超时
@@ -362,12 +364,15 @@ async def upload_file(
 async def speech_to_text(audio_url: str = Form(...)) -> ASRResponse:
     """语音识别"""
     try:
+        parsed_url = urlparse(audio_url)
+        audio_extension = os.path.splitext(parsed_url.path)[1].lower()
+        logger.info(f"ASR request for {audio_url} with extension {audio_extension}")
         # ASR 为阻塞式网络调用，放到交互式线程池执行，避免阻塞事件循环
         # 或与生成管线争抢线程导致排队超时。
         text = await run_interactive(asr_service.recognize, audio_url)
         return ASRResponse(success=True, text=text)
     except Exception as e:
-        logger.error(f"ASR failed: {str(e)}")
+        logger.error(f"ASR failed: {str(e)}", exc_info=True)
         return ASRResponse(success=False, error=str(e))
 
 
@@ -1923,7 +1928,7 @@ async def regenerate_reference_asset_background(
     reference_name: str,
     reference_slot_index: Optional[int] = None,
 ):
-    """后台重新生成单张参考图/角色装扮图/场景状态图/故事版，并通过 WebSocket 推送结果。
+    """后台重新生成单张参考图/角色装扮图/布景状态图/故事版，并通过 WebSocket 推送结果。
 
     云端 API 网关存在约 60s 超时，而单张图片重生成耗时可达 40~60s，
     若在 HTTP 请求内同步 await 会触发网关断连，前端 fetch 抛错误报“重新生成失败”。

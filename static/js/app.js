@@ -56,7 +56,7 @@ let referenceImageRegenerateLocked = false;
 // 参考图分阶段（category1/category2/category3）子状态机：
 let referenceStage = null; // 当前已完成子阶段：category1/category2/category3
 let pendingReferenceStage = null; // 待进入子阶段：category2/category3/videos
-let referenceStageHasCategory2 = false; // 后端下发：本项目是否存在分类2（装扮/场景状态）
+let referenceStageHasCategory2 = false; // 后端下发：本项目是否存在分类2（装扮/布景状态）
 let projectEnding = false;
 let projectEnded = false;
 let projectEndBeaconSent = false;
@@ -86,7 +86,7 @@ function getPersistedProjectId() {
         return null;
     }
 }
-const I18N_VERSION = '20260816h';
+const I18N_VERSION = '20260818c';
 const FRONTEND_CONFIG_VERSION = '20260811c';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
@@ -824,9 +824,9 @@ function refreshReferenceImageActionState() {
     });
 }
 
-// 统一刷新“参考图库/角色装扮图/场景状态图/各分镜故事版”四个模块的重新生成按钮状态。
+// 统一刷新“参考图库/角色装扮图/布景状态图/各分镜故事版”四个模块的重新生成按钮状态。
 // 视频生成开始（referenceImageLocked=true）等锁定态变化时必须调用本函数，
-// 否则装扮/场景状态/故事版按钮不会随之置灰（refreshReferenceImageActionState 只覆盖参考图库）。
+// 否则装扮/布景状态/故事版按钮不会随之置灰（refreshReferenceImageActionState 只覆盖参考图库）。
 function refreshAllReferenceActionStates() {
     refreshReferenceImageActionState();
     refreshVariantAssetsActionState();
@@ -922,7 +922,7 @@ function applyRestoredSnapshot(snap) {
         updateStepHighlight('script_agent', 100);
     }
 
-    // 2) 参考图库（含装扮/场景状态/故事版）
+    // 2) 参考图库（含装扮/布景状态/故事版）
     if (snap.reference_output) {
         // 恢复态下不希望再自动触发确认倒计时，这里标记为已确认完成。
         const refOutput = { ...snap.reference_output, ready_for_confirmation: false };
@@ -2634,11 +2634,39 @@ function removeAudio() {
     updateUploadedFiles();
 }
 
+function getAudioFileExtension(mimeType) {
+    const normalized = (mimeType || '').toLowerCase().split(';')[0].trim();
+    const extensionByMimeType = {
+        'audio/webm': 'webm',
+        'video/webm': 'webm',
+        'audio/ogg': 'ogg',
+        'audio/opus': 'opus',
+        'audio/mp4': 'm4a',
+        'audio/mpeg': 'mp3',
+        'audio/mp3': 'mp3',
+        'audio/aac': 'aac',
+        'audio/wav': 'wav',
+        'audio/x-wav': 'wav'
+    };
+    return extensionByMimeType[normalized] || 'webm';
+}
+
 // 开始录音
 async function startRecording() {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaRecorder = new MediaRecorder(stream);
+        const preferredMimeTypes = [
+            'audio/webm;codecs=opus',
+            'audio/webm',
+            'audio/ogg;codecs=opus',
+            'audio/mp4'
+        ];
+        const supportedMimeType = preferredMimeTypes.find(type =>
+            window.MediaRecorder && MediaRecorder.isTypeSupported(type)
+        );
+        mediaRecorder = supportedMimeType
+            ? new MediaRecorder(stream, { mimeType: supportedMimeType })
+            : new MediaRecorder(stream);
         audioChunks = [];
         
         mediaRecorder.ondataavailable = (event) => {
@@ -2646,8 +2674,10 @@ async function startRecording() {
         };
         
         mediaRecorder.onstop = () => {
-            const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-            uploadedAudio = new File([audioBlob], 'recording.wav', { type: 'audio/wav' });
+            const mimeType = mediaRecorder.mimeType || audioChunks[0]?.type || supportedMimeType || 'audio/webm';
+            const audioBlob = new Blob(audioChunks, { type: mimeType });
+            const extension = getAudioFileExtension(mimeType);
+            uploadedAudio = new File([audioBlob], `recording.${extension}`, { type: mimeType });
             updateUploadedFiles();
             
             // 停止所有轨道
@@ -3213,6 +3243,67 @@ function displayScript(script) {
         `;
     }
 
+    const renderCharacterField = (labelKey, value, icon = '') => {
+        const text = String(value || '').trim();
+        if (!text) return '';
+        return `
+            <div style="font-size: 13px; color: #555; line-height: 1.45; margin-top: 4px;">
+                <span style="color: #777;">${icon}${t(labelKey)}：</span>${escapeHtml(text)}
+            </div>
+        `;
+    };
+
+    const renderSceneOutfits = (outfits) => {
+        if (!outfits || typeof outfits !== 'object' || Array.isArray(outfits)) return '';
+        const lines = Object.entries(outfits)
+            .map(([name, outfit]) => {
+                const safeName = String(name || '').trim();
+                const safeOutfit = String(outfit || '').trim();
+                if (!safeName || !safeOutfit) return '';
+                return `<div style="margin: 3px 0;"><strong>${escapeHtml(safeName)}：</strong>${escapeHtml(safeOutfit)}</div>`;
+            })
+            .filter(Boolean)
+            .join('');
+        if (!lines) return '';
+        return `
+            <div style="margin: 8px 0; padding: 10px; background: #fff7e6; border-radius: 6px; border-left: 3px solid #fa8c16;">
+                <strong style="color: #d46b08;">${t('labels.characterOutfits')}</strong>
+                <div style="margin-top: 5px; color: #555; line-height: 1.55;">${lines}</div>
+            </div>
+        `;
+    };
+
+    const renderSceneState = (sceneState) => {
+        const text = String(sceneState || '').trim();
+        if (!text) return '';
+        return `
+            <div style="margin: 8px 0; padding: 10px; background: #f6ffed; border-radius: 6px; border-left: 3px solid #52c41a;">
+                <strong style="color: #389e0d;">${t('labels.sceneState')}</strong>
+                <p style="margin: 5px 0 0 0; color: #555; line-height: 1.6;">${escapeHtml(text)}</p>
+            </div>
+        `;
+    };
+
+    const renderMultilineSceneText = (value, options = {}) => {
+        const text = String(value || '').trim();
+        if (!text) {
+            return `<div style="margin: 5px 0; color: #999;">${t('labels.noData')}</div>`;
+        }
+        const normalized = text
+            .replace(/\r\n/g, '\n')
+            .replace(/[ \t]+([\u4e00-\u9fffA-Za-z0-9_·]{1,12}[：:])/g, '\n$1');
+        const lines = normalized
+            .split('\n')
+            .map(line => line.trim())
+            .filter(Boolean);
+        const fontStyle = options.italic ? 'font-style: italic;' : '';
+        return `
+            <div style="margin: 5px 0; color: ${options.color || '#555'}; line-height: 1.65; ${fontStyle}">
+                ${lines.map(line => `<div>${escapeHtml(line)}</div>`).join('')}
+            </div>
+        `;
+    };
+
     // 构建角色信息
     let charactersHtml = '';
     if (characters.length > 0) {
@@ -3221,12 +3312,19 @@ function displayScript(script) {
                 <h5 style="margin: 0 0 10px 0; color: #333;">${t('labels.characterSetting', { count: characters.length })}</h5>
                 ${characters.map(char => `
                     <div class="character-item" style="margin: 8px 0; padding: 10px; background: white; border-radius: 6px; border-left: 3px solid #1890ff;">
-                        <strong style="color: #1890ff;">${char.name || t('labels.scriptUntitled')}</strong>
-                        <span style="color: #666; font-size: 12px;">(${char.age || t('labels.unknown')} ${char.gender || ''})</span><br>
-                        <span style="font-size: 13px; color: #555;">${char.face_features || ''} ${char.skin_tone || ''}</span>
-                        ${char.clothing ? `<br><span style="font-size: 13px; color: #666;">👔 ${char.clothing}</span>` : ''}
-                        ${char.personality ? `<br><span style="font-size: 13px; color: #666;">🧠 ${t('labels.personality')}: ${char.personality}</span>` : ''}
-                        ${char.voice_type ? `<br><span style="font-size: 12px; color: #888;">${t('labels.voice')}: ${char.voice_type}</span>` : ''}
+                        <strong style="color: #1890ff;">${escapeHtml(char.name || t('labels.scriptUntitled'))}</strong>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0 14px; margin-top: 6px;">
+                            ${renderCharacterField('labels.gender', char.gender)}
+                            ${renderCharacterField('labels.age', char.age)}
+                            ${renderCharacterField('labels.nationality', char.nationality)}
+                            ${renderCharacterField('labels.faceFeatures', [char.face_features, char.skin_tone].filter(Boolean).join(' '))}
+                            ${renderCharacterField('labels.hairstyle', char.hairstyle)}
+                            ${renderCharacterField('labels.bodyFeatures', char.body_features)}
+                            ${renderCharacterField('labels.usualOutfit', char.clothing, '👔 ')}
+                            ${renderCharacterField('labels.personalityTraits', char.personality, '🧠 ')}
+                            ${renderCharacterField('labels.identityBackground', char.identity_background)}
+                            ${renderCharacterField('labels.voice', char.voice_type, '🎤 ')}
+                        </div>
                     </div>
                 `).join('')}
             </div>
@@ -3240,7 +3338,7 @@ function displayScript(script) {
             // 构建角色呈现信息
             let charactersPresentHtml = '';
             if (scene.characters_present && scene.characters_present.length > 0) {
-                charactersPresentHtml = `<span style="color: #1890ff; font-weight: 500;">${scene.characters_present.join(', ')}</span>`;
+                charactersPresentHtml = `<span style="color: #1890ff; font-weight: 500;">${escapeHtml(scene.characters_present.join(', '))}</span>`;
             }
 
             return `
@@ -3250,24 +3348,27 @@ function displayScript(script) {
                         <span style="font-size: 12px; color: #666; font-weight: normal;">${t('labels.sceneDuration', { duration: scene.duration || 6 })}</span>
                     </h5>
 
+                    ${renderSceneOutfits(scene.character_outfits)}
+                    ${renderSceneState(scene.scene_state)}
+
                     <div style="margin: 8px 0;">
                         <strong style="color: #333;">${t('labels.sceneDescription')}</strong>
-                        <p style="margin: 5px 0; color: #555; line-height: 1.6;">${scene.description || t('labels.noData')}</p>
+                        <p style="margin: 5px 0; color: #555; line-height: 1.6;">${escapeHtml(scene.description || t('labels.noData'))}</p>
                     </div>
 
                     <div style="margin: 8px 0; padding: 10px; background: #e6f7ff; border-radius: 6px; border-left: 3px solid #1890ff;">
                         <strong style="color: #1890ff;">${t('labels.dialogue')}</strong>
-                        <p style="margin: 5px 0; color: #333; font-style: italic;">${scene.dialogue || t('labels.noData')}</p>
+                        ${renderMultilineSceneText(scene.dialogue, { color: '#333', italic: true })}
                     </div>
 
                     <div style="margin: 8px 0;">
                         <strong style="color: #333;">${t('labels.characterAction')}</strong>
-                        <p style="margin: 5px 0; color: #555;">${scene.character_description || t('labels.noData')}</p>
+                        ${renderMultilineSceneText(scene.character_description)}
                     </div>
 
                     <div style="margin: 8px 0;">
                         <strong style="color: #333;">${t('labels.voiceDescription')}</strong>
-                        <p style="margin: 5px 0; color: #555;">${scene.voice_description || t('labels.noData')}</p>
+                        ${renderMultilineSceneText(scene.voice_description)}
                     </div>
 
                     <div style="display: flex; flex-wrap: wrap; gap: 15px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed #ddd;">
@@ -3347,7 +3448,7 @@ function displayReferenceImage(output) {
     const isReferenceStageComplete = !!(output && output.stage_ready === true);
 
     if (hasPendingReferenceRegeneration()) {
-        // 仍有参考图/装扮/场景状态/故事版在重新生成中：状态栏必须保持“图片重新生成中”，
+        // 仍有参考图/装扮/布景状态/故事版在重新生成中：状态栏必须保持“图片重新生成中”，
         // 不能因为 reference_output 携带 ready_for_confirmation 就误显示“已生成完成，请确认”。
         renderStatusBar(t('labels.referenceImageRegeneratingText'), 'loading', t('steps.referenceImageTitle'));
     } else if (isReferenceGenerationComplete || isReferenceStageComplete) {
@@ -3392,9 +3493,9 @@ function displayReferenceImage(output) {
 
     refreshReferenceImageActionState();
 
-    // 在布景参考图库之后渲染“各分镜-角色装扮-场景状态”模块。
+    // 在布景参考图库之后渲染“各分镜-角色装扮-布景状态”模块。
     displayVariantAssets(output);
-    // 在角色装扮/场景状态模块之后、分镜视频之前渲染“各分镜故事版”模块。
+    // 在角色装扮/布景状态模块之后、分镜视频之前渲染“各分镜故事版”模块。
     displayStoryboards(output);
 
     contentDisplay.scrollTop = contentDisplay.scrollHeight;
@@ -3407,7 +3508,7 @@ function displayReferenceImage(output) {
     }
 }
 
-// 渲染“各分镜-角色装扮-场景状态”模块：位于布景参考图库之下，布局参照参考图库。
+// 渲染“各分镜-角色装扮-布景状态”模块：位于布景参考图库之下，布局参照参考图库。
 function displayVariantAssets(output) {
     const outfitImages = (output && output.character_outfit_images) || [];
     const sceneStateImages = (output && output.scene_state_images) || [];
@@ -3425,7 +3526,7 @@ function displayVariantAssets(output) {
         card.id = 'variant-assets-card';
     }
 
-    // 保证顺序：参考图库 → 角色装扮/场景状态 → 故事版。插入到参考图库卡片之后。
+    // 保证顺序：参考图库 → 角色装扮/布景状态 → 故事版。插入到参考图库卡片之后。
     const referenceCard = document.getElementById('reference-image-card');
     if (referenceCard && referenceCard.parentNode === contentDisplay) {
         if (referenceCard.nextSibling !== card) {
@@ -3478,7 +3579,7 @@ function displayVariantAssets(output) {
     refreshVariantAssetsActionState();
 }
 
-// 刷新“各分镜-角色装扮-场景状态”模块内重新生成按钮状态。
+// 刷新“各分镜-角色装扮-布景状态”模块内重新生成按钮状态。
 function refreshVariantAssetsActionState() {
     const card = document.getElementById('variant-assets-card');
     if (!card) return;
@@ -3528,7 +3629,7 @@ function finishReferenceAssetRegeneration(referenceAssetKey, force = false) {
     }
 }
 
-// 处理后端通过 WebSocket 推送的单张重生成结果（角色装扮图/场景状态图/故事版/参考图库）。
+// 处理后端通过 WebSocket 推送的单张重生成结果（角色装扮图/布景状态图/故事版/参考图库）。
 function handleReferenceAssetRegenerated(data) {
     data = data || {};
     const referenceAssetKey = data.reference_asset_key || '';
@@ -3595,7 +3696,7 @@ function handleVideoSceneRegenerated(data) {
     }
 }
 
-// 重新生成单张角色装扮图/场景状态图
+// 重新生成单张角色装扮图/布景状态图
 async function regenerateVariantAsset(referenceType, encodedVariantKey) {
     if (!currentProjectId) {
         alert(t('messages.createProjectFirst'));
@@ -3691,7 +3792,7 @@ function displayStoryboards(output) {
         card.id = 'storyboard-card';
     }
 
-    // 保证顺序：参考图库 → 角色装扮/场景状态 → 故事版 → 分镜视频。插入到装扮/状态卡片（若无则参考图库卡片）之后。
+    // 保证顺序：参考图库 → 角色装扮/布景状态 → 故事版 → 分镜视频。插入到装扮/状态卡片（若无则参考图库卡片）之后。
     const anchorCard = document.getElementById('variant-assets-card') || document.getElementById('reference-image-card');
     if (anchorCard && anchorCard.parentNode === contentDisplay) {
         if (anchorCard.nextSibling !== card) {

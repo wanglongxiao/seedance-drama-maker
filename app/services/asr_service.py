@@ -4,10 +4,12 @@
 # Open Source Usage: attribution required; preserve this notice in redistributions.
 
 import json
+import os
 import time
 import uuid
 import requests
 from typing import Optional, Dict, Any
+from urllib.parse import urlparse
 from app.config import config
 from app.utils.logger import get_logger
 
@@ -29,6 +31,23 @@ class ASRService:
         if not self.api_key:
             raise ValueError("Missing required config: speech.api_key")
 
+    @staticmethod
+    def _get_audio_format_from_url(audio_url: str) -> str:
+        parsed_url = urlparse(audio_url)
+        extension = os.path.splitext(parsed_url.path)[1].lower().lstrip(".")
+        extension_aliases = {
+            "weba": "webm",
+            "m4a": "mp4",
+            "oga": "ogg",
+        }
+        return extension_aliases.get(extension, extension or "wav")
+
+    @staticmethod
+    def _get_default_codec(audio_format: str) -> str:
+        if audio_format in {"webm", "ogg", "opus"}:
+            return "opus"
+        return "raw"
+
     def submit_task(self, audio_url: str, language: Optional[str] = None, **kwargs) -> tuple:
         """
         提交ASR任务
@@ -43,12 +62,14 @@ class ASRService:
         """
         submit_url = f"{self.base_url}{self.submit_path}"
         task_id = str(uuid.uuid4())
+        audio_format = kwargs.get("format") or self._get_audio_format_from_url(audio_url)
+        codec = kwargs.get("codec") or self._get_default_codec(audio_format)
 
         # 构建音频参数
         audio_params = {
             "url": audio_url,
-            "format": kwargs.get("format", "wav"),
-            "codec": kwargs.get("codec", "raw"),
+            "format": audio_format,
+            "codec": codec,
             "rate": kwargs.get("rate", 16000),
             "bits": kwargs.get("bits", 16),
             "channel": kwargs.get("channel", 1)
@@ -74,7 +95,7 @@ class ASRService:
             }
         }
 
-        logger.info(f"Submitting ASR task: {task_id}")
+        logger.info(f"Submitting ASR task: {task_id}, format={audio_format}, codec={codec}")
 
         # 构建请求头（使用 x-api-key 认证）
         headers = {

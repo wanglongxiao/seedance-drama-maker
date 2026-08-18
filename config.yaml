@@ -83,7 +83,7 @@ models:
     temperature: 0.3
     max_tokens: 30000
 
-  # 故事版审核模型：用于分镜故事版（6宫格白描）图像理解审核
+  # 故事版审核模型：用于分镜故事版（白描线稿多宫格）图像理解审核
   # 对应代码：app/agents/storyboard_review_agent.py
   # 未单独配置 STORYBOARD_REVIEW_ENDPOINT 时，自动回落复用 video_review 的多模态端点
   storyboard_review:
@@ -165,7 +165,7 @@ video_review:
     physical-laws: 0.30                # 物理世界规律
     script_semantic_consistency: 0.30  # 与分镜脚本意义上一致
 
-# 故事版审核配置（6宫格白描图片审核）
+# 故事版审核配置（白描线稿多宫格图片审核）
 # 对应代码：app/agents/storyboard_review_agent.py + main_agent._generate_storyboard_with_review
 storyboard_review:
   # 是否启用故事版自动审核

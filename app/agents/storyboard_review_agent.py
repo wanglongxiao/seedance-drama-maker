@@ -8,7 +8,7 @@
 使用LLM的图像理解能力审核生成的白描多宫格故事版是否符合要求。
 
 审核 3 个硬性条件（任一不满足即不通过，需重新生成）：
-1. 是白描（黑白线稿）风格，且包含 4-7 幅宫格图（不要求 2 行 x 3 列排列）
+1. 是白描线稿风格，包含 6-12 幅宫格图，不一定要求是 3 行 x 3 列的排列
 2. 同一个角色在同一个画面（分格）中没有重复出现；且画面中任一角色不出现多于 2 只手臂或多于 2 条腿
 3. 角色的性别没有画错
 """
@@ -27,7 +27,7 @@ logger = get_logger("storyboard_review_agent")
 
 
 class StoryboardReviewAgent:
-    """分镜故事版审核Agent - 使用图像理解审核白描 6 宫格是否合规。"""
+    """分镜故事版审核Agent - 使用图像理解审核白描线稿多宫格是否合规。"""
 
     def __init__(self):
         # 复用视频审核模型端点（同为多模态视觉理解模型），可通过独立配置覆盖
@@ -95,7 +95,7 @@ class StoryboardReviewAgent:
             prompt_parts.append(scene_description[:600])
         prompt_parts.append("")
         prompt_parts.append("【3 个硬性审核条件 - 每条独立判断是否满足】")
-        prompt_parts.append("1. 白描多宫格：整张图必须是黑白线稿（白描/铅笔草图）风格，且被分成 4 到 7 个分格（宫格数量在 4-7 之间即可，不要求一定是 2 列 x 3 行的排列，横排、竖排或网格排列均可）。若为彩色、写实照片风、或分格数量少于 4 / 多于 7，则不满足。")
+        prompt_parts.append("1. 白描线稿多宫格：整张图必须是白描线稿风格（黑白线稿/铅笔草图/分镜线稿），且包含 6 到 12 幅宫格图；不一定要求是 3 行 x 3 列的排列，横排、竖排或网格排列均可。若为彩色、写实照片风、或宫格数量少于 6 / 多于 12，则不满足。")
         prompt_parts.append("2. 角色不重复且肢体正常：同一个角色在同一个分格画面中不能重复出现（不能出现同一人的多张脸/克隆分身）；并且画面中任何一个角色都不能出现多于 2 只手臂或多于 2 条腿（不能出现多手多脚等肢体错误）。若任一分格里同一角色出现多次，或任一角色出现超过 2 只手臂 / 超过 2 条腿，则不满足。")
         prompt_parts.append("3. 性别正确：画面中角色的性别必须与上面角色清单一致，不能把男画成女或把女画成男。若有性别画错，则不满足。")
         prompt_parts.append("")
@@ -110,7 +110,7 @@ class StoryboardReviewAgent:
         prompt_parts.append('  "approved": <true/false - 三个条件是否全部满足>,')
         prompt_parts.append('  "feedback": "<详细反馈，说明哪些条件满足/不满足，不通过时指出具体问题>",')
         prompt_parts.append('  "checks": {')
-        prompt_parts.append('    "is_line_art_six_panel": <true/false - 是否为白描风格且分格数量在4-7之间>,')
+        prompt_parts.append('    "is_line_art_storyboard": <true/false - 是否为白描线稿风格且宫格数量在6-12之间>,')
         prompt_parts.append('    "no_duplicate_character": <true/false - 同一角色是否未重复出现，且无角色出现多于2只手臂或多于2条腿>,')
         prompt_parts.append('    "gender_correct": <true/false>')
         prompt_parts.append('  }')
@@ -174,7 +174,7 @@ class StoryboardReviewAgent:
 
             # 以三项 check 为准重算 approved，避免模型 approved 字段与 checks 不一致
             check_values = [
-                checks.get('is_line_art_six_panel'),
+                checks.get('is_line_art_storyboard'),
                 checks.get('no_duplicate_character'),
                 checks.get('gender_correct'),
             ]

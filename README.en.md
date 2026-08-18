@@ -16,10 +16,10 @@ Powered by the **SeeDance 2.5** video model — turn one sentence into a cinemat
 - 🖼️ **Up to 50 reference inputs**: a single task can fuse up to 50 character / backdrop reference images for highly consistent characters and scenes across shots.
 - 🌍 **14 languages natively supported**: native multilingual dialogue and narration across Chinese, English, Japanese, Spanish, and 14 languages total.
 - 🎞️ **Cinematic audiovisual quality**: native audio-video sync, adaptive aspect ratio, and the final cut is remuxed to high-fidelity `MP4` (H.264/AAC, `+faststart`) that streams progressively in the browser.
-- 🎭 **Character-outfit / scene-state variants**: per scene the system derives character-outfit images and scene time/weather-state images, and references them consistently in storyboards and scene videos.
+- 🎭 **Character-outfit / backdrop-state variants**: per scene the system derives character-outfit images and backdrop time/weather-state images, and references them consistently in storyboards and scene videos.
 - 🧩 **Line-art storyboard + AI review**: line-art multi-panel storyboards are generated first and auto-reviewed (style, no duplicated character and normal limbs, correct gender); failures regenerate automatically.
 - 📄 **Comic PDF export**: when scene-video generation starts, the system generates a script-title PDF in parallel, including a cover, character page, and one storyboard page per scene, then exposes it in the Web UI for download.
-- 🤖 **Fully automated multi-agent pipeline**: script → reference library → character-outfit/scene-state variants → storyboards → scene generation & review → long-video merge, end to end.
+- 🤖 **Fully automated multi-agent pipeline**: script → reference library → character-outfit/backdrop-state variants → storyboards → scene generation & review → long-video merge, end to end.
 
 ## Overview
 
@@ -37,7 +37,7 @@ The system automatically coordinates script writing, character definitions, back
 Current primary workflow:
 
 ```text
-User Input -> Script Generation -> Reference Library Confirmation -> Character-Outfit/Scene-State Variants -> Storyboard Generation And Review -> Comic PDF Export + Scene Video Generation And Review -> Final Merge
+User Input -> Script Generation -> Reference Library Confirmation -> Character-Outfit/Backdrop-State Variants -> Storyboard Generation And Review -> Comic PDF Export + Scene Video Generation And Review -> Final Merge
 ```
 
 The system focuses on:
@@ -47,6 +47,7 @@ The system focuses on:
 - Keeping auto mode and manual mode consistent at the workflow level
 - Combining automatic retry with manual takeover when video review fails
 - Supporting multilingual UI and isolated multi-tab execution
+- Isolating cloud interactive requests: uploads and speech-to-text use a dedicated thread pool so long image/video generation jobs cannot starve them and trigger gateway timeouts
 
 ## Showcase
 
@@ -190,6 +191,8 @@ Supported inputs:
 - Uploaded reference images
 - Voice recording converted with `Seed-Speech`
 
+The speech-to-text path preserves the browser's actual recording format. Chrome and cloud browsers commonly produce `webm/opus`, which is uploaded as `.webm` and submitted to `Seed-Speech` with `format=webm` and `codec=opus`; local or other browser outputs such as `wav/mp3/m4a/ogg` are adapted by extension. ASR polling is a blocking network operation, so the backend runs it in the dedicated interactive thread pool rather than the generation pool.
+
 ### 2. Script Generation
 
 `ScriptAgent` generates:
@@ -249,13 +252,13 @@ Authentication notes:
 - Runtime configuration therefore requires both `MODELARK_API_KEY` and `BYTEPLUS_AK/BYTEPLUS_SK`
 - The BytePlus account must also have the virtual asset-library subscription enabled; otherwise `CreateAssetGroup` returns `SubscriptionRequired`
 
-### 3.2 Character-Outfit And Scene-State Images
+### 3.2 Character-Outfit And Backdrop-State Images
 
 After all character main images and scene main images are generated, the system derives variant images from each scene:
 
 - Variants are generated only when a scene's character-action field contains an outfit different from the default, or its scene-description field contains a time/weather state different from the backdrop default
 - Character-outfit image = the scene's outfit description + the corresponding character main image
-- Scene-state image = the scene's time/weather state + the corresponding scene main image
+- Backdrop-state image = the scene's time/weather state + the corresponding scene main image
 - Variants across scenes are generated in parallel, bounded by the image concurrency setting (`video_generation.reference_images.max_concurrency`)
 - Variants are deduplicated (each `character::outfit` or `scene::time::weather` is generated once) and preferred in storyboards and scene videos
 
@@ -274,8 +277,8 @@ Storyboard `Regenerate` logic, UI, and retry cap mirror scene videos, controlled
 `VideoAgent` generates each scene video with:
 
 - Character image (preferring the character-outfit image when the scene has one)
-- Scene image (preferring the scene-state image when the scene has one)
-- The scene's line-art 6-panel storyboard
+- Scene image (preferring the backdrop-state image when the scene has one)
+- The scene's line-art 9-panel storyboard
 - The current scene script and user style requirements
 
 Character references now use `asset://asset-id` URIs in video generation requests whenever an asset is available, for example:
@@ -424,6 +427,7 @@ Services
 - Long-running background tasks can continue pushing results after WebSocket reconnects through a stable client ID
 - Reference generation, video generation, review, and merge are rendered progressively in the UI
 - Exported artifacts such as comic PDFs and final videos are preserved during project-ending cleanup
+- Uploads, ASR, and other real-time interactions use the dedicated `interactive` thread pool; image generation, video generation, review, and merge use the `generation` pool, reducing queue timeout risk on cloud single-instance multi-project workloads
 
 ## Usage
 
@@ -459,6 +463,7 @@ The latest real local integration run has already verified the full workflow:
 
 - upload a portrait to `TOS`
 - upload audio and run `Seed-Speech` `ASR`
+- verify browser-recorded `webm/opus` and local `wav` recordings are both submitted correctly to `Seed-Speech`
 - create a project-scoped virtual asset group and register the portrait asset
 - generate the script with the real script model endpoint
 - inject character references into video generation with `asset://asset-id`

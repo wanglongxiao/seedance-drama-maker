@@ -14,7 +14,7 @@ from app.services.asr_service import asr_service
 from app.utils.i18n import normalize_locale, translate
 from app.utils.logger import get_logger
 from app.utils.task_paths import ensure_project_temp_dir
-from app.utils.thread_pools import run_generation
+from app.utils.thread_pools import run_generation, run_interactive
 from app.models.schemas import VideoProject, Script, GeneratedImage, GeneratedVideo, VideoSceneState, UploadedReferenceImage
 from app.agents.script_agent import ScriptAgent
 from app.agents.image_agent import ImageAgent
@@ -320,6 +320,18 @@ class MainAgent:
         image.asset_status = str(asset_info.get("Status") or "").strip() or None
         return image
 
+    async def _recognize_audio_interactive(self, audio_url: Optional[str], context: str = "ASR") -> Optional[str]:
+        """Run blocking ASR polling outside the event loop and generation pool."""
+        if not audio_url:
+            return None
+        try:
+            audio_text = await run_interactive(asr_service.recognize, audio_url)
+            logger.info(f"{context} recognized: {audio_text[:100]}...")
+            return audio_text
+        except Exception as e:
+            logger.error(f"{context} failed: {str(e)}")
+            return None
+
     async def create_project(
         self,
         user_input: str,
@@ -362,11 +374,10 @@ class MainAgent:
         audio_text = None
         if audio_url:
             logger.info(f"Processing audio for project {project_id}")
-            try:
-                audio_text = asr_service.recognize(audio_url)
-                logger.info(f"Audio recognized: {audio_text[:100]}...")
-            except Exception as e:
-                logger.error(f"ASR failed: {str(e)}")
+            audio_text = await self._recognize_audio_interactive(
+                audio_url,
+                context=f"Audio for project {project_id}",
+            )
 
         # 从用户输入中提取图片/视频比例
         aspect_ratio = extract_aspect_ratio(user_input)
@@ -676,7 +687,7 @@ class MainAgent:
         )
 
     def _reference_stage_has_category2(self, project: VideoProject) -> bool:
-        """判断分类2（角色装扮图/场景状态图）是否存在。"""
+        """判断分类2（角色装扮图/布景状态图）是否存在。"""
         expected = self._expected_reference_counts(project)
         return (expected["character_outfits"] + expected["scene_states"]) > 0
 
@@ -751,7 +762,7 @@ class MainAgent:
             if reference_type == "storyboard":
                 slot_index = max(0, int(getattr(image, "scene_number", 1) or 1) - 1)
             elif reference_type in ("character_outfit", "scene_state"):
-                # 装扮图/场景状态图为去重复用列表，直接按顺序索引
+                # 装扮图/布景状态图为去重复用列表，直接按顺序索引
                 slot_index = fallback_index
             else:
                 slot_index = self._get_reference_slot_index(
@@ -799,6 +810,7 @@ class MainAgent:
                     scene_feature_names.append(feature_text)
             mappings[scene_number] = {
                 "scene_name": getattr(scene, "scene_name", ""),
+                "scene_state": getattr(scene, "scene_state", "") or "",
                 "time_of_day": getattr(scene, "time_of_day", ""),
                 "weather": getattr(scene, "weather", ""),
                 "scene_features": scene_feature_names,
@@ -1046,14 +1058,14 @@ class MainAgent:
         self,
         project: VideoProject,
     ) -> Dict[str, List[Dict[str, Any]]]:
-        """基于剧本分镜规划需要生成的角色装扮图与场景状态图（已去重）。
+        """基于剧本分镜规划需要生成的角色装扮图与布景状态图（已去重）。
 
         去重复用（用户确认）：
         - 角色装扮图按 (角色名, 装扮) 去重，相同组合只生成一次。
-        - 场景状态图按 (场景名, time_of_day, weather) 去重，相同组合只生成一次。
+        - 布景状态图按 (场景名, time_of_day, weather) 去重；scene_state 只作为展示/提示词字段，不参与去重。
         触发判定（用户确认）：
         - 角色装扮图仅当分镜装扮 != 该角色默认 clothing 时才生成。
-        - 场景状态图仅当分镜的 time_of_day/weather != 该场景定义的默认值时才生成。
+        - 仅当 time_of_day/weather != 场景定义默认值时生成布景状态图；相同布景、相同时间、相同天气只生成一次。
         计数仅依赖剧本，可在生成主图前提前得知；base 主图在执行时再查找。
         """
         script = getattr(project, "script", None)
@@ -1106,12 +1118,12 @@ class MainAgent:
                     continue
                 default_tod = self._normalize_name_key(definition.get("time_of_day", "") or "")
                 default_weather = self._normalize_name_key(definition.get("weather", "") or "")
-                if (
-                    self._normalize_name_key(scene_tod) == default_tod
-                    and self._normalize_name_key(scene_weather) == default_weather
-                ):
+                scene_tod_key = self._normalize_name_key(scene_tod)
+                scene_weather_key = self._normalize_name_key(scene_weather)
+                if scene_tod_key == default_tod and scene_weather_key == default_weather:
                     continue
-                dedup_key = f"{scene_key}::{self._normalize_name_key(scene_tod)}::{self._normalize_name_key(scene_weather)}"
+                scene_state = "，".join(part for part in [scene_tod, scene_weather] if part)
+                dedup_key = f"{scene_key}::state::{scene_tod_key}::{scene_weather_key}"
                 if dedup_key in scene_state_tasks:
                     continue
                 scene_state_tasks[dedup_key] = {
@@ -1119,6 +1131,7 @@ class MainAgent:
                     "scene_name": str(definition.get("name") or part).strip(),
                     "scene_key": scene_key,
                     "scene_description": definition.get("description", ""),
+                    "scene_state": scene_state,
                     "time_of_day": scene_tod,
                     "weather": scene_weather,
                     "scene_number": scene_number,
@@ -1145,10 +1158,11 @@ class MainAgent:
         self,
         project: VideoProject,
         scene_key: str,
-        time_of_day: str,
-        weather: str,
+        scene_state: str = "",
+        time_of_day: str = "",
+        weather: str = "",
     ) -> Optional[GeneratedImage]:
-        dedup_key = f"{scene_key}::{self._normalize_name_key(time_of_day)}::{self._normalize_name_key(weather)}"
+        dedup_key = f"{scene_key}::state::{self._normalize_name_key(time_of_day)}::{self._normalize_name_key(weather)}"
         for image in getattr(project, "scene_state_images", []) or []:
             if getattr(image, "variant_key", None) == dedup_key:
                 return image
@@ -1186,12 +1200,13 @@ class MainAgent:
         ]
         scene_tod = str(getattr(scene, "time_of_day", "") or "").strip()
         scene_weather = str(getattr(scene, "weather", "") or "").strip()
+        scene_state = str(getattr(scene, "scene_state", "") or "").strip()
         matched_scene_images = []
         for image in getattr(project, "scene_reference_images", []) or []:
             image_name = self._normalize_name_key(getattr(image, "name", ""))
             if scene_name_keys and image_name in scene_name_keys:
                 # 若该场景在本分镜有状态图，则优先使用状态图代替主图
-                state_image = self._find_scene_state_asset(project, image_name, scene_tod, scene_weather)
+                state_image = self._find_scene_state_asset(project, image_name, scene_state, scene_tod, scene_weather)
                 matched_scene_images.append(state_image if state_image is not None else image)
         if matched_scene_images:
             selected.extend(matched_scene_images[: max(1, len(scene_name_keys))])
@@ -2439,10 +2454,10 @@ class MainAgent:
 
         audio_text = None
         if project.audio_url:
-            try:
-                audio_text = asr_service.recognize(project.audio_url)
-            except Exception as e:
-                logger.error(f"ASR failed: {str(e)}")
+            audio_text = await self._recognize_audio_interactive(
+                project.audio_url,
+                context=f"ASR for script generation project {project.project_id}",
+            )
         
         # 使用合并后的输入（包含风格信息）
         # 优先使用 combined_input，如果没有则使用 user_input
@@ -2475,10 +2490,10 @@ class MainAgent:
 
         audio_text = None
         if project.audio_url:
-            try:
-                audio_text = asr_service.recognize(project.audio_url)
-            except Exception as e:
-                logger.error(f"ASR failed during script rewrite: {str(e)}")
+            audio_text = await self._recognize_audio_interactive(
+                project.audio_url,
+                context=f"ASR for script rewrite project {project.project_id}",
+            )
 
         existing_input = getattr(project, 'combined_input', '') or f"原始需求：{project.user_input}"
         project.combined_input = f"""{existing_input}
@@ -2523,7 +2538,7 @@ class MainAgent:
 
         stage 控制惰性分阶段生成：
         - "category1": 仅角色图库 + 布景参考图库
-        - "category2": 仅角色装扮图 + 场景状态图（无差异则跳过）
+        - "category2": 仅角色装扮图 + 布景状态图（无差异则跳过）
         - "category3": 仅各分镜故事版
         - "all": 三类一次性生成（兼容旧 execute_images_step 路径）
         """
@@ -2739,6 +2754,7 @@ class MainAgent:
                     scene_name=task["scene_name"],
                     base_reference_image=base_image,
                     script=project.script,
+                    scene_state=task.get("scene_state"),
                     time_of_day=task.get("time_of_day"),
                     weather=task.get("weather"),
                     scene_description=task.get("scene_description"),
@@ -2826,8 +2842,8 @@ class MainAgent:
                 raise RuntimeError("No reference images were generated")
 
             if run_category2:
-                # 所有角色主图 + 场景主图生成完成后，再按每个分镜的角色装扮 / 场景状态信息，
-                # 生成角色装扮图与场景状态图（已去重复用）。并行生成，受 max_concurrency 控制。
+                # 所有角色主图 + 场景主图生成完成后，再按每个分镜的角色装扮 / 布景状态信息，
+                # 生成角色装扮图与布景状态图（已去重复用）。并行生成，受 max_concurrency 控制。
                 variant_tasks = [
                     asyncio.create_task(generate_outfit_job(index, task))
                     for index, task in enumerate(outfit_tasks_plan)
@@ -2854,7 +2870,7 @@ class MainAgent:
                     _sync_all()
 
             if run_category3:
-                # 所有角色图（含装扮图）+ 场景图（含状态图）生成完成后，再逐个分镜生成 6 宫格 storyboard。
+                # 所有角色图（含装扮图）+ 场景图（含状态图）生成完成后，再逐个分镜生成 9 宫格 storyboard。
                 # 多个分镜的 storyboard 并行生成，并发数由参考图库配置的 max_concurrency（semaphore）控制。
                 scenes = list(getattr(project.script, "scenes", None) or [])
                 storyboard_tasks = [
@@ -3208,10 +3224,12 @@ class MainAgent:
         variant_key: str,
         feedback: str = "用户要求重新生成",
     ) -> GeneratedImage:
-        """重新生成指定的角色装扮图或场景状态图（按 variant_key 定位并保留去重复用）。"""
+        """重新生成指定的角色装扮图或布景状态图（按 variant_key 定位并保留去重复用）。"""
         self._raise_if_project_ended(project)
         reference_type = str(reference_type or "").strip().lower()
         variant_key = str(variant_key or "").strip()
+        if reference_type == "scene_state":
+            reference_type = "scene_state"
         if reference_type not in {"character_outfit", "scene_state"}:
             raise ValueError(self._t(project, "error.unsupported_reference_type", reference_type=reference_type or "unknown"))
         if not variant_key:
@@ -3304,6 +3322,7 @@ class MainAgent:
                     scene_name=task["scene_name"],
                     base_reference_image=base_image,
                     script=project.script,
+                    scene_state=task.get("scene_state"),
                     time_of_day=task.get("time_of_day"),
                     weather=task.get("weather"),
                     scene_description=task.get("scene_description"),
@@ -3368,9 +3387,9 @@ class MainAgent:
         websocket=None,
         scene_number: Optional[int] = None,
     ) -> GeneratedImage:
-        """生成单个分镜的 6 宫格故事版，并按 3 条件自动审核 + 自动重生成。
+        """生成单个分镜的 9 宫格故事版，并按 3 条件自动审核 + 自动重生成。
 
-        审核 3 条件（任一不满足即重生成）：白描 6 宫格 / 同一角色不重复 / 性别正确。
+        审核 3 条件（任一不满足即重生成）：白描线稿多宫格 / 同一角色不重复且肢体正常 / 性别正确。
         重生成次数上限参考视频重试逻辑，由 `storyboard_review.max_retries` 控制。
         """
         review_enabled = bool(config.get('storyboard_review.enabled', True))
@@ -3439,7 +3458,7 @@ class MainAgent:
         scene_number: int,
         feedback: str = "用户要求重新生成",
     ) -> GeneratedImage:
-        """重新生成指定分镜的 6 宫格故事版图片（参考该分镜的角色图 + 场景图 + 分镜内容）。"""
+        """重新生成指定分镜的 9 宫格故事版图片（参考该分镜的角色图 + 场景图 + 分镜内容）。"""
         self._raise_if_project_ended(project)
         scene_number = int(scene_number or 0)
         scenes = list(getattr(getattr(project, "script", None), "scenes", None) or [])

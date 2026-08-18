@@ -36,6 +36,8 @@ class Scene(BaseModel):
     """分镜数据模型"""
     scene_number: int
     scene_name: str
+    # 本分镜的显著布景状态描述，仅描述时间/天气，如“深夜雷暴，窗外闪电频繁照亮破败卧室”
+    scene_state: Optional[str] = None
     description: str
     dialogue: str
     duration: int  # 秒
@@ -65,7 +67,10 @@ class Character(BaseModel):
     name: str
     age: str  # 改为字符串类型，支持如"外表16岁"、"中年"等描述
     gender: str
+    nationality: Optional[str] = None
     face_features: str
+    hairstyle: Optional[str] = None
+    body_features: Optional[str] = None
     skin_tone: str
     clothing: Optional[str] = None
     voice_type: str
@@ -73,6 +78,8 @@ class Character(BaseModel):
     voice_style: str
     # 角色性格侧写：简要的性格特征，体现真实性与人性复杂性；主角尤其需要
     personality: Optional[str] = None
+    # 角色身份背景：职业、社会身份、来历、关系网络等，用于后续生图/生视频保持角色一致性
+    identity_background: Optional[str] = None
 
 class Script(BaseModel):
     """剧本数据模型"""
@@ -95,7 +102,7 @@ class GeneratedImage(BaseModel):
     prompt: str
     name: Optional[str] = None
     reference_type: Optional[Literal["character", "scene", "character_outfit", "scene_state", "storyboard"]] = None
-    variant_key: Optional[str] = None  # 装扮图/场景状态图去重键，如 "角色key::装扮key" 或 "场景key::时间key::天气key"
+    variant_key: Optional[str] = None  # 装扮图/布景状态图去重键，如 "角色key::装扮key" 或 "场景key::时间key::天气key"
     source: str = "generated"
     used_original: bool = False
     is_end_frame: bool = False

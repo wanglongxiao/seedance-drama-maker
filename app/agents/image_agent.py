@@ -119,6 +119,50 @@ class ImageAgent:
         shortened = re.split(r"[，。；;,.!?！？\n]", cleaned)[0].strip()
         return shortened[:24] or f"Scene {index}"
 
+    def _build_character_profile_lines(self, character: Character) -> List[str]:
+        """Stable character profile fields shared by all character-related image prompts."""
+        field_specs = [
+            ("Name", getattr(character, "name", "")),
+            ("Age", getattr(character, "age", "")),
+            ("Gender", getattr(character, "gender", "")),
+            ("Nationality", getattr(character, "nationality", None)),
+            ("Face features", getattr(character, "face_features", "")),
+            ("Hairstyle", getattr(character, "hairstyle", None)),
+            ("Body features", getattr(character, "body_features", None)),
+            ("Skin tone", getattr(character, "skin_tone", "")),
+            ("Default clothing", getattr(character, "clothing", None)),
+            ("Personality", getattr(character, "personality", None)),
+            ("Identity background", getattr(character, "identity_background", None)),
+        ]
+        return [
+            f"{label}: {str(value).strip()}"
+            for label, value in field_specs
+            if str(value or "").strip()
+        ]
+
+    def _outfit_requires_visible_genitals(self, outfit: str) -> bool:
+        text = str(outfit or "").lower()
+        upper_body_only_keywords = [
+            "上身全裸", "上半身全裸", "上身赤裸", "上半身赤裸",
+            "上身裸露", "上半身裸露", "赤裸上身", "裸露上身",
+            "topless", "shirtless", "bare chest", "bare upper body",
+        ]
+        lower_body_or_genital_keywords = [
+            "赤裸下身", "下身赤裸", "下体裸露", "裸露下体", "下半身赤裸", "下半身裸露", "下身全裸",
+            "露出生殖器", "生殖器", "阴茎", "外阴", "私处裸露", "正面裸体", "正面全裸",
+            "bare genitals", "visible genitals", "penis", "vulva",
+        ]
+        full_nudity_keywords = [
+            "全裸", "一丝不挂", "赤身裸体", "全身赤裸", "全身裸体",
+            "fully nude", "naked", "full nude", "bare genitals", "visible genitals",
+            "penis", "vulva",
+        ]
+        if any(keyword in text for keyword in lower_body_or_genital_keywords):
+            return True
+        if any(keyword in text for keyword in upper_body_only_keywords):
+            return False
+        return any(keyword in text for keyword in full_nudity_keywords)
+
     def _infer_scene_time_guidance(self, scene_name: str, scene_description: str) -> List[str]:
         text = " ".join([
             str(scene_name or ""),
@@ -185,16 +229,11 @@ class ImageAgent:
         else:
             prompt_parts.append("[CRITICAL] Generate the character from the character definition only.")
 
-        prompt_parts.append(f"Name: {character.name}")
-        prompt_parts.append(f"Profile: {character.age} {character.gender}")
-        prompt_parts.append(f"Face features: {character.face_features}")
-        prompt_parts.append(f"Skin tone: {character.skin_tone}")
-        if character.clothing:
-            prompt_parts.append(f"Clothing: {character.clothing}")
+        prompt_parts.extend(self._build_character_profile_lines(character))
 
-        prompt_parts.append("Front view, facing camera, clear facial features")
-        prompt_parts.append("Large half-body portrait above the knees, face occupying a significant portion of the frame")
-        prompt_parts.append("Crop above the knees and keep the face details prominent")
+        prompt_parts.append("[CRITICAL] Character framing: full-body front view only, showing the complete character from head to feet.")
+        prompt_parts.append("[CRITICAL] Face, facial features, eyes and identity must be sharp and clearly visible.")
+        prompt_parts.append("[CRITICAL] Do NOT crop the knees, waist, shoulders, head, hands or feet; the entire body must be visible.")
         prompt_parts.append("Pure white background, no scenery, no props")
         prompt_parts.append("High quality character reference image for consistent video generation")
 
@@ -301,15 +340,14 @@ class ImageAgent:
 
         prompt_parts.append(f"[CHARACTER OUTFIT VARIANT] {character.name}")
         prompt_parts.append("[CRITICAL] Keep the SAME person as the reference image: preserve face, hairstyle, facial features, skin tone and identity exactly.")
-        prompt_parts.append(f"Name: {character.name}")
-        prompt_parts.append(f"Profile: {character.age} {character.gender}")
-        prompt_parts.append(f"Face features: {character.face_features}")
-        prompt_parts.append(f"Skin tone: {character.skin_tone}")
+        prompt_parts.extend(self._build_character_profile_lines(character))
         prompt_parts.append(f"[OUTFIT REQUIREMENT] Change ONLY the clothing/outfit to: {outfit}")
+        if self._outfit_requires_visible_genitals(outfit):
+            prompt_parts.append("[CRITICAL] The outfit requirement explicitly indicates bare lower body or full nudity, not merely bare upper body. If the character is male, generate a clearly nude male image with visible penis. If the character is female, generate a front-facing fully nude female image with visible vulva; pubic hair may be present or absent. Do NOT cover, censor, blur, crop out, hide with hands, or obscure the genital area.")
         prompt_parts.append("[CRITICAL] The new outfit must fully replace the previous clothing while keeping the same character identity.")
-        prompt_parts.append("Front view, facing camera, clear facial features")
-        prompt_parts.append("Large half-body portrait above the knees, face occupying a significant portion of the frame")
-        prompt_parts.append("Crop above the knees and keep the face details prominent")
+        prompt_parts.append("[CRITICAL] Character framing: full-body front view only, showing the complete character from head to feet.")
+        prompt_parts.append("[CRITICAL] Face, facial features, eyes and identity must be sharp and clearly visible.")
+        prompt_parts.append("[CRITICAL] Do NOT crop the knees, waist, shoulders, head, hands or feet; the entire body must be visible.")
         prompt_parts.append("Pure white background, no scenery, no props")
         prompt_parts.append("High quality character outfit reference image for consistent video generation")
 
@@ -336,13 +374,14 @@ class ImageAgent:
         scene_name: str,
         base_reference_image: GeneratedImage,
         script: Script,
+        scene_state: str = None,
         time_of_day: str = None,
         weather: str = None,
         scene_description: str = None,
         user_style_info: str = None,
         aspect_ratio: str = None,
     ) -> GeneratedImage:
-        """基于场景主图 + 分镜中的时间/天气状态信息，生成该场景的状态参考图。"""
+        """基于场景主图 + 分镜中的布景状态/时间/天气信息，生成该场景的状态参考图。"""
         if not aspect_ratio:
             aspect_ratio = self.default_aspect_ratio
 
@@ -354,7 +393,7 @@ class ImageAgent:
         else:
             prompt_parts.append(f"Story style: {script.style}")
 
-        prompt_parts.append(f"[SCENE STATE VARIANT] {scene_name}")
+        prompt_parts.append(f"[BACKDROP STATE VARIANT] {scene_name}")
         prompt_parts.append("[CRITICAL] Keep the SAME location as the reference image: preserve environment layout, architecture, landmarks and spatial composition exactly.")
         if scene_description:
             prompt_parts.append(f"Backdrop definition: {scene_description}")
@@ -363,14 +402,18 @@ class ImageAgent:
             state_parts.append(f"time of day = {time_of_day}")
         if weather:
             state_parts.append(f"weather = {weather}")
+        if scene_state:
+            prompt_parts.append(f"Backdrop state label for naming only: {scene_state}")
         if state_parts:
-            prompt_parts.append(f"[STATE REQUIREMENT] Adjust ONLY the lighting/atmosphere to reflect: {', '.join(state_parts)}")
-        prompt_parts.append("[CRITICAL] Change only lighting, sky, weather and atmosphere; do not change the environment structure or layout.")
+            prompt_parts.append(f"[STATE REQUIREMENT] Adjust ONLY the time of day and weather to reflect: {', '.join(state_parts)}")
+        prompt_parts.append("[CRITICAL] The backdrop state has exactly two dimensions: time_of_day and weather. Use ONLY those two values for visual changes.")
+        prompt_parts.append("[CRITICAL] Do NOT add or change lighting, scent, emotion, plot events, character actions, character traces, blood, battle damage, destruction, temporary props, people, bodies, silhouettes, or creatures unless directly required by the time_of_day/weather.")
+        prompt_parts.append("[CRITICAL] Do not change the environment structure, landmark layout or camera composition.")
         prompt_parts.append("[CRITICAL] Environment-only scene board. Do not show any person, face, body, crowd, character silhouette, or creature.")
         prompt_parts.append("Wide cinematic environment composition")
         prompt_parts.append("Empty environment, no humans, no characters, no foreground person")
         prompt_parts.append("No subtitles, no text overlay, no street sign text")
-        prompt_parts.append("High quality scene state reference image for consistent video generation")
+        prompt_parts.append("High quality backdrop state reference image for consistent video generation")
 
         prompt = "\n".join(prompt_parts)
         base_url = getattr(base_reference_image, "url", None)
@@ -381,7 +424,7 @@ class ImageAgent:
             image_urls=[base_url] if base_url else None,
             ratio=aspect_ratio,
         )
-        state_suffix = " ".join(part for part in [time_of_day or "", weather or ""] if part).strip() or "state"
+        state_suffix = " ".join(part for part in [scene_state or "", time_of_day or "", weather or ""] if part).strip() or "state"
         return GeneratedImage(
             scene_number=0,
             url=response["data"][0]["url"],
@@ -473,8 +516,18 @@ class ImageAgent:
                 f"face={character.face_features}",
                 f"skin={character.skin_tone}",
             ]
+            if getattr(character, "nationality", None):
+                summary.append(f"nationality={character.nationality}")
+            if getattr(character, "hairstyle", None):
+                summary.append(f"hairstyle={character.hairstyle}")
+            if getattr(character, "body_features", None):
+                summary.append(f"body={character.body_features}")
             if getattr(character, "clothing", None):
                 summary.append(f"clothing={character.clothing}")
+            if getattr(character, "personality", None):
+                summary.append(f"personality={character.personality}")
+            if getattr(character, "identity_background", None):
+                summary.append(f"identity_background={character.identity_background}")
             lines.append(", ".join(summary))
         return lines
 
@@ -547,9 +600,9 @@ class ImageAgent:
             elif reference_type == "scene":
                 label = "scene reference"
             elif reference_type == "scene_state":
-                label = "scene state reference"
+                label = "backdrop state reference"
             elif reference_type == "storyboard":
-                label = "6-panel storyboard"
+                label = "9-panel storyboard"
             else:
                 label = reference_type
             prompt_parts.append(f"- Image {index}: {getattr(image, 'name', f'Reference {index}')} ({label})")
@@ -568,12 +621,12 @@ class ImageAgent:
 
         prompt_parts: List[str] = [f"Aspect ratio: {aspect_ratio}"]
 
-        # 故事版必须是白描 6 宫格：把强制样式约束放在最前且最显著，
+        # 故事版必须是白描线稿 9 宫格：把强制样式约束放在最前且最显著，
         # 且刻意不注入用户的彩色/写实/电影感风格要求（会与白描线稿冲突，
-        # 曾导致模型偶发输出单张彩色写实图而非 6 宫格白描）。
-        prompt_parts.append("[OUTPUT TYPE] Black-and-white six-panel storyboard sheet (line-art sketch), NOT a finished color illustration.")
-        prompt_parts.append("[CRITICAL] Generate exactly ONE image containing SIX panels arranged in 2 columns x 3 rows (six equal storyboard cells).")
-        prompt_parts.append("[CRITICAL] Style MUST be monochrome black-and-white pencil/line drawing (whiteboard storyboard sketch). Absolutely NO color, NO photorealistic rendering, NO single full portrait.")
+        # 曾导致模型偶发输出单张彩色写实图而非多宫格白描线稿）。
+        prompt_parts.append("[OUTPUT TYPE] Black-and-white nine-panel storyboard sheet (line-art sketch), NOT a finished color illustration.")
+        prompt_parts.append("[CRITICAL] Generate exactly ONE image containing NINE panels, preferably arranged in a clear 3 columns x 3 rows storyboard grid (nine equal storyboard cells).")
+        prompt_parts.append("[CRITICAL] Style MUST be monochrome black-and-white pencil line-art drawing (line-art storyboard sketch). Absolutely NO color, NO photorealistic rendering, NO single full portrait.")
         prompt_parts.append("[CRITICAL] Ignore any color, lighting or photoreal styling from the reference images; use references ONLY for character identity, faces, costumes and scene layout.")
 
         scene_context = self._resolve_scene_definition_context(getattr(scene, "scene_name", ""), script)
@@ -587,9 +640,11 @@ class ImageAgent:
         prompt_parts.append(f"Scene name: {getattr(scene, 'scene_name', '')}")
         if scene_context["descriptions"]:
             prompt_parts.append(f"Scene backdrop definition: {'; '.join(scene_context['descriptions'])}")
-        prompt_parts.append(f"Scene description: {getattr(scene, 'description', '')}")
         resolved_time_of_day = str(getattr(scene, "time_of_day", "") or scene_context["time_of_day"]).strip()
         resolved_weather = str(getattr(scene, "weather", "") or scene_context["weather"]).strip()
+        resolved_scene_state = str(getattr(scene, "scene_state", "") or "").strip()
+        if resolved_scene_state:
+            prompt_parts.append(f"Current backdrop state: {resolved_scene_state}")
         if resolved_time_of_day:
             prompt_parts.append(f"Time of day: {resolved_time_of_day}")
         if resolved_weather:
@@ -597,6 +652,16 @@ class ImageAgent:
         resolved_scene_features = list(scene_context["scene_features"])
         if resolved_scene_features:
             prompt_parts.append(f"Scene features: {', '.join(resolved_scene_features)}")
+        scene_outfits = getattr(scene, "character_outfits", None) or {}
+        if scene_outfits:
+            outfit_lines = [
+                f"{name}: {outfit}"
+                for name, outfit in scene_outfits.items()
+                if str(name or "").strip() and str(outfit or "").strip()
+            ]
+            if outfit_lines:
+                prompt_parts.append(f"Current character outfit and hairstyle state: {'; '.join(outfit_lines)}")
+        prompt_parts.append(f"Scene description: {getattr(scene, 'description', '')}")
         prompt_parts.append(f"Dialogue or narration: {getattr(scene, 'dialogue', '') or '无'}")
         prompt_parts.append(f"Character action: {getattr(scene, 'character_description', '')}")
         prompt_parts.append(f"Mood: {getattr(scene, 'mood', '')}")
@@ -606,9 +671,9 @@ class ImageAgent:
             prompt_parts.append(f"Camera angle: {scene.camera_angle}")
         if getattr(scene, "characters_present", None):
             prompt_parts.append(f"Characters present: {', '.join(scene.characters_present)}")
-        prompt_parts.append("[CRITICAL] Generate ONE six-panel storyboard sheet for this exact scene.")
-        prompt_parts.append("[CRITICAL] Layout: 2 columns x 3 rows, six equal storyboard panels in a single image.")
-        prompt_parts.append("[CRITICAL] Style: black-and-white line drawing, whiteboard sketch, storyboard pencil art.")
+        prompt_parts.append("[CRITICAL] Generate ONE nine-panel storyboard sheet for this exact scene.")
+        prompt_parts.append("[CRITICAL] Layout: 3 columns x 3 rows, nine equal storyboard panels in a single image.")
+        prompt_parts.append("[CRITICAL] Style: black-and-white line-art drawing, line-art storyboard sketch, storyboard pencil art.")
         prompt_parts.append("[CRITICAL] Show the key beats, camera blocking, action flow, and emotional progression of the same scene.")
         prompt_parts.append("[CRITICAL] No color, no subtitles, no text labels, no speech bubbles.")
         prompt_parts.append("Professional production storyboard sheet for live-action shot planning.")
@@ -643,9 +708,9 @@ class ImageAgent:
 
         逻辑：
         1. 如果chatbot用户输入中包含风格信息，则仅使用用户输入的风格生成图片
-        2. 如果用户上传了图片（支持多张），对用户上传的图片进行风格化后去掉背景，仅保留主要角色的大半身正面像（膝盖以上），作为参考图库中的角色主参考图
+        2. 如果用户上传了图片（支持多张），对用户上传的图片进行风格化后去掉背景，仅保留主要角色的全身正面像，作为参考图库中的角色主参考图
         3. 如果用户没有上传图片，根据chatbot用户补充的描述信息（尤其是风格、场景、其他描述信息）与初始输入，
-           生成无背景的风格化主要角色的大半身正面像（膝盖以上）作为参考图库中的角色主参考图
+           生成无背景的风格化主要角色全身正面像作为参考图库中的角色主参考图
 
         参考图库会展示于预览区域，可以被下载/重新生成。待用户确认参考图库可用后再进行下一步。
 
@@ -688,7 +753,7 @@ class ImageAgent:
         # 生成参考图库中的角色主参考图
         if user_reference_images and len(user_reference_images) > 0:
             # 用户上传了图片（支持多张），进行风格化后去掉背景，仅保留主要角色的全身正面像作为参考图库主图
-            logger.info(f"User uploaded {len(user_reference_images)} image(s). Stylizing as reference library image - large half-body front view above the knees, no background")
+            logger.info(f"User uploaded {len(user_reference_images)} image(s). Stylizing as reference library image - full-body front view, no background")
             reference_image = self._stylize_user_images(
                 user_image_urls=user_reference_images,
                 script=script,
@@ -699,7 +764,7 @@ class ImageAgent:
             )
         else:
             # 用户没有上传图片，根据描述生成无背景的风格化主要角色全身正面像作为参考图库主图
-            logger.info("Generating stylized reference library image - large half-body front view above the knees, no background based on user description")
+            logger.info("Generating stylized reference library image - full-body front view, no background based on user description")
             reference_image = self._generate_reference_image_from_description(
                 script=script,
                 user_style_info=reference_prompt_style,
@@ -985,9 +1050,9 @@ class ImageAgent:
         prompt_parts.append("\n[POSE REQUIREMENT]")
         prompt_parts.append("[CRITICAL] Convert all characters to front-facing pose if they are not already")
         prompt_parts.append("[CRITICAL] Maintain the EXACT same character appearance, just change the viewing angle to front")
-        prompt_parts.append("[CRITICAL] Large half-body front view above the knees, facing forward")
-        prompt_parts.append("[CRITICAL] Crop the character above the knees")
-        prompt_parts.append("[CRITICAL] The face should occupy a large portion of the frame with clear facial details")
+        prompt_parts.append("[CRITICAL] Full-body front view, facing forward, showing every character from head to feet")
+        prompt_parts.append("[CRITICAL] Do NOT crop the knees, waist, shoulders, head, hands or feet")
+        prompt_parts.append("[CRITICAL] Keep facial features clear and recognizable even in the full-body composition")
 
         # 总角色数
         total_chars = len(human_chars) + len(non_human_chars)
@@ -996,7 +1061,7 @@ class ImageAgent:
             prompt_parts.append("[CRITICAL] Each character must match its reference image exactly")
 
         prompt_parts.append("Pure white background, high quality, detailed")
-        prompt_parts.append("Large half-body portrait above the knees, front-facing, face clearly visible, detailed facial features")
+        prompt_parts.append("Full-body front view, face clearly visible, detailed facial features")
         prompt_parts.append("This is a reference image for video generation - characters must be recognizable")
 
         prompt = "\n".join(prompt_parts)
@@ -1034,7 +1099,7 @@ class ImageAgent:
         aspect_ratio: str,
         variation_requirements: str = None,
     ) -> GeneratedImage:
-        """根据描述生成参考图库主图 - 无背景的风格化所有主要角色大半身正面像（膝盖以上）参考图"""
+        """根据描述生成参考图库主图 - 无背景的风格化所有主要角色全身正面像参考图"""
         prompt_parts = []
 
         # 添加画面比例
@@ -1063,7 +1128,7 @@ class ImageAgent:
             if num_characters == 1:
                 # 只有一个角色
                 char = script.characters[0]
-                prompt_parts.append("Main character reference image (front view, large half body above the knees):")
+                prompt_parts.append("Main character reference image (full-body front view, head-to-feet visible):")
                 prompt_parts.append("[CRITICAL] Show exactly ONE character only")
                 prompt_parts.append("[CRITICAL] Do NOT duplicate the character, show only ONE instance")
                 char_desc = f"{char.name}: {char.age} {char.gender}, {char.face_features}, {char.skin_tone}"
@@ -1072,7 +1137,7 @@ class ImageAgent:
                     prompt_parts.append(f"Wearing: {char.clothing}")
             else:
                 # 多个角色
-                prompt_parts.append(f"Main characters reference image (front view, large half body above the knees):")
+                prompt_parts.append("Main characters reference image (full-body front view, head-to-feet visible):")
                 prompt_parts.append(f"[CRITICAL] Show exactly {num_characters} different main characters")
                 prompt_parts.append("[CRITICAL] Each character should be distinct and unique, NO duplicates")
                 for i, char in enumerate(script.characters, 1):
@@ -1081,9 +1146,10 @@ class ImageAgent:
                     if char.clothing:
                         prompt_parts.append(f"  Wearing: {char.clothing}")
 
-        prompt_parts.append("Front view, facing camera, clear facial features")
-        prompt_parts.append("Large half-body portrait above the knees, face occupying a significant portion of the frame")
-        prompt_parts.append("Crop above the knees and keep the face details prominent")
+        prompt_parts.append("Full-body front view, facing camera, clear facial features")
+        prompt_parts.append("Show every character from head to feet, with hands and feet visible")
+        prompt_parts.append("Do NOT crop the knees, waist, shoulders, head, hands or feet")
+        prompt_parts.append("Keep facial features clear and recognizable in the full-body composition")
         prompt_parts.append("Consistent character design, standalone figures on white background")
         prompt_parts.append("This is a stylized reference image for subsequent scene generation")
         prompt_parts.append("High quality, detailed, 8k resolution, white background")
@@ -1102,7 +1168,7 @@ class ImageAgent:
 
         image_url = response['data'][0]['url']
 
-        logger.info(f"Reference library image generated successfully - all main characters large half-body front view above the knees, no background")
+        logger.info("Reference library image generated successfully - all main characters full-body front view, no background")
 
         return GeneratedImage(
             scene_number=0,
@@ -1187,7 +1253,7 @@ class ImageAgent:
         user_style_info: str,
         aspect_ratio: str,
     ) -> str:
-        """构建参考图库提示词 - 无背景角色大半身正面像（膝盖以上）"""
+        """构建参考图库提示词 - 无背景角色全身正面像"""
         prompt_parts = []
 
         # 添加画面比例
@@ -1212,7 +1278,7 @@ class ImageAgent:
             if num_characters == 1:
                 # 只有一个角色
                 char = script.characters[0]
-                prompt_parts.append("Main character reference image (front view, large half body above the knees):")
+                prompt_parts.append("Main character reference image (full-body front view, head-to-feet visible):")
                 prompt_parts.append("[CRITICAL] Show exactly ONE character only")
                 prompt_parts.append("[CRITICAL] Do NOT duplicate the character, show only ONE instance")
                 char_desc = f"{char.name}: {char.age} {char.gender}, {char.face_features}, {char.skin_tone}"
@@ -1221,7 +1287,7 @@ class ImageAgent:
                     prompt_parts.append(f"Wearing: {char.clothing}")
             else:
                 # 多个角色
-                prompt_parts.append(f"Main characters reference image (front view, large half body above the knees):")
+                prompt_parts.append("Main characters reference image (full-body front view, head-to-feet visible):")
                 prompt_parts.append(f"[CRITICAL] Show exactly {num_characters} different main characters")
                 prompt_parts.append("[CRITICAL] Each character should be distinct and unique, NO duplicates")
                 for i, char in enumerate(script.characters, 1):
@@ -1230,9 +1296,10 @@ class ImageAgent:
                     if char.clothing:
                         prompt_parts.append(f"  Wearing: {char.clothing}")
 
-        prompt_parts.append("Front view, facing camera, clear facial features")
-        prompt_parts.append("Large half-body portrait above the knees, face occupying a significant portion of the frame")
-        prompt_parts.append("Crop above the knees and keep the face details prominent")
+        prompt_parts.append("Full-body front view, facing camera, clear facial features")
+        prompt_parts.append("Show every character from head to feet, with hands and feet visible")
+        prompt_parts.append("Do NOT crop the knees, waist, shoulders, head, hands or feet")
+        prompt_parts.append("Keep facial features clear and recognizable in the full-body composition")
         prompt_parts.append("Consistent character design, standalone figures on white background")
         prompt_parts.append("This is a stylized reference image for subsequent scene generation")
         prompt_parts.append("High quality, detailed, 8k resolution, white background")

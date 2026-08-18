@@ -482,7 +482,7 @@ class VideoAgent:
 
         reference_specs = self._build_reference_specs(reference_images)
         if reference_specs:
-            # 角色装扮图归入角色组，场景状态图归入场景组
+            # 角色装扮图归入角色组，布景状态图归入场景组
             character_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] in {"character", "character_outfit"})
             scene_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] in {"scene", "scene_state"})
             storyboard_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] == "storyboard")
@@ -494,7 +494,7 @@ class VideoAgent:
             elif scene_tags:
                 parts.append(f"结合布景设定{scene_tags}生成当前分镜。")
             if storyboard_tags:
-                parts.append(f"严格参考{storyboard_tags}中的6宫格白描 storyboard 节奏、镜头拆分和动作推进。")
+                parts.append(f"严格参考{storyboard_tags}中的9宫格白描线稿分镜故事版图片，按照故事版图的顺序，运镜合理连贯，遵循其节奏、镜头拆分和动作推进。")
             mapping_parts = []
             for spec in reference_specs:
                 mapping_parts.append(
@@ -526,10 +526,22 @@ class VideoAgent:
             parts.append(f"布景定义：{'；'.join(scene_context['descriptions'])}")
         if scene_context["scene_features"]:
             parts.append(f"稳定场景特征：{', '.join(scene_context['scene_features'])}")
+        scene_state = str(getattr(scene, "scene_state", "") or "").strip()
+        if scene_state:
+            parts.append(f"本分镜布景状态：{scene_state}")
         if scene_context["time_of_day"]:
             parts.append(f"时间信息：{scene_context['time_of_day']}")
         if scene_context["weather"]:
             parts.append(f"天气信息：{scene_context['weather']}")
+        scene_outfits = getattr(scene, "character_outfits", None) or {}
+        if scene_outfits:
+            outfit_lines = [
+                f"{name}={outfit}"
+                for name, outfit in scene_outfits.items()
+                if str(name or "").strip() and str(outfit or "").strip()
+            ]
+            if outfit_lines:
+                parts.append(f"本分镜角色装扮（含发型）：{'；'.join(outfit_lines)}")
         parts.append(f"场景描述：{getattr(scene, 'description', '')}")
         parts.append("保持无字幕，避免画面生成字幕。不生成街边招牌的文字。限定主要人物/角色在不同分镜视频中的各自音色保持一致。")
 
@@ -588,9 +600,9 @@ class VideoAgent:
         if reference_type == "scene":
             return "场景"
         if reference_type == "scene_state":
-            return "场景状态"
+            return "布景状态"
         if reference_type == "storyboard":
-            return "6宫格 storyboard"
+            return "9宫格 storyboard"
         return "参考"
 
     def _build_scene_character_details(self, character_names: List[str], characters) -> List[str]:
@@ -610,11 +622,18 @@ class VideoAgent:
                 f"角色设定：{character.name}",
                 f"年龄={getattr(character, 'age', '')}",
                 f"性别={getattr(character, 'gender', '')}",
+                f"国籍={getattr(character, 'nationality', '')}",
                 f"外貌特征={getattr(character, 'face_features', '')}",
+                f"发型={getattr(character, 'hairstyle', '')}",
+                f"身材特征={getattr(character, 'body_features', '')}",
                 f"肤色={getattr(character, 'skin_tone', '')}",
             ]
             if getattr(character, "clothing", None):
-                summary.append(f"服装={character.clothing}")
+                summary.append(f"通常装扮={character.clothing}")
+            if getattr(character, "personality", None):
+                summary.append(f"性格特征={character.personality}")
+            if getattr(character, "identity_background", None):
+                summary.append(f"身份背景={character.identity_background}")
             lines.append("，".join([item for item in summary if item.split('=', 1)[-1]]))
         return lines
 
@@ -658,6 +677,7 @@ class VideoAgent:
         return {
             "descriptions": descriptions,
             "scene_features": scene_features,
+            "scene_state": str(getattr(scene, "scene_state", "") or "").strip(),
             "time_of_day": time_of_day,
             "weather": weather,
         }
