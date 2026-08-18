@@ -12,7 +12,7 @@ English documentation. Simplified Chinese version: `README.md`
 
 Powered by the **SeeDance 2.5** video model — turn one sentence into a cinematic AI short drama:
 
-- 🎬 **Up to 30-second shots**: each storyboard scene can run up to 30 seconds (6–30s adjustable) for more continuous long-take storytelling, with a final cut up to `1200` seconds.
+- 🎬 **Up to 30-second shots**: each storyboard scene can run up to 30 seconds (6–30s adjustable) for more continuous long-take storytelling, with a final cut up to `600` seconds.
 - 🖼️ **Up to 50 reference inputs**: a single task can fuse up to 50 character / backdrop reference images for highly consistent characters and scenes across shots.
 - 🌍 **14 languages natively supported**: native multilingual dialogue and narration across Chinese, English, Japanese, Spanish, and 14 languages total.
 - 🎞️ **Cinematic audiovisual quality**: native audio-video sync, adaptive aspect ratio, and the final cut is remuxed to high-fidelity `MP4` (H.264/AAC, `+faststart`) that streams progressively in the browser.
@@ -204,7 +204,7 @@ The speech-to-text path preserves the browser's actual recording format. Chrome 
 
 Current rules:
 
-- Total video duration limit: `1200` seconds
+- Total video duration limit: `600` seconds
 - Per-scene duration range: `6`–`30` seconds (tuned for `SeeDance-2.5`)
 - Storyboard scene limit: `50`
 - Character definition limit: `30`

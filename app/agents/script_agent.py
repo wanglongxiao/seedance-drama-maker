@@ -36,7 +36,7 @@ class ScriptAgent:
         # 从 yaml 配置读取视频时长设置
         self.default_total_duration = config.get('video_generation.total_duration', 60)  # 默认 60 秒
         self.total_duration_min = config.get('video_generation.total_duration_min', 30)  # 最小 30 秒
-        self.total_duration_max = config.get('video_generation.total_duration_max', 1200)  # 最大时长由 yaml 配置控制
+        self.total_duration_max = config.get('video_generation.total_duration_max', 600)  # 最大时长由 yaml 配置控制
         # 从 yaml 配置读取分镜时长范围
         self.scene_duration_min = config.get('video_generation.scene_duration.min', 10)
         self.scene_duration_max = config.get('video_generation.scene_duration.max', 30)

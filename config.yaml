@@ -53,7 +53,7 @@ models:
     endpoint: "${MAIN_AGENT_ENDPOINT}"
     api_key: "${MAIN_AGENT_API_KEY}"
     temperature: 0.7
-    max_tokens: 30000
+    max_tokens: 32000
 
   # 剧本分镜 Agent：负责剧本、角色、分镜脚本生成
   # 对应代码：app/agents/script_agent.py
@@ -61,7 +61,7 @@ models:
     endpoint: "${SCRIPT_ENDPOINT}"
     api_key: "${SCRIPT_API_KEY}"
     temperature: 0.9
-    max_tokens: 30000
+    max_tokens: 32000
 
   # 生图模型：用于参考图生成与参考图重新生成
   # 对应代码：app/agents/image_agent.py
@@ -86,7 +86,7 @@ models:
     endpoint: "${VIDEO_REVIEW_ENDPOINT}"
     api_key: "${VIDEO_REVIEW_API_KEY}"
     temperature: 0.3
-    max_tokens: 30000
+    max_tokens: 16000
 
   # 故事版审核模型：用于分镜故事版（白描线稿多宫格）图像理解审核
   # 对应代码：app/agents/storyboard_review_agent.py
@@ -95,7 +95,7 @@ models:
     endpoint: "${STORYBOARD_REVIEW_ENDPOINT:-}"
     api_key: "${STORYBOARD_REVIEW_API_KEY:-}"
     temperature: 0.3
-    max_tokens: 2000
+    max_tokens: 16000
 
   # ASR 资源配置：用于音频转文字
   # 对应代码：app/services/asr_service.py
@@ -119,10 +119,10 @@ tos:
 
 # 视频生成配置
 video_generation:
-  # 视频总时长（秒）- 默认值 60，最大值 1200
+  # 视频总时长（秒）- 默认值 60，最大值 600
   total_duration: 60
   total_duration_min: 30
-  total_duration_max: 1200
+  total_duration_max: 600
   # 每个分镜时长范围（秒）- 最短 10，最长 30（适配 seedance-2.5）
   scene_duration:
     min: 10
@@ -239,7 +239,7 @@ limits:
   asr_max_file_size: "512MB"
   asr_max_duration: "5 hours"
   # 请求超时
-  request_timeout: 300
+  request_timeout: 600
 
 # 日志配置
 logging:
