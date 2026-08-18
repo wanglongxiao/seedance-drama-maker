@@ -85,7 +85,7 @@
     "skippingScene": "Omitiendo escena {scene}...",
     "startingVideoGeneration": "Iniciando generación de video...",
     "uploadingImages": "Subiendo imágenes...",
-    "processingAudio": "Transcribiendo grabación...",
+    "processingAudio": "Subiendo y transcribiendo grabación...",
     "rollingBack": "Revirtiendo paso..."
   },
   "loading": {
@@ -213,7 +213,7 @@
     "startVideoFailedRetry": "❌ No se pudo iniciar la generación de video. Inténtalo de nuevo",
     "audioRecognitionResult": "🎤 Resultado del reconocimiento de voz: \"{text}\"",
     "audioRecognitionFailed": "❌ Falló el reconocimiento de voz: {error}",
-    "audioProcessingFailed": "❌ Falló la transcripción de la grabación",
+    "audioProcessingFailed": "❌ Falló la transcripción de la grabación. Revisa el formato o la red e inténtalo de nuevo.",
     "imageUploadFailed": "Falló la subida de imagen",
     "referenceNameRequired": "Introduce nombres para las siguientes imagenes subidas antes de continuar: {items}",
     "referenceImageLimit": "Puedes subir hasta {count} imágenes de referencia.",

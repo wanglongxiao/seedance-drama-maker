@@ -85,7 +85,7 @@
     "skippingScene": "シーン {scene} をスキップしています...",
     "startingVideoGeneration": "動画生成を開始しています...",
     "uploadingImages": "画像をアップロード中...",
-    "processingAudio": "録音を文字起こし中...",
+    "processingAudio": "録音をアップロードして文字起こし中...",
     "rollingBack": "ステップをロールバック中..."
   },
   "loading": {
@@ -213,7 +213,7 @@
     "startVideoFailedRetry": "❌ 動画生成の開始に失敗しました。再試行してください",
     "audioRecognitionResult": "🎤 音声認識結果: \"{text}\"",
     "audioRecognitionFailed": "❌ 音声認識に失敗しました: {error}",
-    "audioProcessingFailed": "❌ 録音の文字起こしに失敗しました",
+    "audioProcessingFailed": "❌ 録音の文字起こしに失敗しました。録音形式またはネットワークを確認して再試行してください。",
     "imageUploadFailed": "画像のアップロードに失敗しました",
     "referenceNameRequired": "続行する前に、次のアップロード画像に名前を入力してください: {items}",
     "referenceImageLimit": "参考画像は最大 {count} 枚までアップロードできます。",

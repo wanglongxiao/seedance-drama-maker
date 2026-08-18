@@ -210,7 +210,7 @@ Current rules:
 - Character definition limit: `30`
 - Backdrop definition limit: `30`
 - Adjacent scenes must stay continuous without repeating the same narrative beat
-- Per-scene special character outfits go into the character-action field, and scene time/weather state goes into the scene-description field; both are persisted for downstream image/video generation
+- Per-scene special outfits and hairstyle changes are written explicitly to `character_outfits`, while backdrop time/weather state is written explicitly to `scene_state`; both fields appear before the scene description and are persisted for downstream image/video generation
 - Raw LLM responses are written to backend logs
 
 ### 3. Reference Library Generation
@@ -256,7 +256,7 @@ Authentication notes:
 
 After all character main images and scene main images are generated, the system derives variant images from each scene:
 
-- Variants are generated only when a scene's character-action field contains an outfit different from the default, or its scene-description field contains a time/weather state different from the backdrop default
+- Variants are generated only when `character_outfits` contains an outfit different from the default `clothing` / `hairstyle`, or when `scene_state` / `time_of_day` / `weather` differs from the backdrop default
 - Character-outfit image = the scene's outfit description + the corresponding character main image
 - Backdrop-state image = the scene's time/weather state + the corresponding scene main image
 - Variants across scenes are generated in parallel, bounded by the image concurrency setting (`video_generation.reference_images.max_concurrency`)

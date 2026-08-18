@@ -21,6 +21,9 @@ temp/
 .dbg/
 *.log
 /.run/
+/logs/
+/tmp/
+/outputs/
 
 # IDE
 .vscode/

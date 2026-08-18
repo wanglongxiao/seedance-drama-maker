@@ -85,7 +85,7 @@
     "skippingScene": "Skipping scene {scene}...",
     "startingVideoGeneration": "Starting video generation...",
     "uploadingImages": "Uploading images...",
-    "processingAudio": "Transcribing recording...",
+    "processingAudio": "Uploading and transcribing recording...",
     "rollingBack": "Rolling back step..."
   },
   "loading": {
@@ -213,7 +213,7 @@
     "startVideoFailedRetry": "❌ Failed to start video generation, please try again",
     "audioRecognitionResult": "🎤 Speech recognition result: \"{text}\"",
     "audioRecognitionFailed": "❌ Speech recognition failed: {error}",
-    "audioProcessingFailed": "❌ Speech-to-text failed",
+    "audioProcessingFailed": "❌ Speech-to-text failed. Check the recording format or network and try again.",
     "imageUploadFailed": "Image upload failed",
     "referenceNameRequired": "Please enter names for the following uploaded images before continuing: {items}",
     "referenceImageLimit": "You can upload up to {count} reference images.",

@@ -85,7 +85,7 @@
     "skippingScene": "正在跳过分镜 {scene}...",
     "startingVideoGeneration": "正在启动视频生成...",
     "uploadingImages": "正在上传图片...",
-    "processingAudio": "正在处理录音并转换文字...",
+    "processingAudio": "正在上传录音并转换文字...",
     "rollingBack": "正在退回步骤..."
   },
   "loading": {
@@ -213,7 +213,7 @@
     "startVideoFailedRetry": "❌ 启动视频生成失败，请重试",
     "audioRecognitionResult": "🎤 语音识别结果: \"{text}\"",
     "audioRecognitionFailed": "❌ 语音识别失败: {error}",
-    "audioProcessingFailed": "❌ 录音转文字失败",
+    "audioProcessingFailed": "❌ 录音转文字失败，请检查录音格式或网络后重试",
     "imageUploadFailed": "图片上传失败",
     "referenceNameRequired": "请先为以下上传图片填写名称：{items}",
     "referenceImageLimit": "最多只能上传 {count} 张参考图",

@@ -85,7 +85,7 @@
     "skippingScene": "正在跳過分鏡 {scene}...",
     "startingVideoGeneration": "正在啟動影片生成...",
     "uploadingImages": "正在上傳圖片...",
-    "processingAudio": "正在處理錄音並轉成文字...",
+    "processingAudio": "正在上傳錄音並轉成文字...",
     "rollingBack": "正在退回步驟..."
   },
   "loading": {
@@ -213,7 +213,7 @@
     "startVideoFailedRetry": "❌ 啟動影片生成失敗，請重試",
     "audioRecognitionResult": "🎤 語音辨識結果: \"{text}\"",
     "audioRecognitionFailed": "❌ 語音辨識失敗: {error}",
-    "audioProcessingFailed": "❌ 錄音轉文字失敗",
+    "audioProcessingFailed": "❌ 錄音轉文字失敗，請檢查錄音格式或網路後重試",
     "imageUploadFailed": "圖片上傳失敗",
     "referenceNameRequired": "請先為以下上傳圖片填寫名稱：{items}",
     "referenceImageLimit": "最多只能上傳 {count} 張參考圖",
