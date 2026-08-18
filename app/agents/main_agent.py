@@ -2051,9 +2051,32 @@ class MainAgent:
             video_workers = 1
         video_workers = max(1, video_workers)
 
-        pending_indexes = list(range(start_scene_index, num_scenes))
+        pending_indexes = []
+        for index in range(start_scene_index, num_scenes):
+            scene_number = index + 1
+            scene_state = self._get_scene_state(project, scene_number)
+            existing_video = next(
+                (
+                    video for video in (getattr(project, "videos", []) or [])
+                    if int(getattr(video, "scene_number", 0) or 0) == scene_number
+                    and str(getattr(video, "url", "") or "").strip()
+                ),
+                None,
+            )
+            if (
+                existing_video is not None
+                and getattr(scene_state, "completed", False)
+                and getattr(scene_state, "approved", False)
+            ):
+                logger.info(
+                    f"[FLOW] Parallel mode: skip already completed scene {scene_number}; "
+                    "no video regeneration needed"
+                )
+                continue
+            pending_indexes.append(index)
         logger.info(
             f"[FLOW] Parallel video generation: {len(pending_indexes)} scenes, "
+            f"skipped={num_scenes - start_scene_index - len(pending_indexes)}, "
             f"video_workers={video_workers}"
         )
 

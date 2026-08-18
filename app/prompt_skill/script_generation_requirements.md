@@ -2,8 +2,9 @@
 - 视频总时长：约$effective_total_duration秒
 - 所有分镜 duration 之和要尽量贴近$effective_total_duration秒，不要明显偏短或偏长
 - 总时长不得超过$total_duration_max秒
-- 每个分镜时长：$scene_duration_min-$scene_duration_max秒之间灵活调整，根据剧情需要设定
+- 每个分镜时长：$scene_duration_min-$scene_duration_max秒之间灵活调整，根据剧情复杂程度设定；简单建立/反应/转场用短时长，多角色连续动作、复杂调度、信息揭示、冲突升级、反转和高潮推进用长时长
 - duration 字段只能输出 $scene_duration_min-$scene_duration_max 的整数，禁止输出 $disallowed_duration_examples 或更大值
+- 不要把所有分镜机械地设置为相同或相邻时长；在配置范围允许时，短镜头与长镜头应形成明显梯度，并让复杂度最高的分镜获得更多时长
 - 分镜数量：约$estimated_scene_count个，总数不得超过$max_storyboard_scenes个
 - 时长分配：绝大部分时长用于情节发展与剧情推进（细致刻画角色/动作/心理/互动，节奏紧凑推向高潮）；开头与结尾要精简，不占用过多时长
 - 结尾方式：可用钩子式结尾/突然收尾/开放式结尾/合家欢结尾等，按 tone 选择最契合的一种，收得利落有回味

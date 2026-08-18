@@ -111,13 +111,99 @@ class ScriptAgent:
         # 目标钳制到当前分镜数可达的时长区间。
         target = max(n * lo, min(n * hi, int(target_total_duration)))
 
-        # 先确保每个分镜落在合法区间内。
+        # 先确保每个分镜落在合法区间内，再按内容复杂度重分配。
+        # 模型经常把所有分镜都输出成同一个时长；只做轮流 +1/-1
+        # 会保留这个问题，因此这里用脚本内容重新计算权重。
         for scene in scenes:
             try:
                 dur = int(scene.get('duration') or lo)
             except (TypeError, ValueError):
                 dur = lo
             scene['duration'] = max(lo, min(hi, dur))
+
+        self._allocate_scene_durations_by_complexity(scenes, target)
+
+    def _estimate_scene_complexity(self, scene: Dict[str, Any], index: int, count: int) -> float:
+        """Estimate how much screen time a scene needs from its structured content."""
+        text_fields = (
+            scene.get("description"),
+            scene.get("character_description"),
+            scene.get("dialogue"),
+            scene.get("voice_description"),
+            scene.get("mood"),
+        )
+        text_length = sum(len(self._normalize_single_line(value)) for value in text_fields)
+        score = 1.0 + min(5.0, text_length / 180.0)
+
+        characters = scene.get("characters_present") or []
+        if isinstance(characters, str):
+            characters = [part for part in re.split(r"[、,，\s]+", characters) if part]
+        score += min(2.0, max(0, len(characters) - 1) * 0.45)
+        score += min(1.4, len(self._normalize_single_line(scene.get("dialogue"))) / 90.0)
+
+        scene_text = self._normalize_single_line(" ".join(str(value or "") for value in text_fields))
+        complexity_keywords = (
+            "追逐", "战斗", "打斗", "搏斗", "爆炸", "逃跑", "冲突", "反转",
+            "发现", "调查", "切换", "多人", "同时", "连续", "镜头",
+            "抽插", "性爱", "高潮", "亲吻", "拥抱", "抚摸",
+        )
+        score += min(2.0, sum(scene_text.count(keyword) for keyword in complexity_keywords) * 0.18)
+
+        # 开头用于建立信息、结尾用于收束；中段通常承载更多动作和因果。
+        if count > 1 and index == 0:
+            score *= 0.82
+        elif count > 1 and index == count - 1:
+            score *= 0.88
+        elif count >= 3 and 0 < index < count - 1:
+            score *= 1.08
+        return max(0.1, score)
+
+    def _allocate_scene_durations_by_complexity(
+        self, scenes: List[Dict[str, Any]], target_total_duration: int
+    ) -> None:
+        """Allocate the reachable total across scenes using content-based weights."""
+        if not scenes:
+            return
+        lo, hi = self.scene_duration_min, self.scene_duration_max
+        n = len(scenes)
+        target = max(n * lo, min(n * hi, int(target_total_duration)))
+        extra = target - n * lo
+        if extra <= 0:
+            for scene in scenes:
+                scene["duration"] = lo
+            return
+
+        weights = [
+            self._estimate_scene_complexity(scene, index, n)
+            for index, scene in enumerate(scenes)
+        ]
+        total_weight = sum(weights) or float(n)
+        capacity = hi - lo
+        raw_extras = [extra * weight / total_weight for weight in weights]
+        extras = [min(capacity, int(value)) for value in raw_extras]
+        remainder = extra - sum(extras)
+
+        # Largest remainder allocation keeps the exact total while preserving
+        # the relative complexity ordering as much as integer seconds allow.
+        order = sorted(
+            range(n),
+            key=lambda idx: (raw_extras[idx] - int(raw_extras[idx]), weights[idx]),
+            reverse=True,
+        )
+        while remainder > 0:
+            progressed = False
+            for idx in order:
+                if remainder <= 0:
+                    break
+                if extras[idx] < capacity:
+                    extras[idx] += 1
+                    remainder -= 1
+                    progressed = True
+            if not progressed:
+                break
+
+        for scene, scene_extra in zip(scenes, extras):
+            scene["duration"] = lo + scene_extra
 
         def current_total() -> int:
             return sum(int(s.get('duration', lo)) for s in scenes)

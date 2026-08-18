@@ -72,6 +72,8 @@ websocket_connections: Dict[str, WebSocket] = {}
 step_confirmations: Dict[str, asyncio.Event] = {}
 project_client_owners: Dict[str, str] = {}
 disconnect_cleanup_tasks: Dict[str, asyncio.Task] = {}
+# 视频单分镜重生成按 project + scene 去重；不同分镜仍可并发执行。
+video_scene_regeneration_tasks: Dict[str, asyncio.Task] = {}
 
 
 class ReconnectingWebSocketProxy:
@@ -825,10 +827,25 @@ async def regenerate(
                 effective_client_id = list(websocket_connections.keys())[0]
                 logger.warning(f"/regenerate: missing client_id, fallback to {effective_client_id}")
 
+            regeneration_key = f"{project_id}:{int(scene_number)}"
+            active_task = video_scene_regeneration_tasks.get(regeneration_key)
+            if active_task and not active_task.done():
+                logger.info(
+                    f"/regenerate: video scene {scene_number} already has an active task; "
+                    "skip duplicate submission"
+                )
+                return {
+                    "success": True,
+                    "async": True,
+                    "deduplicated": True,
+                    "type": "video",
+                    "scene_number": scene_number,
+                }
+
             # 非阻塞：单个分镜视频重生成耗时可达数分钟，远超云端 API 网关约 60s 超时，
             # 若在 HTTP 内同步 await 会触发网关 504 断连，前端误报“重新生成失败”（但后台仍在跑）。
             # 改为后台任务执行，立即返回；最终结果统一通过 WebSocket（video_scene_regenerated）推送。
-            asyncio.create_task(
+            regeneration_task = asyncio.create_task(
                 regenerate_video_scene_background(
                     project_id=project_id,
                     scene_number=scene_number,
@@ -836,6 +853,13 @@ async def regenerate(
                     ui_language=ui_language,
                 )
             )
+            video_scene_regeneration_tasks[regeneration_key] = regeneration_task
+
+            def _clear_video_regeneration_task(done_task: asyncio.Task) -> None:
+                if video_scene_regeneration_tasks.get(regeneration_key) is done_task:
+                    video_scene_regeneration_tasks.pop(regeneration_key, None)
+
+            regeneration_task.add_done_callback(_clear_video_regeneration_task)
             return {
                 "success": True,
                 "async": True,
