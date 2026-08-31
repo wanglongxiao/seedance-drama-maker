@@ -1057,9 +1057,24 @@ class MainAgent:
         scene_state_count: int = 0,
         key_action_count: int = 0,
     ) -> Dict[str, List[Optional[GeneratedImage]]]:
-        """分阶段生成复用同一 session：已存在则直接返回，避免重建清空前阶段成果。"""
+        """分阶段生成复用同一 session：已存在则直接返回，避免重建清空前阶段成果。
+
+        注意：若剧本被重新生成（如用户上传图片并重新命名角色后重跑），角色/布景/分镜
+        数量可能与上次缓存的 session 不一致。此时必须把缓存的 slot 列表按新数量对齐
+        （扩容补 None / 收缩多余尾部），否则 finalize 时按新计划的 index 写入旧长度列表会
+        触发 "list assignment index out of range"。
+        """
         existing = self._reference_generation_slots.get(project.project_id)
         if existing is not None:
+            self._reconcile_reference_generation_slots(
+                existing,
+                character_count=character_count,
+                scene_count=scene_count,
+                storyboard_count=storyboard_count,
+                outfit_count=outfit_count,
+                scene_state_count=scene_state_count,
+                key_action_count=key_action_count,
+            )
             self._hydrate_reference_generation_slots(project, existing)
             return existing
         return self._start_reference_generation_session(
@@ -1071,6 +1086,35 @@ class MainAgent:
             scene_state_count=scene_state_count,
             key_action_count=key_action_count,
         )
+
+    @staticmethod
+    def _reconcile_reference_generation_slots(
+        slots: Dict[str, List[Optional[GeneratedImage]]],
+        character_count: int,
+        scene_count: int,
+        storyboard_count: int,
+        outfit_count: int,
+        scene_state_count: int,
+        key_action_count: int,
+    ) -> None:
+        """把缓存的 slot 列表长度对齐到当前计划所需数量，保留已生成内容。"""
+        expected = {
+            "characters": max(0, character_count),
+            "scenes": max(0, scene_count),
+            "character_outfits": max(0, outfit_count),
+            "scene_states": max(0, scene_state_count),
+            "key_actions": max(0, key_action_count),
+            "storyboards": max(0, storyboard_count),
+        }
+        for slot_name, target_len in expected.items():
+            current = slots.get(slot_name)
+            if current is None:
+                slots[slot_name] = [None] * target_len
+                continue
+            if len(current) < target_len:
+                current.extend([None] * (target_len - len(current)))
+            elif len(current) > target_len:
+                del current[target_len:]
 
     def _finish_reference_generation_session(self, project: VideoProject) -> None:
         self._reference_generation_slots.pop(project.project_id, None)
@@ -2808,19 +2852,19 @@ class MainAgent:
             stored_image: GeneratedImage,
         ) -> None:
             self._raise_if_project_ended(project)
+            slot_by_category = {
+                "character": generated_character_images,
+                "scene": generated_scene_images,
+                "character_outfit": generated_outfit_images,
+                "scene_state": generated_scene_state_images,
+                "key_action": generated_key_action_images,
+            }
             async with progress_lock:
-                if category == "character":
-                    generated_character_images[index] = stored_image
-                elif category == "scene":
-                    generated_scene_images[index] = stored_image
-                elif category == "character_outfit":
-                    generated_outfit_images[index] = stored_image
-                elif category == "scene_state":
-                    generated_scene_state_images[index] = stored_image
-                elif category == "key_action":
-                    generated_key_action_images[index] = stored_image
-                else:
-                    generated_storyboard_images[index] = stored_image
+                target_slot = slot_by_category.get(category, generated_storyboard_images)
+                # 防御性兜底：若索引因计划变更越界，扩容补 None 后再写入，避免整批失败。
+                if index >= len(target_slot):
+                    target_slot.extend([None] * (index + 1 - len(target_slot)))
+                target_slot[index] = stored_image
                 _sync_all()
                 if progress_callback:
                     await progress_callback(project)
