@@ -6,7 +6,6 @@
 import random
 import re
 from typing import List, Dict, Any, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.config import config
 from app.prompt_skill import load_optional_nsfw_prompt, load_prompt, nsfw_content_requested
 from app.services.llm_service import llm_service
@@ -25,7 +24,6 @@ class ImageAgent:
         self.default_aspect_ratio = "16:9"
         # 并发配置
         self.concurrency_enabled = config.get('generation.concurrency.enabled', True)
-        self.max_workers = config.get('generation.concurrency.image_workers', 10)
 
     def _should_apply_japanese_manga_live_action_style(self, user_style_info: str, script: Script) -> bool:
         """未指定明确视觉风格时，参考图默认回落到写实漫画风格。"""
@@ -1360,75 +1358,6 @@ class ImageAgent:
             prompt=prompt,
             is_end_frame=False,
             is_reference=True
-        )
-
-    def _generate_images_concurrent(self, tasks: List[Dict]) -> List[GeneratedImage]:
-        """并发生成图片"""
-        images = []
-
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_task = {
-                executor.submit(self._generate_single_image_with_reference, task): task
-                for task in tasks
-            }
-
-            for future in as_completed(future_to_task):
-                task = future_to_task[future]
-                try:
-                    image = future.result()
-                    images.append(image)
-                    logger.info(f"Image generated: {task['type']} {task['scene_number']}")
-                except Exception as e:
-                    logger.error(f"Failed to generate image for {task['type']} {task['scene_number']}: {str(e)}")
-                    raise
-
-        return images
-
-    def _generate_images_sequential(self, tasks: List[Dict]) -> List[GeneratedImage]:
-        """串行生成图片"""
-        images = []
-
-        for task in tasks:
-            try:
-                image = self._generate_single_image_with_reference(task)
-                images.append(image)
-                logger.info(f"Image generated: {task['type']} {task['scene_number']}")
-            except Exception as e:
-                logger.error(f"Failed to generate image for {task['type']} {task['scene_number']}: {str(e)}")
-                raise
-
-        return images
-
-    def _generate_single_image_with_reference(self, task: Dict) -> GeneratedImage:
-        """生成单张图片（使用参考图）"""
-        scene_number = task['scene_number']
-        prompt = task['prompt']
-        is_end_frame = task['is_end_frame']
-        reference_image = task.get('reference_image')
-        aspect_ratio = task.get('aspect_ratio', '16:9')
-
-        label = f"结尾帧" if is_end_frame else f"分镜 {scene_number}"
-        logger.info(f"Generating {label} image with reference image")
-        logger.info(f"Using aspect ratio: {aspect_ratio}")
-
-        # 使用参考图生成（如果提供了参考图）
-        response = llm_service.generate_image(
-            prompt=prompt,
-            model=self.model,
-            size=self.size,
-            image_urls=[reference_image] if reference_image else None,
-            ratio=aspect_ratio
-        )
-
-        image_url = response['data'][0]['url']
-
-        logger.info(f"{label} image generated successfully")
-
-        return GeneratedImage(
-            scene_number=scene_number,
-            url=image_url,
-            prompt=prompt,
-            is_end_frame=is_end_frame
         )
 
     def _build_reference_prompt(
