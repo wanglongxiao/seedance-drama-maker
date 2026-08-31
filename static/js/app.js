@@ -706,6 +706,7 @@ async function endProject(reason = 'user_end', options = {}) {
         projectEnding = false;
         projectEnded = true;
         projectEndBeaconSent = true;
+        stopVideoReconcilePolling(); // 项目结束：停止视频对账轮询
         persistActiveProject(null); // 已结束：清除刷新恢复标记
         updateProjectActionState();
 
@@ -942,51 +943,7 @@ function applyRestoredSnapshot(snap) {
     }
 
     // 3) 视频分镜
-    const videos = snap.videos || [];
-    if (videos.length > 0 || (snap.total_scenes && snap.current_step && String(snap.current_step).startsWith('videos'))) {
-        currentStep = 'videos';
-        referenceImageLocked = true;
-        if (snap.total_scenes) videoTotalScenes = snap.total_scenes;
-        ensureVideosContainer();
-        videos.forEach((v) => {
-            const sceneNum = v.scene_number;
-            ensureVideoItem(sceneNum);
-            if (v.url) {
-                setVideoItemUrl(sceneNum, v.url);
-                clearVideoItemLoading(sceneNum);
-                markVideoGenerated(sceneNum);
-            }
-            if (v.completed) {
-                markVideoReviewed(sceneNum, !!v.approved);
-                const reviewEl = ensureReviewEl(sceneNum);
-                if (reviewEl) {
-                    if (v.accepted_over_retry) {
-                        reviewEl.style.background = '#fff7e6';
-                        reviewEl.style.border = '1px solid #ffd591';
-                        reviewEl.style.color = '#fa8c16';
-                        reviewEl.className = 'video-review-status is-accepted-over-retry';
-                        reviewEl.innerHTML = `
-                            <div class="review-status-title">${t('labels.acceptedOverRetry')}</div>
-                            ${v.score >= 0 ? `<div class="review-status-text">${t('labels.score', { score: v.score })}</div>` : ''}
-                        `;
-                    } else if (v.approved) {
-                        reviewEl.style.background = '#f6ffed';
-                        reviewEl.style.border = '1px solid #b7eb8f';
-                        reviewEl.style.color = '#52c41a';
-                        reviewEl.className = 'video-review-status is-passed';
-                        reviewEl.innerHTML = `
-                            <div class="review-status-title">${t('labels.reviewPassed')}</div>
-                            ${v.score >= 0 ? `<div class="review-status-text">${t('labels.score', { score: v.score })}</div>` : ''}
-                        `;
-                    } else {
-                        reviewEl.className = 'video-review-status';
-                        reviewEl.innerHTML = `<div class="review-status-title">${t('labels.waitingGenerateReview')}</div>`;
-                    }
-                }
-            }
-        });
-        updateVideoStepProgressUI();
-    }
+    renderVideosFromSnapshot(snap);
 
     // 4) 最终合成视频
     if (snap.final_video_url) {
@@ -1002,7 +959,117 @@ function applyRestoredSnapshot(snap) {
 
     updateOverallProgress();
     updateProjectActionState();
+
+    // 云端多实例：视频阶段的实时 WS 推送可能落在其它实例而丢失，
+    // 恢复后开启对账轮询，以项目快照为权威持续同步视频生成进度。
+    const videoPhaseActive = (!!snap.video_phase_started
+        || (snap.current_step && String(snap.current_step).startsWith('videos')))
+        && !snap.final_video_url;
+    if (videoPhaseActive) {
+        startVideoReconcilePolling();
+    }
 }
+
+// 依据快照幂等渲染「视频生成」模块（供刷新恢复与对账轮询共用）。
+// 仅新增/更新，不重建已有节点，因此可安全重复调用，且不会覆盖实时 WS 已渲染的状态。
+function renderVideosFromSnapshot(snap) {
+    if (!snap) return;
+    const videos = snap.videos || [];
+    const videoPhaseStarted = !!snap.video_phase_started
+        || (snap.current_step && String(snap.current_step).startsWith('videos'));
+    if (!(videos.length > 0 || videoPhaseStarted)) return;
+
+    currentStep = 'videos';
+    referenceImageLocked = true;
+    if (snap.total_scenes) videoTotalScenes = snap.total_scenes;
+    ensureVideosContainer();
+    videos.forEach((v) => {
+        const sceneNum = v.scene_number;
+        ensureVideoItem(sceneNum);
+        if (v.url) {
+            setVideoItemUrl(sceneNum, v.url);
+            clearVideoItemLoading(sceneNum);
+            markVideoGenerated(sceneNum);
+        }
+        if (v.completed) {
+            markVideoReviewed(sceneNum, !!v.approved);
+            const reviewEl = ensureReviewEl(sceneNum);
+            if (reviewEl) {
+                if (v.accepted_over_retry) {
+                    reviewEl.style.background = '#fff7e6';
+                    reviewEl.style.border = '1px solid #ffd591';
+                    reviewEl.style.color = '#fa8c16';
+                    reviewEl.className = 'video-review-status is-accepted-over-retry';
+                    reviewEl.innerHTML = `
+                        <div class="review-status-title">${t('labels.acceptedOverRetry')}</div>
+                        ${v.score >= 0 ? `<div class="review-status-text">${t('labels.score', { score: v.score })}</div>` : ''}
+                    `;
+                } else if (v.approved) {
+                    reviewEl.style.background = '#f6ffed';
+                    reviewEl.style.border = '1px solid #b7eb8f';
+                    reviewEl.style.color = '#52c41a';
+                    reviewEl.className = 'video-review-status is-passed';
+                    reviewEl.innerHTML = `
+                        <div class="review-status-title">${t('labels.reviewPassed')}</div>
+                        ${v.score >= 0 ? `<div class="review-status-text">${t('labels.score', { score: v.score })}</div>` : ''}
+                    `;
+                } else {
+                    reviewEl.className = 'video-review-status';
+                    reviewEl.innerHTML = `<div class="review-status-title">${t('labels.waitingGenerateReview')}</div>`;
+                }
+            }
+        }
+    });
+    updateVideoStepProgressUI();
+}
+
+// 视频阶段对账轮询：定期拉取项目快照并幂等渲染，兜底跨实例丢失的实时 WS 消息。
+// 全部分镜完成/最终视频就绪/项目结束时自动停止。
+let videoReconcileTimer = null;
+function startVideoReconcilePolling() {
+    if (videoReconcileTimer) return; // 已在运行，避免重复计时器
+    videoReconcileTimer = setInterval(reconcileVideoSnapshotOnce, 8000);
+}
+
+function stopVideoReconcilePolling() {
+    if (videoReconcileTimer) {
+        clearInterval(videoReconcileTimer);
+        videoReconcileTimer = null;
+    }
+}
+
+async function reconcileVideoSnapshotOnce() {
+    const projectId = currentProjectId || getPersistedProjectId();
+    if (!projectId || projectEnded || currentStep === 'merge') {
+        stopVideoReconcilePolling();
+        return;
+    }
+    try {
+        const response = await fetch(`/project/${encodeURIComponent(projectId)}/restore`);
+        if (!response.ok) {
+            stopVideoReconcilePolling();
+            return;
+        }
+        const result = await parseJsonResponse(response);
+        const snap = result && result.snapshot;
+        if (!result || !result.success || !snap || snap.is_ended) {
+            stopVideoReconcilePolling();
+            return;
+        }
+        renderVideosFromSnapshot(snap);
+        if (snap.final_video_url) {
+            displayFinalVideo(snap.final_video_url);
+            currentStep = 'merge';
+            updateOverallProgress();
+            updateProjectActionState();
+            stopVideoReconcilePolling();
+        }
+    } catch (e) {
+        // 轮询失败不影响主流程：保留计时器下次重试。
+        console.debug('Video reconcile poll failed:', e);
+    }
+}
+
 
 // 健壮解析后端 JSON 响应。
 // 云端 API 网关在实例繁忙/冷启动时可能返回明文错误（如 "upstream request timeout"），
@@ -2384,6 +2451,12 @@ function startVideoGenerationAfterReference() {
     currentStep = 'videos';
     refreshAllReferenceActionStates();
     showLoading(t('status.startingVideoGeneration'));
+
+    // 云端多实例：本次 /continue_generate_after_reference 可能落在与持有 WS 不同的实例，
+    // 后台视频任务的实时推送会在跨实例时丢失，导致“视频生成”阶段前端空白。
+    // 立即渲染视频生成模块并开启对账轮询，以项目快照为权威兜底同步。
+    ensureVideosContainer();
+    startVideoReconcilePolling();
 
     // 发送请求到后端
     fetch('/continue_generate_after_reference', {
@@ -4538,6 +4611,7 @@ function showMergeStep() {
 function displayFinalVideo(url) {
     lastFinalVideoUrl = url;
     mergeStepVisible = false;
+    stopVideoReconcilePolling(); // 最终视频就绪：视频阶段结束，停止对账轮询
     hideFullscreenGenerating();
     hideStatusSection();
 
@@ -4605,6 +4679,7 @@ function hideLoading() {
 function resetProject() {
     currentProjectId = null;
     hasDraftProject = false;
+    stopVideoReconcilePolling(); // 重置项目：停止残留的视频对账轮询
     persistActiveProject(null); // 清除刷新恢复标记：新建/结束后不再恢复旧项目
     uploadedImages = [];
     uploadedAudio = null;

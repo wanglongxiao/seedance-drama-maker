@@ -577,6 +577,16 @@ async def restore_project_snapshot(project_id: str):
         getattr(project, "scene_reference_images", None)
     ) or bool(getattr(project, "storyboard_images", None))
 
+    # 视频阶段是否已启动（用于云端多实例下前端权威对账）。
+    # 参考图确认后即进入 images_generated；此时可能尚无任何视频 URL，
+    # 但前端应当立即渲染“视频生成”模块，避免跨实例 WS 消息丢失导致 UI 空白。
+    current_step_value = getattr(project, "current_step", "") or ""
+    video_phase_started = current_step_value in {
+        "images_generated",
+        "videos_generated",
+        "completed",
+    }
+
     return {
         "success": True,
         "snapshot": {
@@ -593,6 +603,9 @@ async def restore_project_snapshot(project_id: str):
             ),
             "videos": videos_payload,
             "total_scenes": total_scenes,
+            # 视频阶段已启动标记：前端据此立即渲染视频生成模块并开启对账轮询，
+            # 即使跨实例 WS 消息全部丢失也能保证 UI 与项目状态一致。
+            "video_phase_started": video_phase_started,
             "next_scene_index": int(getattr(project, "next_scene_index", 0) or 0),
             "regenerating_scene_numbers": list(getattr(project, "regenerating_scene_numbers", []) or []),
             "final_video_url": getattr(project, "final_video_url", None),
