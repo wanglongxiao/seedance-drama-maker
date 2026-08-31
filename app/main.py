@@ -165,6 +165,76 @@ def validate_project_cleanup_access(project_id: str, client_id: Optional[str]) -
     return translate(locale, "error.project_access_denied", project_id=project_id)
 
 
+def resolve_regenerate_client_id(
+    project_id: str,
+    client_id: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """解析重新生成时应使用的 client_id，兼容云端多实例 / WS 短暂重连。
+
+    返回 (effective_client_id, error_key)。error_key 为 None 表示校验通过。
+
+    背景：弹性多实例部署下，/regenerate 的 HTTP 请求可能落在与持有 WebSocket
+    不同的实例上；此时全局有效的 client_id 在本实例内存的 websocket_connections
+    中查不到，旧逻辑会硬报 "client_id 无效或连接已断开"，导致重新生成整体失败。
+
+    处理策略（按优先级）：
+    1. client_id 已在本实例活跃连接中 -> 直接使用。
+    2. client_id 缺失但本实例有连接 -> 退化为项目属主或第一个连接（兼容旧前端）。
+    3. client_id 提供但不在本实例连接中：
+       - 若其为该项目登记的属主 -> 信任它（结果经 WS 代理按 client_id 路由，
+         WS 恢复/其它实例持有时仍可送达）。
+       - 否则若本实例存在该项目属主连接 -> 使用属主连接。
+       - 否则若本实例有任意连接 -> 退化为第一个连接。
+       - 否则若有登记属主 -> 信任属主；都没有才返回 no_active_websocket。
+    """
+    owner_client_id = project_client_owners.get(project_id)
+
+    # 1. 常规命中：client_id 就在本实例活跃连接里。
+    if client_id and client_id in websocket_connections:
+        return client_id, None
+
+    # 2. 未传 client_id：兼容旧前端。
+    if not client_id:
+        if owner_client_id and owner_client_id in websocket_connections:
+            logger.warning(
+                f"/regenerate: missing client_id, fallback to project owner {owner_client_id}"
+            )
+            return owner_client_id, None
+        if websocket_connections:
+            fallback = next(iter(websocket_connections.keys()))
+            logger.warning(f"/regenerate: missing client_id, fallback to {fallback}")
+            return fallback, None
+        return None, "error.no_active_websocket"
+
+    # 3. client_id 提供但不在本实例连接中（多实例 / 重连中）。
+    if owner_client_id and client_id == owner_client_id:
+        # 属主本人发起：信任该 client_id，结果经 ReconnectingWebSocketProxy 按 id 路由。
+        logger.warning(
+            f"/regenerate: client {client_id} not on this instance but is project "
+            f"{project_id} owner; trusting id for cross-instance/reconnect delivery"
+        )
+        return client_id, None
+    if owner_client_id and owner_client_id in websocket_connections:
+        logger.warning(
+            f"/regenerate: client {client_id} not on this instance; routing to "
+            f"project owner {owner_client_id}"
+        )
+        return owner_client_id, None
+    if websocket_connections:
+        fallback = next(iter(websocket_connections.keys()))
+        logger.warning(
+            f"/regenerate: client {client_id} not on this instance; fallback to {fallback}"
+        )
+        return fallback, None
+    if owner_client_id:
+        logger.warning(
+            f"/regenerate: no local WS on this instance; trusting registered owner "
+            f"{owner_client_id} for project {project_id}"
+        )
+        return owner_client_id, None
+    return None, "error.no_active_websocket"
+
+
 def build_end_cleanup_keep_prefixes(project) -> list[str]:
     keep_prefixes = []
     if getattr(project, "final_video_url", None):
@@ -565,17 +635,11 @@ async def continue_generate_after_reference(
     """用户确认参考图后，开始新流程视频生成（逐个生成+审核）"""
     ui_language = normalize_locale(ui_language)
     try:
-        # 优先使用前端传入的 client_id，确保消息发到正确的页面
-        if len(websocket_connections) == 0:
-            return {"success": False, "error": translate(ui_language, "error.no_active_websocket")}
-
-        if not client_id:
-            # 兼容旧前端：未传 client_id 时退化为第一个连接（可能不准确）
-            client_id = list(websocket_connections.keys())[0]
-            logger.warning(f"/continue_generate_after_reference: missing client_id, fallback to {client_id}")
-
-        if client_id not in websocket_connections:
-            return {"success": False, "error": translate(ui_language, "error.invalid_client_id", client_id=client_id)}
+        # 优先使用前端传入的 client_id；兼容云端多实例 / WS 短暂重连：
+        # 若 client_id 是项目属主或本实例有可路由连接，则不再硬报 client_id 无效。
+        client_id, client_error_key = resolve_regenerate_client_id(project_id, client_id)
+        if client_error_key:
+            return {"success": False, "error": translate(ui_language, client_error_key)}
 
         access_error = validate_project_client_access(project_id, client_id)
         if access_error:
@@ -612,15 +676,11 @@ async def continue_reference_stage(
     """
     ui_language = normalize_locale(ui_language)
     try:
-        if len(websocket_connections) == 0:
-            return {"success": False, "error": translate(ui_language, "error.no_active_websocket")}
-
-        if not client_id:
-            client_id = list(websocket_connections.keys())[0]
-            logger.warning(f"/continue_reference_stage: missing client_id, fallback to {client_id}")
-
-        if client_id not in websocket_connections:
-            return {"success": False, "error": translate(ui_language, "error.invalid_client_id", client_id=client_id)}
+        # 兼容云端多实例 / WS 短暂重连：自动进入下一阶段时，HTTP 可能落在与持有
+        # WebSocket 不同的实例上，不应因本实例查不到 client_id 就硬报无效。
+        client_id, client_error_key = resolve_regenerate_client_id(project_id, client_id)
+        if client_error_key:
+            return {"success": False, "error": translate(ui_language, client_error_key)}
 
         access_error = validate_project_client_access(project_id, client_id)
         if access_error:
@@ -730,19 +790,13 @@ async def regenerate(
                             "error": translate(ui_language, "error.reference_regeneration_locked_original")
                         }
 
-                # 需要有效的 WebSocket 连接以推送最终结果。
-                effective_client_id = client_id
-                if not effective_client_id or effective_client_id not in websocket_connections:
-                    if len(websocket_connections) == 0:
-                        return {"success": False, "error": translate(ui_language, "error.no_active_websocket")}
-                    if effective_client_id and effective_client_id not in websocket_connections:
-                        return {
-                            "success": False,
-                            "error": translate(ui_language, "error.invalid_client_id", client_id=effective_client_id)
-                        }
-                    # 兼容旧前端：未传 client_id 时退化为第一个连接。
-                    effective_client_id = list(websocket_connections.keys())[0]
-                    logger.warning(f"/regenerate: missing client_id, fallback to {effective_client_id}")
+                # 需要有效的 WebSocket 连接以推送最终结果。兼容云端多实例 / WS 重连：
+                # 只要 client_id 是项目属主或本实例有可路由连接，就不再硬报 client_id 无效。
+                effective_client_id, client_error_key = resolve_regenerate_client_id(
+                    project_id, client_id
+                )
+                if client_error_key:
+                    return {"success": False, "error": translate(ui_language, client_error_key)}
 
                 # 非阻塞：单张图片重生成耗时可达 40~60s，云端 API 网关约 60s 超时，
                 # 若在 HTTP 内同步 await 会触发网关断连，前端误报“重新生成失败”。
@@ -813,19 +867,12 @@ async def regenerate(
             logger.info(f"Total scenes in script: {len(project.script.scenes)}")
             logger.info(f"Total videos: {len(project.videos)}")
 
-            # 需要有效的 WebSocket 连接以推送最终结果。
-            effective_client_id = client_id
-            if not effective_client_id or effective_client_id not in websocket_connections:
-                if len(websocket_connections) == 0:
-                    return {"success": False, "error": translate(ui_language, "error.no_active_websocket")}
-                if effective_client_id and effective_client_id not in websocket_connections:
-                    return {
-                        "success": False,
-                        "error": translate(ui_language, "error.invalid_client_id", client_id=effective_client_id)
-                    }
-                # 兼容旧前端：未传 client_id 时退化为第一个连接。
-                effective_client_id = list(websocket_connections.keys())[0]
-                logger.warning(f"/regenerate: missing client_id, fallback to {effective_client_id}")
+            # 需要有效的 WebSocket 连接以推送最终结果。兼容云端多实例 / WS 重连。
+            effective_client_id, client_error_key = resolve_regenerate_client_id(
+                project_id, client_id
+            )
+            if client_error_key:
+                return {"success": False, "error": translate(ui_language, client_error_key)}
 
             regeneration_key = f"{project_id}:{int(scene_number)}"
             active_task = video_scene_regeneration_tasks.get(regeneration_key)
