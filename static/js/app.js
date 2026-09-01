@@ -1171,11 +1171,19 @@ function reconcileUiFromSnapshot(snap) {
             displayFinalVideo(snap.final_video_url);
             currentStep = 'merge';
         }
-
-        // 6) 底部状态栏：进入某阶段后若状态栏为空（实时 status 消息丢失），依快照补一个合理提示。
-        reconcileStatusBarFromSnapshot(snap);
     } catch (e) {
         console.debug('reconcileUiFromSnapshot render failed:', e);
+    }
+
+    // 6) 底部状态栏补齐：独立 try/catch，绝不放进上面的右侧渲染 try。
+    //    云端多实例下上游任一渲染分支（尤其视频审核态/某分镜资源 400/ERR_ABORTED）抛异常时，
+    //    若与状态栏补齐同处一个 try，会把本条一并跳过——表现为「项目在跑、底部状态栏却消失，
+    //    无法判断是否还在运行」，且因取决于该次快照哪个分支抛错而「诸多步骤不定期出现」。
+    //    与转场提示补发同理：状态栏是用户判断「是否仍在运行」的关键信号，必须与渲染解耦。
+    try {
+        reconcileStatusBarFromSnapshot(snap);
+    } catch (e) {
+        console.debug('reconcileStatusBarFromSnapshot failed:', e);
     }
 
     updateOverallProgress();
