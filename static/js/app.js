@@ -1092,58 +1092,72 @@ async function reconcileProjectSnapshotOnce() {
 function reconcileUiFromSnapshot(snap) {
     if (!snap) return;
 
-    // 1) 剧本：右侧无剧本卡片但快照已有剧本 -> 补渲染并点亮步骤 1。
-    if (snap.script && !document.getElementById('script-card')) {
-        displayScript(snap.script);
-        stepProgress.script = 100;
-        updateStepHighlight('script_agent', 100);
+    // 0) 转场聊天提示优先补发：与右侧渲染解耦。
+    //    云端多实例下「自动进入下一阶段：...」原本仅由实时 WS step_complete 驱动，
+    //    跨实例丢失时后端已自链推进、右侧由下方分支补渲染，但左侧聊天缺该提示。
+    //    这里依快照幂等补发（去重）。之所以放在最前：下方任一渲染分支（尤其视频审核态
+    //    渲染）若在某次快照上抛异常，会中断本次 reconcile，导致原本在末尾补发的转场提示
+    //    被吞掉——这正是云端实测中「右侧已进入分镜视频、左侧却无视频转场提示」的根因。
+    try {
+        announceAutoTransitionsFromSnapshot(snap);
+    } catch (e) {
+        console.debug('announceAutoTransitionsFromSnapshot failed:', e);
     }
 
-    // 2) 参考图库（含角色/布景/装扮/布景状态/关键动作/故事版子模块）：
-    //    只要快照带 reference_output，就用它幂等重绘（displayReferenceImage 内部按卡片
-    //    id 复用节点、按数据增删子模块），从而补齐「进入某子阶段但右侧空白」的场景。
-    if (snap.reference_output) {
-        const missingReference = !document.getElementById('reference-image-card');
-        const missingVariant = !document.getElementById('variant-assets-card')
-            && ((snap.reference_output.character_outfit_images || []).length
-                || (snap.reference_output.scene_state_images || []).length);
-        const missingKeyAction = !document.getElementById('key-action-reference-card')
-            && (snap.reference_output.key_action_reference_images || []).length;
-        const missingStoryboard = !document.getElementById('storyboard-card')
-            && (snap.reference_output.storyboard_images || []).length;
-        if (missingReference || missingVariant || missingKeyAction || missingStoryboard) {
-            const refOutput = { ...snap.reference_output, ready_for_confirmation: false };
-            displayReferenceImage(refOutput);
-            referenceImageLocked = true;
-            stepProgress.reference_image = 100;
+    // 1)~6) 右侧渲染补齐：整体以 try 包裹，任一分支抛异常都不影响其余分支与上面已补发的
+    //    转场提示（云端多实例下某分镜资源 400/ERR_ABORTED 曾导致视频渲染抛错，中断整次对账）。
+    try {
+        // 1) 剧本：右侧无剧本卡片但快照已有剧本 -> 补渲染并点亮步骤 1。
+        if (snap.script && !document.getElementById('script-card')) {
+            displayScript(snap.script);
+            stepProgress.script = 100;
+            updateStepHighlight('script_agent', 100);
         }
+
+        // 2) 参考图库（含角色/布景/装扮/布景状态/关键动作/故事版子模块）：
+        //    只要快照带 reference_output，就用它幂等重绘（displayReferenceImage 内部按卡片
+        //    id 复用节点、按数据增删子模块），从而补齐「进入某子阶段但右侧空白」的场景。
+        if (snap.reference_output) {
+            const missingReference = !document.getElementById('reference-image-card');
+            const missingVariant = !document.getElementById('variant-assets-card')
+                && ((snap.reference_output.character_outfit_images || []).length
+                    || (snap.reference_output.scene_state_images || []).length);
+            const missingKeyAction = !document.getElementById('key-action-reference-card')
+                && (snap.reference_output.key_action_reference_images || []).length;
+            const missingStoryboard = !document.getElementById('storyboard-card')
+                && (snap.reference_output.storyboard_images || []).length;
+            if (missingReference || missingVariant || missingKeyAction || missingStoryboard) {
+                const refOutput = { ...snap.reference_output, ready_for_confirmation: false };
+                displayReferenceImage(refOutput);
+                referenceImageLocked = true;
+                stepProgress.reference_image = 100;
+            }
+        }
+
+        // 3) 连环画 PDF：无卡片但快照已有状态 -> 补渲染。
+        if (!document.getElementById('comic-pdf-card')
+            && (snap.comic_pdf_url || snap.comic_pdf_status === 'generating' || snap.comic_pdf_status === 'failed')) {
+            displayComicPdfLink({
+                status: snap.comic_pdf_status || (snap.comic_pdf_url ? 'completed' : 'pending'),
+                comic_pdf_url: snap.comic_pdf_url || '',
+                error: snap.comic_pdf_error || ''
+            });
+        }
+
+        // 4) 视频分镜：renderVideosFromSnapshot 自身按分镜号幂等，可安全补齐缺失的分镜卡片/URL/审核态。
+        renderVideosFromSnapshot(snap);
+
+        // 5) 最终合成视频：无最终视频卡片但快照已就绪 -> 补渲染并结束视频阶段。
+        if (snap.final_video_url && !lastFinalVideoUrl) {
+            displayFinalVideo(snap.final_video_url);
+            currentStep = 'merge';
+        }
+
+        // 6) 底部状态栏：进入某阶段后若状态栏为空（实时 status 消息丢失），依快照补一个合理提示。
+        reconcileStatusBarFromSnapshot(snap);
+    } catch (e) {
+        console.debug('reconcileUiFromSnapshot render failed:', e);
     }
-
-    // 3) 连环画 PDF：无卡片但快照已有状态 -> 补渲染。
-    if (!document.getElementById('comic-pdf-card')
-        && (snap.comic_pdf_url || snap.comic_pdf_status === 'generating' || snap.comic_pdf_status === 'failed')) {
-        displayComicPdfLink({
-            status: snap.comic_pdf_status || (snap.comic_pdf_url ? 'completed' : 'pending'),
-            comic_pdf_url: snap.comic_pdf_url || '',
-            error: snap.comic_pdf_error || ''
-        });
-    }
-
-    // 4) 视频分镜：renderVideosFromSnapshot 自身按分镜号幂等，可安全补齐缺失的分镜卡片/URL/审核态。
-    renderVideosFromSnapshot(snap);
-
-    // 5) 最终合成视频：无最终视频卡片但快照已就绪 -> 补渲染并结束视频阶段。
-    if (snap.final_video_url && !lastFinalVideoUrl) {
-        displayFinalVideo(snap.final_video_url);
-        currentStep = 'merge';
-    }
-
-    // 6) 底部状态栏：进入某阶段后若状态栏为空（实时 status 消息丢失），依快照补一个合理提示。
-    reconcileStatusBarFromSnapshot(snap);
-
-    // 7) 转场聊天提示：云端多实例下「自动进入下一阶段：...」原本仅由实时 WS step_complete 驱动，
-    //    跨实例丢失时后端已自链推进、右侧已渲染，但左侧聊天缺该提示。依快照幂等补发（去重）。
-    announceAutoTransitionsFromSnapshot(snap);
 
     updateOverallProgress();
     updateProjectActionState();
