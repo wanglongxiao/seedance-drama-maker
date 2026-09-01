@@ -1175,11 +1175,17 @@ function announceAutoTransitionsFromSnapshot(snap) {
         announceTransitionOnce('refstage_category3', t('messages.autoEnterNextReferenceStage', { stage: getReferenceStageName('category3') }));
     }
     // 参考图（category3）完成 -> 视频生成（新流程）
+    // 以 videoPhaseStarted 为唯一权威门槛：一旦后端进入视频阶段（current_step 为
+    // images_generated/videos_generated/completed，或已有视频、processing_phase=videos），
+    // 「进入视频生成」这一转场就已确定发生。不再附加 reached('category3_done') 门槛——
+    // 云端多实例下后端自链进入视频阶段后，快照 reference_stage 未必稳定读到 category3_done
+    // （曾导致视频转场提示漏发：merge 分支仅依赖 videoPhaseStarted 能补发，videos 却因多一道
+    // category3_done 门槛而缺失）。与下方 merge 分支保持一致的判定口径。
     const videoPhaseStarted = !!snap.video_phase_started
         || snap.processing_phase === 'videos'
         || (snap.videos && snap.videos.length)
         || (snap.current_step && String(snap.current_step).startsWith('videos'));
-    if (reached('category3_done') && videoPhaseStarted) {
+    if (videoPhaseStarted) {
         announceTransitionOnce('videos', t('messages.autoEnterNextNewFlow', { step: getStepName('videos') }));
     }
     // 视频全部完成 -> 视频合成
