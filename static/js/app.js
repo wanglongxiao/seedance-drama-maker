@@ -1038,8 +1038,14 @@ function renderVideosFromSnapshot(snap) {
 // 尚未渲染时才补，避免干扰实时链路已渲染的健康状态（不闪烁、不打断播放/倒计时）。
 // 项目结束/最终视频就绪时自动停止。
 let projectReconcileTimer = null;
+// 连续瞬时失败计数：云端多实例下，项目刚创建后某次 /restore 可能落到「尚未从 TOS 同步到
+// 该项目」的实例，返回 404/success:false；这属于瞬时不一致，不能据此永久停轮询。累计到阈值
+// （远超 TOS 同步窗口）才判定项目真的不存在而停止。
+let projectReconcileFailStreak = 0;
+const PROJECT_RECONCILE_MAX_FAIL_STREAK = 8; // 8s * 8 ≈ 64s 容忍窗口
 function startProjectReconcilePolling() {
     if (projectReconcileTimer) return; // 已在运行，避免重复计时器
+    projectReconcileFailStreak = 0;
     projectReconcileTimer = setInterval(reconcileProjectSnapshotOnce, 8000);
 }
 
@@ -1048,6 +1054,7 @@ function stopProjectReconcilePolling() {
         clearInterval(projectReconcileTimer);
         projectReconcileTimer = null;
     }
+    projectReconcileFailStreak = 0;
 }
 
 // 向后兼容别名：早期仅有视频阶段轮询，保留同名入口，统一走通用项目对账。
@@ -1068,15 +1075,27 @@ async function reconcileProjectSnapshotOnce() {
     try {
         const response = await fetch(`/project/${encodeURIComponent(projectId)}/restore`);
         if (!response.ok) {
-            stopProjectReconcilePolling();
+            // 云端多实例：404 多为「该实例尚未从 TOS 同步到本项目」的瞬时不一致，不能立即停轮询
+            // （否则唯一的转场提示/右侧补齐兜底会被永久关闭）。累计连续失败到阈值才放弃。
+            if (++projectReconcileFailStreak >= PROJECT_RECONCILE_MAX_FAIL_STREAK) {
+                stopProjectReconcilePolling();
+            }
             return;
         }
         const result = await parseJsonResponse(response);
         const snap = result && result.snapshot;
-        if (!result || !result.success || !snap || snap.is_ended) {
+        if (!result || !result.success || !snap) {
+            if (++projectReconcileFailStreak >= PROJECT_RECONCILE_MAX_FAIL_STREAK) {
+                stopProjectReconcilePolling();
+            }
+            return;
+        }
+        // 项目已真正结束是权威终止信号，立即停止。
+        if (snap.is_ended) {
             stopProjectReconcilePolling();
             return;
         }
+        projectReconcileFailStreak = 0; // 拿到有效快照即清零容忍计数
         reconcileUiFromSnapshot(snap);
         if (snap.final_video_url) {
             stopProjectReconcilePolling();
