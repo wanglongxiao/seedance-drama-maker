@@ -2574,11 +2574,21 @@ function handleReferenceStageComplete(stage, output) {
 
     const nextStage = computeNextReferenceStage(stage, referenceStageHasCategory2);
     if (nextStage === 'videos') {
-        // category3 已完成：复用主步骤 videos 等待/倒计时逻辑。
+        // category3（各分镜故事版）已完成 -> 进入视频生成。
         pendingReferenceStage = 'videos';
         pendingStep = 'videos';
         isWaitingForConfirm = true;
-        maybeStartPendingStepCountdown();
+        if (isAutoRunMode) {
+            // auto 模式：子阶段自动流不经过 canStartPendingStepCountdown 的
+            // ready_for_confirmation/!referenceImageLocked 门槛——那是给「手动确认参考图」流程用的，
+            // 子阶段自动流里这些条件通常不满足，会导致「自动进入下一步：🎥 视频生成」转场提示漏发
+            // （实测复现：右侧已进入分镜视频，左侧却无视频转场提示）。直接走视频倒计时：
+            // 归零后 announceTransitionOnce('videos') 并开启对账轮询，与其它阶段口径一致。
+            showAutoRunCountdown('videos', 'reference_image', true);
+        } else {
+            // 手动模式：复用主步骤 videos 等待/倒计时逻辑（保留原门槛）。
+            maybeStartPendingStepCountdown();
+        }
         return;
     }
 
