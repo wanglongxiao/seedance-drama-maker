@@ -1515,6 +1515,20 @@ class MainAgent:
         if project and generation_mode is not None:
             project.video_generation_mode = self._normalize_generation_mode(generation_mode)
 
+    def set_project_auto_run(self, project_id: str, auto_run: bool) -> None:
+        """持久化项目「全自动模式」标记，供云端多实例下后端进程内自链推进阶段。
+
+        关键：auto 模式此前完全由前端驱动阶段推进（后端发 step_complete WS -> 浏览器倒计时
+        -> 浏览器发 HTTP 触发下一阶段）。云端多实例下，完成阶段的后台任务可能运行在「不持有
+        浏览器 WebSocket」的实例上，step_complete 推送丢失 -> 前端永不触发下一阶段 -> 流程卡死
+        （本地单实例不复现）。置位该标记后，后端在每个阶段完成时于「同一进程内」直接调度下一阶段，
+        推进不再依赖 WS 消息抵达浏览器；随项目状态持久化到 TOS 以支持跨实例接管。
+        """
+        project = self.projects.get(project_id)
+        if project is not None and bool(auto_run):
+            # 只置位不清除：auto 模式一经开启即贯穿整条流水线，直至完成或用户显式退出/结束项目。
+            project.auto_run = True
+
     def _project_language(self, project: Optional[VideoProject], fallback: str = "zh-CN") -> str:
         return normalize_locale(getattr(project, "output_language", fallback))
 

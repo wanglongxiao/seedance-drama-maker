@@ -232,6 +232,19 @@ def resolve_regenerate_client_id(
             f"{owner_client_id} for project {project_id}"
         )
         return owner_client_id, None
+    # 云端多实例：client_id 由前端提供，但本实例既无该活跃连接、也无该项目属主登记、
+    # 更无任何本地连接（HTTP 落在从未持有此项目 WebSocket 的实例）。此前会硬报
+    # no_active_websocket，导致「启动视频生成失败」且后台任务根本不启动。
+    # 前端确实在某个实例上持有该 client_id 的 WS，因此这里信任它继续执行：后台任务
+    # 照常推进并持久化到 TOS，结果经 WS 代理按 id 路由；即便跨实例实时推送丢失，
+    # 前端对账轮询也会以 TOS 快照兜底同步。绝不因本实例缺少本地 WS 而阻断生成。
+    if client_id:
+        logger.warning(
+            f"/regenerate: client {client_id} unknown on this instance and no owner "
+            f"registered for project {project_id}; trusting provided client_id to avoid "
+            f"blocking generation (cross-instance; UI synced via TOS reconcile polling)"
+        )
+        return client_id, None
     return None, "error.no_active_websocket"
 
 
@@ -265,7 +278,7 @@ def _scene_regeneration_blocks_merge(project) -> bool:
     return False
 
 
-async def notify_videos_step_complete_if_ready(client_id: str, project, lang: str) -> None:
+async def notify_videos_step_complete_if_ready(client_id: str, project, lang: str) -> bool:
     total_scenes = len(getattr(getattr(project, "script", None), "scenes", []) or [])
     completed_videos = len(getattr(project, "videos", None) or [])
     next_scene_index = int(getattr(project, "next_scene_index", 0) or 0)
@@ -282,6 +295,8 @@ async def notify_videos_step_complete_if_ready(client_id: str, project, lang: st
                 "message": translate(lang, "step.videos.complete")
             }
         })
+        return True
+    return False
 
 
 async def end_project_resources(
@@ -458,6 +473,7 @@ async def chat(
     audio_url: Optional[str] = Form(None),
     ui_language: Optional[str] = Form("zh-CN"),
     use_original_reference: Optional[str] = Form("false"),
+    auto_run: Optional[str] = Form("false"),
 ):
     """聊天接口"""
     ui_language = normalize_locale(ui_language)
@@ -486,6 +502,13 @@ async def chat(
             if access_error:
                 return {"success": False, "error": access_error}
             main_agent.set_project_output_language(project_id, ui_language)
+
+        # 云端多实例自链：一经进入 auto 模式即持久化标记，后端在各阶段完成时进程内自链推进，
+        # 不再依赖前端收到 step_complete WS 后回发 HTTP（跨实例时该推送可能丢失导致卡死）。
+        if parse_form_bool(auto_run):
+            main_agent.set_project_auto_run(project_id, True)
+            main_agent.set_project_video_review_mode(project_id, "auto")
+            main_agent.save_project_state(project_id)
         
         project = main_agent.get_project(project_id)
         if is_new_project:
@@ -1533,6 +1556,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     main_agent.set_project_output_language(project_id, ui_language)
                     main_agent.set_project_video_review_mode(project_id, review_mode)
                     main_agent.set_project_video_generation_mode(project_id, generation_mode)
+                    # auto 模式：置位持久化标记，后端在各阶段完成时进程内自链推进（跨实例兜底）。
+                    if str(review_mode or "").strip().lower() == "auto":
+                        main_agent.set_project_auto_run(project_id, True)
+                        main_agent.save_project_state(project_id)
                     asyncio.create_task(
                         execute_step_with_websocket(client_id, project_id, step, review_mode=review_mode)
                     )
@@ -1740,6 +1767,12 @@ async def execute_script_step(client_id: str, project_id: str):
             "message": translate(lang, "step.script.complete")
         }
     })
+
+    # 云端多实例自链：auto 模式下后端进程内直接推进参考图阶段，不依赖前端收到
+    # step_complete 后再发 HTTP（该 WS 推送在跨实例时可能丢失导致流程卡死）。
+    if getattr(project, "auto_run", False):
+        logger.info(f"[AUTO-CHAIN] project {project_id} auto-advancing script -> reference_image")
+        asyncio.create_task(execute_reference_image_step(client_id, project_id))
 
 
 async def execute_images_step(client_id: str, project_id: str):
@@ -1978,6 +2011,18 @@ async def execute_reference_stage(client_id: str, project_id: str, stage: str):
         }
     })
 
+    # 云端多实例自链：auto 模式下后端进程内直接推进下一子阶段/视频阶段，
+    # 不依赖前端收到 step_complete 后再发 HTTP（跨实例时该推送可能丢失导致卡死）。
+    if getattr(project, "auto_run", False):
+        next_stage = _compute_next_reference_stage(stage, has_category2)
+        if next_stage == "videos":
+            logger.info(f"[AUTO-CHAIN] project {project_id} auto-advancing {stage} -> videos")
+            asyncio.create_task(continue_generate_after_reference_confirmation(client_id, project_id))
+        else:
+            logger.info(f"[AUTO-CHAIN] project {project_id} auto-advancing reference {stage} -> {next_stage}")
+            asyncio.create_task(execute_reference_stage(client_id, project_id, next_stage))
+
+
 
 async def continue_generate_after_reference_confirmation(client_id: str, project_id: str, review_mode: Optional[str] = None):
     """用户确认参考图后执行新流程：首分镜视频 -> 审核 -> 延伸视频 -> 审核 -> 等待进入合成"""
@@ -2029,8 +2074,14 @@ async def continue_generate_after_reference_confirmation(client_id: str, project
         # 视频阶段结束：清空生成中标记（分镜数据本身已由数据驱动对账补齐）。
         project.processing_phase = ""
         main_agent.save_project_state(project_id)
-        await notify_videos_step_complete_if_ready(client_id, project, lang)
+        videos_ready = await notify_videos_step_complete_if_ready(client_id, project, lang)
         logger.info(f"[FLOW] Video generation flow completed for project {project_id}")
+
+        # 云端多实例自链：auto 模式且全部分镜已完成/通过审核时，后端进程内直接进入合成，
+        # 不依赖前端收到 videos 的 step_complete 后再发 HTTP（跨实例时可能丢失导致卡死）。
+        if videos_ready and getattr(project, "auto_run", False):
+            logger.info(f"[AUTO-CHAIN] project {project_id} auto-advancing videos -> merge")
+            asyncio.create_task(execute_merge_step(client_id, project_id))
     except Exception as e:
         logger.error(f"[FLOW] Video generation flow failed: {str(e)}")
         # 失败也清空生成中标记，避免状态栏「生成中」长期悬挂。
@@ -2241,7 +2292,11 @@ async def execute_videos_step(client_id: str, project_id: str, review_mode: Opti
     )
 
     project = main_agent.get_project(project_id)
-    await notify_videos_step_complete_if_ready(client_id, project, lang)
+    videos_ready = await notify_videos_step_complete_if_ready(client_id, project, lang)
+    # 云端多实例自链：auto 模式且分镜全部完成/通过审核时，后端进程内直接进入合成。
+    if videos_ready and getattr(project, "auto_run", False):
+        logger.info(f"[AUTO-CHAIN] project {project_id} auto-advancing videos -> merge")
+        asyncio.create_task(execute_merge_step(client_id, project_id))
 
 
 async def execute_merge_step(client_id: str, project_id: str):

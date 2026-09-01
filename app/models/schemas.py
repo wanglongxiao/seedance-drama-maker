@@ -209,6 +209,13 @@ class VideoProject(BaseModel):
     #      reference_category3 / videos / merge
     processing_phase: str = ""
     video_review_mode: str = "manual"
+    # 全自动模式：项目是否处于「一键生成」自动推进流程。
+    # 关键：auto 模式的阶段推进此前完全由前端驱动（后端发 step_complete WS -> 浏览器倒计时
+    # -> 浏览器发 HTTP 触发下一阶段）。云端多实例下，完成阶段的后台任务可能运行在「不持有
+    # 浏览器 WebSocket」的实例上，step_complete 推送丢失 -> 前端永不触发下一阶段 -> 流程卡死
+    # （本地单实例不复现）。持久化该标记后，后端可在每个阶段完成时「进程内自链」下一阶段，
+    # 使推进不再依赖 WS 消息抵达浏览器。随项目状态持久化到 TOS，支持跨实例接管。
+    auto_run: bool = False
     # 视频生成模式：extend=延长（串行，参考前一分镜视频），parallel=并行（默认，各分镜独立并行生成）
     video_generation_mode: str = "parallel"
     next_scene_index: int = 0

@@ -1962,7 +1962,8 @@ async function sendMessage() {
                         image_assets: JSON.stringify(getUploadedImageAssets()),
                         audio_url: '',
                         ui_language: currentLanguage,
-                        use_original_reference: useOriginalReference ? 'true' : 'false'
+                        use_original_reference: useOriginalReference ? 'true' : 'false',
+                        auto_run: 'true'
                     })
                 });
                 const result = await parseJsonResponse(response);
@@ -2035,7 +2036,8 @@ async function sendMessage() {
                 image_assets: JSON.stringify(getUploadedImageAssets()),
                 audio_url: audioUrl || '',
                 ui_language: currentLanguage,
-                use_original_reference: useOriginalReference ? 'true' : 'false'
+                use_original_reference: useOriginalReference ? 'true' : 'false',
+                auto_run: isAutoRunMode ? 'true' : 'false'
             })
         });
         
@@ -2404,17 +2406,22 @@ function showAutoRunCountdown(nextStep, completedStep, autoProceed = true) {
             return;
         }
 
-        // 特殊处理：参考图完成后下一步是videos，应该调用新流程而不是旧流程
+        // 云端多实例：auto 模式下阶段推进由「后端进程内自链」权威驱动（不依赖前端 HTTP/WS 触发，
+        // 因为 step_complete 推送可能跨实例丢失）。前端仅做「即将进入下一步」的提示与占位渲染，
+        // 绝不再回发触发请求，避免与后端自链造成重复执行。
+        isWaitingForConfirm = false;
+        hideStatusSection();
         if (completedStep === 'reference_image' && nextStep === 'videos') {
             addAgentMessage(t('messages.autoEnterNextNewFlow', { step: getStepName(nextStep) }));
-            isWaitingForConfirm = false;
-            hideStatusSection();
-            startVideoGenerationAfterReference();
+            // 立即渲染视频模块并开启对账轮询，兜底跨实例实时推送丢失。
+            referenceImageLocked = true;
+            currentStep = 'videos';
+            refreshAllReferenceActionStates();
+            ensureVideosContainer();
+            startVideoReconcilePolling();
         } else {
             addAgentMessage(t('messages.autoEnterNext', { step: getStepName(nextStep) }));
-            isWaitingForConfirm = false;
-            hideStatusSection();
-            startStep(nextStep);
+            currentStep = nextStep;
         }
     });
 }
@@ -2497,13 +2504,21 @@ function maybeStartReferenceStageCountdown() {
     }
 }
 
-// 自动模式子阶段倒计时：归零后推进 proceedToReferenceStage(nextStage)。
+// 自动模式子阶段倒计时：归零后仅做提示与占位，推进由后端自链权威驱动（跨实例兜底）。
 function showReferenceStageCountdown(nextStage, completedStage) {
     renderCountdownMessage(() => {
         addAgentMessage(t('messages.autoEnterNextReferenceStage', { stage: getReferenceStageName(nextStage) }));
         isWaitingForConfirm = false;
         hideStatusSection();
-        proceedToReferenceStage(nextStage);
+        // 云端多实例：不再前端 POST /continue_reference_stage 触发下一子阶段，避免与后端自链重复执行；
+        // videos 目标下也不前端触发视频流程。UI 由对账轮询按快照补齐。
+        if (nextStage === 'videos') {
+            referenceImageLocked = true;
+            currentStep = 'videos';
+            refreshAllReferenceActionStates();
+            ensureVideosContainer();
+            startVideoReconcilePolling();
+        }
     });
 }
 
