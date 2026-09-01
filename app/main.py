@@ -633,6 +633,10 @@ async def restore_project_snapshot(project_id: str):
             # 视频阶段已启动标记：前端据此立即渲染视频生成模块并开启对账轮询，
             # 即使跨实例 WS 消息全部丢失也能保证 UI 与项目状态一致。
             "video_phase_started": video_phase_started,
+            # 参考图子阶段进度标记（形如 {stage}_done），供前端在跨实例 WS 丢失时
+            # 幂等补出「自动进入下一阶段：...」聊天提示（本地/云端一致）。
+            "reference_stage": getattr(project, "reference_stage", "none") or "none",
+            "auto_run": bool(getattr(project, "auto_run", False)),
             "next_scene_index": int(getattr(project, "next_scene_index", 0) or 0),
             "regenerating_scene_numbers": list(getattr(project, "regenerating_scene_numbers", []) or []),
             "final_video_url": getattr(project, "final_video_url", None),

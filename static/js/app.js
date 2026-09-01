@@ -61,6 +61,16 @@ let projectEnding = false;
 let projectEnded = false;
 let projectEndBeaconSent = false;
 
+// 云端多实例：阶段推进的「自动进入下一阶段：...」聊天提示原本仅由实时 WS step_complete 驱动，
+// 跨实例时该推送可能丢失（后端已自链推进、右侧已渲染，但左侧聊天缺提示）。这里记录已宣告过的
+// 转场 key，配合快照对账幂等补发聊天提示，确保本地单实例/云端多实例表现一致、且不重复。
+const announcedTransitions = new Set();
+function announceTransitionOnce(key, message) {
+    if (!key || announcedTransitions.has(key)) return;
+    announcedTransitions.add(key);
+    addAgentMessage(message);
+}
+
 // 刷新恢复：把「当前正在运行的真实项目」持久化到 sessionStorage（每个 Tab 独立）。
 // - 同一 Tab 刷新：sessionStorage 保留，恢复项目并继续，不新建项目。
 // - 真正关闭 Tab：sessionStorage 随之清空，不影响其它 Tab。
@@ -1131,8 +1141,55 @@ function reconcileUiFromSnapshot(snap) {
     // 6) 底部状态栏：进入某阶段后若状态栏为空（实时 status 消息丢失），依快照补一个合理提示。
     reconcileStatusBarFromSnapshot(snap);
 
+    // 7) 转场聊天提示：云端多实例下「自动进入下一阶段：...」原本仅由实时 WS step_complete 驱动，
+    //    跨实例丢失时后端已自链推进、右侧已渲染，但左侧聊天缺该提示。依快照幂等补发（去重）。
+    announceAutoTransitionsFromSnapshot(snap);
+
     updateOverallProgress();
     updateProjectActionState();
+}
+
+// 依快照幂等补发「自动进入下一阶段/下一步：...」聊天提示。
+// 仅全自动模式补发（手动模式转场由用户操作驱动，不应出现「自动进入」字样）；
+// 每条以稳定 key 去重，且与实时 WS 倒计时结束时用的 key 一致，避免单实例路径下重复。
+function announceAutoTransitionsFromSnapshot(snap) {
+    if (!snap || !snap.auto_run) return;
+
+    const refStage = String(snap.reference_stage || 'none');
+    const order = { 'none': 0, 'category1_done': 1, 'category2_done': 2, 'category3_done': 3 };
+    const reached = (s) => (order[refStage] || 0) >= (order[s] || 0);
+    const refOut = snap.reference_output || {};
+    const hasCategory2 = !!((refOut.character_outfit_images || []).length
+        || (refOut.scene_state_images || []).length);
+
+    // 剧本 -> 参考图（图片生成）
+    if (snap.reference_output || refStage !== 'none' || snap.script) {
+        announceTransitionOnce('reference_image', t('messages.autoEnterNext', { step: getStepName('reference_image') }));
+    }
+    // 参考图 category1 完成 -> 装扮/布景状态子阶段（仅当存在 category2）
+    if (reached('category1_done') && hasCategory2) {
+        announceTransitionOnce('refstage_category2', t('messages.autoEnterNextReferenceStage', { stage: getReferenceStageName('category2') }));
+    }
+    // -> 各分镜故事版（category3）：有 category2 时需 category2 完成，无则 category1 完成即进入
+    if (reached('category2_done') || (reached('category1_done') && !hasCategory2)) {
+        announceTransitionOnce('refstage_category3', t('messages.autoEnterNextReferenceStage', { stage: getReferenceStageName('category3') }));
+    }
+    // 参考图（category3）完成 -> 视频生成（新流程）
+    const videoPhaseStarted = !!snap.video_phase_started
+        || snap.processing_phase === 'videos'
+        || (snap.videos && snap.videos.length)
+        || (snap.current_step && String(snap.current_step).startsWith('videos'));
+    if (reached('category3_done') && videoPhaseStarted) {
+        announceTransitionOnce('videos', t('messages.autoEnterNextNewFlow', { step: getStepName('videos') }));
+    }
+    // 视频全部完成 -> 视频合成
+    if (snap.total_scenes > 0
+        && snap.next_scene_index >= snap.total_scenes
+        && !snap.merge_blocked
+        && !snap.final_video_url
+        && videoPhaseStarted) {
+        announceTransitionOnce('merge', t('messages.autoEnterNext', { step: getStepName('merge') }));
+    }
 }
 
 // 依快照补齐底部状态栏：以后端权威的 processing_phase（生成中阶段）为主，
@@ -2412,7 +2469,7 @@ function showAutoRunCountdown(nextStep, completedStep, autoProceed = true) {
         isWaitingForConfirm = false;
         hideStatusSection();
         if (completedStep === 'reference_image' && nextStep === 'videos') {
-            addAgentMessage(t('messages.autoEnterNextNewFlow', { step: getStepName(nextStep) }));
+            announceTransitionOnce('videos', t('messages.autoEnterNextNewFlow', { step: getStepName(nextStep) }));
             // 立即渲染视频模块并开启对账轮询，兜底跨实例实时推送丢失。
             referenceImageLocked = true;
             currentStep = 'videos';
@@ -2420,7 +2477,7 @@ function showAutoRunCountdown(nextStep, completedStep, autoProceed = true) {
             ensureVideosContainer();
             startVideoReconcilePolling();
         } else {
-            addAgentMessage(t('messages.autoEnterNext', { step: getStepName(nextStep) }));
+            announceTransitionOnce(nextStep, t('messages.autoEnterNext', { step: getStepName(nextStep) }));
             currentStep = nextStep;
         }
     });
@@ -2507,7 +2564,7 @@ function maybeStartReferenceStageCountdown() {
 // 自动模式子阶段倒计时：归零后仅做提示与占位，推进由后端自链权威驱动（跨实例兜底）。
 function showReferenceStageCountdown(nextStage, completedStage) {
     renderCountdownMessage(() => {
-        addAgentMessage(t('messages.autoEnterNextReferenceStage', { stage: getReferenceStageName(nextStage) }));
+        announceTransitionOnce('refstage_' + nextStage, t('messages.autoEnterNextReferenceStage', { stage: getReferenceStageName(nextStage) }));
         isWaitingForConfirm = false;
         hideStatusSection();
         // 云端多实例：不再前端 POST /continue_reference_stage 触发下一子阶段，避免与后端自链重复执行；
