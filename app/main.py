@@ -544,10 +544,11 @@ async def get_project(project_id: str):
 async def restore_project_snapshot(project_id: str):
     """页面刷新后恢复项目 UI 状态所需的快照。
 
-    内存未命中时 get_project 会自动回源 TOS 快照，因此本地与云端多实例
-    刷新后都能拿到同一项目的完整进度，从而“继续执行而非新建项目”。
+    只读场景使用 get_project_for_read：内存未命中时回源 TOS，命中时按 state_version
+    与 TOS 对账并取较新副本。这样云端多实例下即便请求落到「持有陈旧内存态」的实例，
+    也能拿到属主实例已推进的阶段产出，兜底右侧 UI 长期不显示的问题（本地单实例不复现）。
     """
-    project = main_agent.get_project(project_id)
+    project = main_agent.get_project_for_read(project_id)
     if not project:
         raise HTTPException(status_code=404, detail=translate("zh-CN", "error.project_not_found"))
 

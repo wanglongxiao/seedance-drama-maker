@@ -169,6 +169,10 @@ class VideoProject(BaseModel):
     status: str = "pending"
     current_step: str = "init"
     progress: int = 0
+    # 单调递增的状态版本号：每次 save_project_state 前自增，用于云端多实例下判断
+    # 「哪个副本更新」。只读的 /restore 快照会据此在 TOS 更新时回源，避免命中持有
+    # 陈旧内存态的实例导致右侧产出长期不显示（本地单实例不复现）。
+    state_version: int = 0
     created_at: datetime = datetime.now()
     updated_at: datetime = datetime.now()
     combined_input: Optional[str] = None

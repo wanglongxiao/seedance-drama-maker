@@ -3998,6 +3998,12 @@ class MainAgent:
         if not project:
             return
         try:
+            # 自增状态版本号后再持久化：只读 /restore 快照据此判断 TOS 是否比命中实例的
+            # 内存态更新，从而回源，兜底云端多实例下右侧产出不显示的问题。
+            try:
+                project.state_version = int(getattr(project, "state_version", 0) or 0) + 1
+            except Exception:
+                project.state_version = 1
             state_json = project.model_dump_json()
             tos_service.put_project_state_json(project_id, state_json)
         except Exception as e:
@@ -4025,6 +4031,39 @@ class MainAgent:
         if project is not None:
             return project
         return self._restore_project_from_tos(project_id)
+
+    def get_project_for_read(self, project_id: str) -> Optional[VideoProject]:
+        """只读场景（如 /restore 快照）获取项目：优先返回「更新」的副本。
+
+        云端多实例下，生成任务在属主实例推进并逐阶段写入 TOS，但只读的对账/恢复
+        请求可能被负载均衡到「持有陈旧内存态」的其它实例。若沿用 get_project 直接
+        返回其内存副本，就会漏掉更新的阶段产出，导致右侧 UI 长期不显示（本地单实例
+        不复现）。这里比较内存态与 TOS 的 state_version，TOS 更新时以 TOS 为准并
+        刷新本实例内存缓存；本实例更新时直接用内存（属主实例正在生成的情况）。
+        """
+        if not project_id:
+            return None
+        in_memory = self.projects.get(project_id)
+        if in_memory is None:
+            return self._restore_project_from_tos(project_id)
+        try:
+            state_json = tos_service.get_project_state_json(project_id)
+            if not state_json:
+                return in_memory
+            remote = VideoProject.model_validate_json(state_json)
+            local_version = int(getattr(in_memory, "state_version", 0) or 0)
+            remote_version = int(getattr(remote, "state_version", 0) or 0)
+            if remote_version > local_version:
+                # TOS 更新（其它实例已推进阶段）：刷新本实例缓存并返回更新副本。
+                self.projects[project_id] = remote
+                logger.info(
+                    f"get_project_for_read: refreshed {project_id} from TOS "
+                    f"(local v{local_version} < remote v{remote_version})"
+                )
+                return remote
+        except Exception as e:
+            logger.warning(f"get_project_for_read TOS reconcile failed for {project_id}: {str(e)}")
+        return in_memory
 
     def chat_with_user(self, message: str, project_id: str = None, output_language: Optional[str] = None) -> str:
         """处理已有项目的补充需求，不再执行旧的风格收集/预处理 LLM 对话。"""
