@@ -4583,6 +4583,13 @@ function displayVideos(output) {
     // 更新当前步骤为 videos（确保后续流程正确）
     referenceImageLocked = true;
     currentStep = 'videos';
+    // 兜底转场提示：WS 实时链路可能先于 showAutoRunCountdown 的 videos 分支抵达
+    // （或云端多实例下 step_complete 丢失、仅收到某个分镜的 video_agent 输出），
+    // 此路径此前只切 currentStep 而不补发提示，导致「自动进入下一步：🎥 视频生成」漏发。
+    // announceTransitionOnce 幂等去重，与倒计时/快照兜底路径共存不重复。
+    if (isAutoRunMode) {
+        announceTransitionOnce('videos', t('messages.autoEnterNextNewFlow', { step: getStepName('videos') }));
+    }
     refreshAllReferenceActionStates();
     ensureVideosContainer();
 
