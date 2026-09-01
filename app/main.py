@@ -594,6 +594,9 @@ async def restore_project_snapshot(project_id: str):
             "is_ended": bool(getattr(project, "is_ended", False)),
             "current_step": getattr(project, "current_step", "") or "",
             "status": getattr(project, "status", "") or "",
+            # 当前正在执行（生成中）的阶段：前端据此在「已进入但尚无数据」的生成窗口
+            # 也能补出底部状态栏与右侧占位，兜底云端多实例下丢失的 status/agent_output 推送。
+            "processing_phase": getattr(project, "processing_phase", "") or "",
             "output_language": lang,
             "video_review_mode": getattr(project, "video_review_mode", "manual") or "manual",
             "video_generation_mode": getattr(project, "video_generation_mode", "parallel") or "parallel",
@@ -1336,6 +1339,8 @@ async def rollback_step(request: Request):
         project.current_step = target_step
         project.status = f"rolled_back_to_{target_step}"
         project.progress = max(0, target_index * 25)
+        # 退回步骤时清空生成中标记，避免快照残留旧阶段导致状态栏误显示「生成中」。
+        project.processing_phase = ""
         main_agent.save_project_state(project_id)
 
         logger.info(f"Project {project_id} rolled back to step: {target_step}")
@@ -1691,6 +1696,10 @@ async def execute_script_step(client_id: str, project_id: str):
     """执行剧本生成步骤"""
     project = main_agent.get_project(project_id)
     lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+    # 阶段开始即置位并持久化：云端多实例下即使本次 status/progress 推送丢失，
+    # 其它实例的快照对账也能据此补出「剧本生成中」的底部状态栏。
+    project.processing_phase = "script"
+    main_agent.save_project_state(project_id)
     await manager.send_message(client_id, {
         "type": "status",
         "data": {"agent": "script_agent", "message": translate(lang, "progress.script.generating")}
@@ -1708,6 +1717,8 @@ async def execute_script_step(client_id: str, project_id: str):
     project.current_step = "script_generated"
     project.status = "script_generated"
     project.progress = max(project.progress, 25)
+    # 剧本已产出：清空生成中标记，交由数据驱动的对账补齐剧本卡片。
+    project.processing_phase = ""
     main_agent.save_project_state(project_id)
     
     await manager.send_message(client_id, {
@@ -1736,6 +1747,9 @@ async def execute_images_step(client_id: str, project_id: str):
     lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
     
     # ========== 第一步：生成参考图库==========
+    # 阶段开始即置位并持久化，兜底云端多实例下的推送丢失（右侧空白/状态栏空白）。
+    project.processing_phase = "reference_category1"
+    main_agent.save_project_state(project_id)
     await manager.send_message(client_id, {
         "type": "status",
         "data": {"agent": "image_agent", "message": translate(lang, "progress.reference.generating")}
@@ -1761,6 +1775,8 @@ async def execute_images_step(client_id: str, project_id: str):
         progress_callback=push_reference_library_progress,
     )
     project.reference_image = reference_image
+    # 参考图库已产出：清空生成中标记，后续由数据驱动的对账补齐右侧参考图库。
+    project.processing_phase = ""
     
     await manager.send_message(client_id, {
         "type": "progress",
@@ -1885,6 +1901,11 @@ async def execute_reference_stage(client_id: str, project_id: str, stage: str):
         await execute_reference_stage(client_id, project_id, "category3")
         return
 
+    # 阶段开始即置位并持久化：进入某参考图子阶段（含无数据的生成窗口）时，
+    # 云端多实例下 status/agent_output 推送可能丢失导致右侧子模块与状态栏空白，
+    # 前端据此标记补出「XXX 生成中」占位与状态栏。
+    project.processing_phase = f"reference_{stage}"
+    main_agent.save_project_state(project_id)
     await manager.send_message(client_id, {
         "type": "status",
         "data": {"agent": "image_agent", "message": translate(lang, "progress.reference.generating")}
@@ -1911,6 +1932,9 @@ async def execute_reference_stage(client_id: str, project_id: str, stage: str):
         )
     except Exception as e:
         logger.error(f"[REF-STAGE] stage {stage} generation failed for project {project_id}: {str(e)}")
+        # 失败清空生成中标记，避免右侧占位/状态栏长期悬挂在「生成中」。
+        project.processing_phase = ""
+        main_agent.save_project_state(project_id)
         await manager.send_message(client_id, {
             "type": "error",
             "data": {"message": translate(lang, "error.generation_failed", error=str(e))}
@@ -1936,6 +1960,8 @@ async def execute_reference_stage(client_id: str, project_id: str, stage: str):
 
     # 各子阶段完成后持久化子阶段进度，供跨实例断线恢复。
     project.reference_stage = f"{stage}_done"
+    # 子阶段已产出：清空生成中标记，后续由数据驱动的对账补齐右侧子模块。
+    project.processing_phase = ""
     main_agent.save_project_state(project_id)
 
     has_category2 = main_agent._reference_stage_has_category2(project)
@@ -1987,6 +2013,10 @@ async def continue_generate_after_reference_confirmation(client_id: str, project
     try:
         logger.info(f"[FLOW] Starting new video generation flow with review for project {project_id}")
         resume = bool(getattr(project, "videos", None)) or getattr(project, "next_scene_index", 0) > 0
+        # 视频阶段开始即置位并持久化：即使首个分镜尚无 URL，
+        # 云端多实例下前端也能据此立即渲染视频模块与状态栏。
+        project.processing_phase = "videos"
+        main_agent.save_project_state(project_id)
         await main_agent.continue_generate_after_reference_confirmation(
             project_id=project_id,
             websocket=websocket,
@@ -1995,10 +2025,21 @@ async def continue_generate_after_reference_confirmation(client_id: str, project
             resume=resume,
         )
         project = main_agent.get_project(project_id)
+        # 视频阶段结束：清空生成中标记（分镜数据本身已由数据驱动对账补齐）。
+        project.processing_phase = ""
+        main_agent.save_project_state(project_id)
         await notify_videos_step_complete_if_ready(client_id, project, lang)
         logger.info(f"[FLOW] Video generation flow completed for project {project_id}")
     except Exception as e:
         logger.error(f"[FLOW] Video generation flow failed: {str(e)}")
+        # 失败也清空生成中标记，避免状态栏「生成中」长期悬挂。
+        try:
+            failed_project = main_agent.get_project(project_id)
+            if failed_project:
+                failed_project.processing_phase = ""
+                main_agent.save_project_state(project_id)
+        except Exception:
+            pass
         await manager.send_message(client_id, {
             "type": "error",
             "data": {"message": translate(lang, "error.video_generation_failed", error=str(e))}
@@ -2238,6 +2279,10 @@ async def execute_merge_step(client_id: str, project_id: str):
         "data": {"agent": "merge_agent", "message": translate(lang, "progress.merge.generating")}
     })
 
+    # 合成阶段开始即置位并持久化：兜底云端多实例下的推送丢失（状态栏空白）。
+    project.processing_phase = "merge"
+    main_agent.save_project_state(project_id)
+
     await manager.send_message(client_id, {
         "type": "progress",
         "data": {"agent": "merge_agent", "progress": 90, "message": translate(lang, "progress.merge.generating")}
@@ -2247,6 +2292,7 @@ async def execute_merge_step(client_id: str, project_id: str):
     final_url = await main_agent._merge_videos(project)
     project.final_video_url = final_url
     project.status = "completed"
+    project.processing_phase = ""
     main_agent.save_project_state(project_id)
 
     await manager.send_message(client_id, {

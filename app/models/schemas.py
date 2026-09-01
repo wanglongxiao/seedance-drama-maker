@@ -196,6 +196,14 @@ class VideoProject(BaseModel):
     reference_image: Optional[GeneratedImage] = None  # 参考图库主图
     # 参考图分阶段生成进度：none/category1_done/category2_done/category3_done
     reference_stage: str = "none"
+    # 当前正在执行（生成中）的阶段标记，供云端多实例下前端权威对账。
+    # 云端多实例时，进入某阶段的实时 status/progress/agent_output 推送可能落在其它
+    # 实例而丢失，导致「进入某阶段后右侧内容与底部状态栏空白」（本地单实例不复现）。
+    # 该字段在每个阶段「开始」时置位、「产出数据或完成」后清空，随项目状态持久化到 TOS，
+    # 前端据此即使在「已进入但尚无数据」的生成窗口也能补出状态栏与占位 UI。
+    # 取值：""（空闲）/ script / reference_category1 / reference_category2 /
+    #      reference_category3 / videos / merge
+    processing_phase: str = ""
     video_review_mode: str = "manual"
     # 视频生成模式：extend=延长（串行，参考前一分镜视频），parallel=并行（默认，各分镜独立并行生成）
     video_generation_mode: str = "parallel"

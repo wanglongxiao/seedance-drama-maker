@@ -960,13 +960,10 @@ function applyRestoredSnapshot(snap) {
     updateOverallProgress();
     updateProjectActionState();
 
-    // 云端多实例：视频阶段的实时 WS 推送可能落在其它实例而丢失，
-    // 恢复后开启对账轮询，以项目快照为权威持续同步视频生成进度。
-    const videoPhaseActive = (!!snap.video_phase_started
-        || (snap.current_step && String(snap.current_step).startsWith('videos')))
-        && !snap.final_video_url;
-    if (videoPhaseActive) {
-        startVideoReconcilePolling();
+    // 云端多实例：任一阶段的实时 WS 推送都可能落在其它实例而丢失（右侧内容/底部状态栏空白）。
+    // 只要项目尚未产出最终视频，就开启项目级对账轮询，以快照为权威持续差异补齐。
+    if (!snap.final_video_url) {
+        startProjectReconcilePolling();
     }
 }
 
@@ -976,6 +973,7 @@ function renderVideosFromSnapshot(snap) {
     if (!snap) return;
     const videos = snap.videos || [];
     const videoPhaseStarted = !!snap.video_phase_started
+        || snap.processing_phase === 'videos'
         || (snap.current_step && String(snap.current_step).startsWith('videos'));
     if (!(videos.length > 0 || videoPhaseStarted)) return;
 
@@ -1023,50 +1021,157 @@ function renderVideosFromSnapshot(snap) {
     updateVideoStepProgressUI();
 }
 
-// 视频阶段对账轮询：定期拉取项目快照并幂等渲染，兜底跨实例丢失的实时 WS 消息。
-// 全部分镜完成/最终视频就绪/项目结束时自动停止。
-let videoReconcileTimer = null;
-function startVideoReconcilePolling() {
-    if (videoReconcileTimer) return; // 已在运行，避免重复计时器
-    videoReconcileTimer = setInterval(reconcileVideoSnapshotOnce, 8000);
+// 项目对账轮询：定期拉取项目快照并「补齐缺失的 UI」，兜底云端多实例下丢失的实时 WS 消息。
+// 云端多实例：处理 HTTP 的实例与持有浏览器 WebSocket 的实例可能不同，后台任务的
+// status/progress/agent_output 推送会在跨实例时丢失，导致进入某阶段后右侧内容与底部
+// 状态栏空白（本地单实例不复现）。这里以项目快照为权威做「差异补齐」：仅在对应区域
+// 尚未渲染时才补，避免干扰实时链路已渲染的健康状态（不闪烁、不打断播放/倒计时）。
+// 项目结束/最终视频就绪时自动停止。
+let projectReconcileTimer = null;
+function startProjectReconcilePolling() {
+    if (projectReconcileTimer) return; // 已在运行，避免重复计时器
+    projectReconcileTimer = setInterval(reconcileProjectSnapshotOnce, 8000);
 }
 
-function stopVideoReconcilePolling() {
-    if (videoReconcileTimer) {
-        clearInterval(videoReconcileTimer);
-        videoReconcileTimer = null;
+function stopProjectReconcilePolling() {
+    if (projectReconcileTimer) {
+        clearInterval(projectReconcileTimer);
+        projectReconcileTimer = null;
     }
 }
 
-async function reconcileVideoSnapshotOnce() {
+// 向后兼容别名：早期仅有视频阶段轮询，保留同名入口，统一走通用项目对账。
+function startVideoReconcilePolling() {
+    startProjectReconcilePolling();
+}
+
+function stopVideoReconcilePolling() {
+    stopProjectReconcilePolling();
+}
+
+async function reconcileProjectSnapshotOnce() {
     const projectId = currentProjectId || getPersistedProjectId();
     if (!projectId || projectEnded || currentStep === 'merge') {
-        stopVideoReconcilePolling();
+        stopProjectReconcilePolling();
         return;
     }
     try {
         const response = await fetch(`/project/${encodeURIComponent(projectId)}/restore`);
         if (!response.ok) {
-            stopVideoReconcilePolling();
+            stopProjectReconcilePolling();
             return;
         }
         const result = await parseJsonResponse(response);
         const snap = result && result.snapshot;
         if (!result || !result.success || !snap || snap.is_ended) {
-            stopVideoReconcilePolling();
+            stopProjectReconcilePolling();
             return;
         }
-        renderVideosFromSnapshot(snap);
+        reconcileUiFromSnapshot(snap);
         if (snap.final_video_url) {
-            displayFinalVideo(snap.final_video_url);
-            currentStep = 'merge';
-            updateOverallProgress();
-            updateProjectActionState();
-            stopVideoReconcilePolling();
+            stopProjectReconcilePolling();
         }
     } catch (e) {
         // 轮询失败不影响主流程：保留计时器下次重试。
-        console.debug('Video reconcile poll failed:', e);
+        console.debug('Project reconcile poll failed:', e);
+    }
+}
+
+// 差异补齐：仅在某区域「实时链路尚未渲染」时，用快照补上对应 UI。
+// 每个分支都以 DOM 是否已存在作为幂等门槛，确保健康的单实例路径不受影响。
+function reconcileUiFromSnapshot(snap) {
+    if (!snap) return;
+
+    // 1) 剧本：右侧无剧本卡片但快照已有剧本 -> 补渲染并点亮步骤 1。
+    if (snap.script && !document.getElementById('script-card')) {
+        displayScript(snap.script);
+        stepProgress.script = 100;
+        updateStepHighlight('script_agent', 100);
+    }
+
+    // 2) 参考图库（含角色/布景/装扮/布景状态/关键动作/故事版子模块）：
+    //    只要快照带 reference_output，就用它幂等重绘（displayReferenceImage 内部按卡片
+    //    id 复用节点、按数据增删子模块），从而补齐「进入某子阶段但右侧空白」的场景。
+    if (snap.reference_output) {
+        const missingReference = !document.getElementById('reference-image-card');
+        const missingVariant = !document.getElementById('variant-assets-card')
+            && ((snap.reference_output.character_outfit_images || []).length
+                || (snap.reference_output.scene_state_images || []).length);
+        const missingKeyAction = !document.getElementById('key-action-reference-card')
+            && (snap.reference_output.key_action_reference_images || []).length;
+        const missingStoryboard = !document.getElementById('storyboard-card')
+            && (snap.reference_output.storyboard_images || []).length;
+        if (missingReference || missingVariant || missingKeyAction || missingStoryboard) {
+            const refOutput = { ...snap.reference_output, ready_for_confirmation: false };
+            displayReferenceImage(refOutput);
+            referenceImageLocked = true;
+            stepProgress.reference_image = 100;
+        }
+    }
+
+    // 3) 连环画 PDF：无卡片但快照已有状态 -> 补渲染。
+    if (!document.getElementById('comic-pdf-card')
+        && (snap.comic_pdf_url || snap.comic_pdf_status === 'generating' || snap.comic_pdf_status === 'failed')) {
+        displayComicPdfLink({
+            status: snap.comic_pdf_status || (snap.comic_pdf_url ? 'completed' : 'pending'),
+            comic_pdf_url: snap.comic_pdf_url || '',
+            error: snap.comic_pdf_error || ''
+        });
+    }
+
+    // 4) 视频分镜：renderVideosFromSnapshot 自身按分镜号幂等，可安全补齐缺失的分镜卡片/URL/审核态。
+    renderVideosFromSnapshot(snap);
+
+    // 5) 最终合成视频：无最终视频卡片但快照已就绪 -> 补渲染并结束视频阶段。
+    if (snap.final_video_url && !lastFinalVideoUrl) {
+        displayFinalVideo(snap.final_video_url);
+        currentStep = 'merge';
+    }
+
+    // 6) 底部状态栏：进入某阶段后若状态栏为空（实时 status 消息丢失），依快照补一个合理提示。
+    reconcileStatusBarFromSnapshot(snap);
+
+    updateOverallProgress();
+    updateProjectActionState();
+}
+
+// 依快照补齐底部状态栏：以后端权威的 processing_phase（生成中阶段）为主，
+// 仅当当前状态栏隐藏/为占位空文本时才补，避免覆盖实时链路已有的进行中提示。
+// processing_phase 覆盖「已进入某阶段但尚无数据」的生成窗口——这是云端多实例下
+// 实时 status/agent_output 全部丢失时右侧内容与底部状态栏空白的根因。
+function reconcileStatusBarFromSnapshot(snap) {
+    if (!statusSection) return;
+    if (snap.final_video_url) return; // 最终完成态由 displayFinalVideo 处理
+
+    // 已有非占位内容（如实时链路的“生成中/等待确认/倒计时”）时不覆盖。
+    const isHidden = statusSection.style.display === 'none';
+    if (!isHidden) return;
+
+    // 1) 优先使用后端权威的「生成中」阶段标记，渲染带 spinner 的加载态状态栏。
+    const phase = String(snap.processing_phase || '');
+    if (phase) {
+        const phaseStatus = {
+            'script': { step: t('steps.scriptTitle'), text: t('progress.script.generating') },
+            'reference_category1': { step: t('steps.referenceImageTitle'), text: t('progress.reference.generating') },
+            'reference_category2': { step: t('steps.referenceImageTitle'), text: t('progress.reference.generating') },
+            'reference_category3': { step: t('steps.referenceImageTitle'), text: t('progress.reference.generating') },
+            'videos': { step: t('steps.videosTitle'), text: t('status.startingVideoGeneration') },
+            'merge': { step: t('steps.mergeTitle'), text: t('progress.merge.generating') },
+        }[phase];
+        if (phaseStatus) {
+            renderStatusBar(phaseStatus.text, 'loading', phaseStatus.step);
+            return;
+        }
+    }
+
+    // 2) 无生成中标记时，退化为按已有数据推断的静态提示（兜底旧快照/无 phase 情况）。
+    const step = String(snap.current_step || '');
+    if (step.startsWith('videos') || snap.video_phase_started) {
+        showStatusSection(t('steps.videosTitle'));
+    } else if (snap.reference_output) {
+        showStatusSection(t('messages.referenceCompleteStatus'));
+    } else if (snap.script) {
+        showStatusSection(t('steps.scriptTitle'));
     }
 }
 
@@ -1170,6 +1275,8 @@ function handleWebSocketMessage(data) {
                 projectEndBeaconSent = false;
                 persistActiveProject(currentProjectId);
                 updateProjectActionState();
+                // 云端多实例：开启项目级对账轮询，兜底跨实例丢失的实时推送。
+                startProjectReconcilePolling();
             }
             break;
             
@@ -1866,6 +1973,7 @@ async function sendMessage() {
                     projectEndBeaconSent = false;
                     persistActiveProject(currentProjectId);
                     updateProjectActionState();
+                    startProjectReconcilePolling(); // 云端多实例：开启对账轮询兜底跨实例丢失的推送
                     addAgentMessage(result.response);
                 } else {
                     addAgentMessage(t('messages.serverError', { error: result.error }));
@@ -3092,6 +3200,11 @@ function setVideoItemUrl(sceneNumber, url) {
     const download = item.querySelector('a.item-btn.download');
     const placeholder = item.querySelector(`#video-placeholder-${sceneNumber}`);
     const playOverlay = item.querySelector('.video-play-overlay');
+
+    // 幂等：URL 未变化时不重设 src，避免对账轮询周期性触发视频重新加载/中断播放。
+    if (video && video.getAttribute('src') === url) {
+        return;
+    }
 
     if (video) {
         video.src = url;
