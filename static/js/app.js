@@ -1186,7 +1186,13 @@ function reconcileUiFromSnapshot(snap) {
 // 仅全自动模式补发（手动模式转场由用户操作驱动，不应出现「自动进入」字样）；
 // 每条以稳定 key 去重，且与实时 WS 倒计时结束时用的 key 一致，避免单实例路径下重复。
 function announceAutoTransitionsFromSnapshot(snap) {
-    if (!snap || !snap.auto_run) return;
+    // 是否处于全自动模式：优先信任本会话的 isAutoRunMode（用户在本 Tab 输入「auto」即置位，
+    // 权威且不跨实例）。snap.auto_run 作为补充——云端多实例下，做视频生成/自链推进的实例
+    // 与最初持久化 auto_run 的实例可能不同，某次 /restore 落到「auto_run 尚未同步或已被
+    // 较旧 state_version 覆盖」的实例时 snap.auto_run 可能读到 false，导致唯一的 videos
+    // 转场提示兜底被这道门槛吞掉（实测复现：右侧已渲染分镜视频、announced 却缺 videos）。
+    // 手动模式下 isAutoRunMode 与 snap.auto_run 均为假，不会误发「自动进入」字样。
+    if (!snap || !(snap.auto_run || isAutoRunMode)) return;
 
     const refStage = String(snap.reference_stage || 'none');
     const order = { 'none': 0, 'category1_done': 1, 'category2_done': 2, 'category3_done': 3 };
