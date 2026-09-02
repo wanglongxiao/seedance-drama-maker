@@ -2285,17 +2285,36 @@ async def execute_videos_step(client_id: str, project_id: str, review_mode: Opti
 
     websocket = get_reconnecting_websocket(client_id)
 
+    # 视频阶段开始即置位并持久化：此入口（execute_step 分发 / 旧版 images_step 尾部自链）
+    # 此前未置位 processing_phase，导致经此进入视频阶段的整个生成窗口内，非属主实例经
+    # /restore 读到的 processing_phase 仍为上一阶段清空后的 ""，前端底部状态栏空白、
+    # 用户无法判断是否仍在运行（云端多实例复现）。与 continue_generate_after_reference_confirmation
+    # 包装函数保持一致：先置位 videos 并持久化，再开始耗时生成。
+    project.processing_phase = "videos"
+    main_agent.save_project_state(project_id)
+
     # 复用统一的新流程：分镜视频生成失败与审核失败共享同一套重试次数，
     # 但此入口只执行到“视频完成”，不自动进入合成步骤。
-    await main_agent.continue_generate_after_reference_confirmation(
-        project_id=project_id,
-        websocket=websocket,
-        review_mode=review_mode,
-        merge_after_videos=False,
-        resume=True,
-    )
+    try:
+        await main_agent.continue_generate_after_reference_confirmation(
+            project_id=project_id,
+            websocket=websocket,
+            review_mode=review_mode,
+            merge_after_videos=False,
+            resume=True,
+        )
+    except Exception:
+        # 失败也清空生成中标记，避免状态栏「生成中」长期悬挂。
+        failed_project = main_agent.get_project(project_id)
+        if failed_project:
+            failed_project.processing_phase = ""
+            main_agent.save_project_state(project_id)
+        raise
 
     project = main_agent.get_project(project_id)
+    # 视频阶段结束：清空生成中标记（分镜数据本身已由数据驱动对账补齐）。
+    project.processing_phase = ""
+    main_agent.save_project_state(project_id)
     videos_ready = await notify_videos_step_complete_if_ready(client_id, project, lang)
     # 云端多实例自链：auto 模式且分镜全部完成/通过审核时，后端进程内直接进入合成。
     if videos_ready and getattr(project, "auto_run", False):

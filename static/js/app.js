@@ -1274,8 +1274,34 @@ function reconcileStatusBarFromSnapshot(snap) {
         }
     }
 
-    // 2) 无生成中标记时，退化为按已有数据推断的静态提示（兜底旧快照/无 phase 情况）。
+    // 2) 自链空窗兜底（auto 模式优先）：全自动模式下后端逐阶段自链推进时，「上一阶段清空
+    //    processing_phase 并 save」与「下一阶段置位 processing_phase 并 save」之间存在空窗；
+    //    此外多实例无 CAS 的 TOS 写入也可能被陈旧快照回写覆盖，使某次 /restore 读到
+    //    processing_phase="" 且尚无新阶段数据。这两种情况在 auto 模式下都意味着「项目仍在
+    //    推进」，绝不能让状态栏空白（用户据此判断是否还在运行）。current_step 单调前进、不会
+    //    回退清空，比 processing_phase 稳健，据此推断「下一阶段生成中」并渲染带 spinner 的
+    //    加载态，优先于下方静态推断。手动模式不做此兜底（中间态是等待用户确认，非生成中）。
     const step = String(snap.current_step || '');
+    if (snap.auto_run || isAutoRunMode) {
+        const chainStatus = {
+            'initialized': { step: t('steps.scriptTitle'), text: t('progress.script.generating') },
+            'script_generated': { step: t('steps.referenceImageTitle'), text: t('progress.reference.generating') },
+            'reference_image_generated': { step: t('steps.referenceImageTitle'), text: t('progress.reference.generating') },
+            'waiting_reference_confirmation': { step: t('steps.videosTitle'), text: t('status.startingVideoGeneration') },
+            'images_generated': { step: t('steps.videosTitle'), text: t('status.startingVideoGeneration') },
+            'videos_generated': { step: t('steps.mergeTitle'), text: t('progress.merge.generating') },
+        }[step];
+        if (chainStatus) {
+            renderStatusBar(chainStatus.text, 'loading', chainStatus.step);
+            return;
+        }
+        // 兜底再兜底：auto 模式、项目未结束/未产出最终视频，但 current_step 尚未识别
+        // （如极早期），仍显示通用「处理中」，确保状态栏不空白。
+        renderStatusBar(t('status.processing'), 'loading');
+        return;
+    }
+
+    // 3) 手动模式/旧快照：退化为按已有数据推断的静态提示（无 phase 情况）。
     if (step.startsWith('videos') || snap.video_phase_started) {
         showStatusSection(t('steps.videosTitle'));
     } else if (snap.reference_output) {
