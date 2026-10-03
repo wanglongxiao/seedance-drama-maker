@@ -5,8 +5,8 @@ English documentation. Simplified Chinese version: `README.md`
 - 🌐 Live demo: <https://s0sij5su2u6qe1sds1et0.apigateway-ap-southeast-1.apigw-byteplus.com/>
 - Current version: `2.0.0`
 - Stack: `FastAPI`, `WebSocket`, multi-agent orchestration, `FFmpeg`
-- BytePlus products: `TOS`, `Seed-Speech`, `Seed-2.1-turbo`, `SeeDream-5.0-pro`, `SeeDance-2.5`
-- AI development tools: `Trae.ai`, `DeepSeek-V4-Flash-GA`, `GPT-5.5`
+- BytePlus products: `TOS`, `Seed-Speech`, `DeepSeek-V4.1-Flash`, `Seed-2.1-turbo`, `SeeDream-5.0-flash`, `SeeDance-2.5`
+- AI development tools: `Trae.ai`, `DeepSeek-V4.1-Flash`, `GPT-5.5`
 
 ## ✨ Seedance 2.5 Highlights
 
@@ -81,9 +81,11 @@ The system focuses on:
   Stores and serves uploaded assets, reference images, comic PDFs, scene videos, and final videos.
 - `Seed-Speech`
   Converts voice input into text for the creation workflow.
+- `DeepSeek-V4.1-Flash`
+  Powers the main conversational agent and storyboard script generation.
 - `Seed-2.1-turbo`
   Reviews generated scene videos for character consistency, physical plausibility, and script alignment.
-- `SeeDream-5.0-pro`
+- `SeeDream-5.0-flash`
   Generates and regenerates character and backdrop reference images.
 - `SeeDance-2.5`
   Generates storyboard scene videos with 6–30s per shot, up to 50 reference inputs, and native dialogue in 14 languages with native audio-video sync.
@@ -93,7 +95,7 @@ All of the above are available through [byteplus.com](https://www.byteplus.com/)
 ## AI Development Tools
 
 - `Trae.ai`: coding, debugging, repository cleanup
-- `DeepSeek-V4-Flash-GA`: requirement clarification, solution discussion, documentation support
+- `DeepSeek-V4.1-Flash`: requirement clarification, solution discussion, documentation support
 - `GPT-5.5`: code editing, debugging, logic cleanup, documentation rewriting
 
 ## Prerequisites

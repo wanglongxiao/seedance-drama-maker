@@ -5,8 +5,8 @@
 - 🌐 在线体验：<https://s0sij5su2u6qe1sds1et0.apigateway-ap-southeast-1.apigw-byteplus.com/>
 - 当前版本：`2.0.0`
 - 技术栈：`FastAPI`、`WebSocket`、多 Agent 协作、`FFmpeg`
-- 产品能力：`TOS`、`Seed-Speech`、`Seed-2.1-turbo`、`SeeDream-5.0-pro`、`SeeDance-2.5`
-- AI 开发工具：`Trae.ai`、`DeepSeek-V4-Flash-GA`、`GPT-5.5`
+- 产品能力：`TOS`、`Seed-Speech`、`DeepSeek-V4.1-Flash`、`Seed-2.1-turbo`、`SeeDream-5.0-flash`、`SeeDance-2.5`
+- AI 开发工具：`Trae.ai`、`DeepSeek-V4.1-Flash`、`GPT-5.5`
 
 ## ✨ Seedance 2.5 核心亮点
 
@@ -81,9 +81,11 @@
   用于上传、存储和分发用户上传素材、参考图、连环画 PDF、分镜视频和最终视频。
 - `Seed-Speech`
   用于语音转文字，支持通过录音输入视频创作需求。
+- `DeepSeek-V4.1-Flash`
+  用于主对话 Agent 与剧本分镜生成。
 - `Seed-2.1-turbo`
   用于分镜视频审核，评估人物/角色一致性、物理规律和脚本语义一致性。
-- `SeeDream-5.0-pro`
+- `SeeDream-5.0-flash`
   用于人物/角色参考图与布景参考图生成和重生成。
 - `SeeDance-2.5`
   用于分镜视频生成，支持单镜头 6–30 秒、最多 50 个参考输入、14 种语言原生对白与原生音画同步。
@@ -93,7 +95,7 @@
 ## AI 开发工具
 
 - `Trae.ai`：代码开发、排查、工程整理
-- `DeepSeek-V4-Flash-GA`：需求梳理、方案讨论、文档辅助
+- `DeepSeek-V4.1-Flash`：需求梳理、方案讨论、文档辅助
 - `GPT-5.5`：代码修改、逻辑整理、调试、文档重写
 
 ## 运行前提准备
