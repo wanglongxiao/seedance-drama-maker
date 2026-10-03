@@ -252,8 +252,6 @@ def build_end_cleanup_keep_prefixes(project) -> list[str]:
     keep_prefixes = []
     if getattr(project, "final_video_url", None):
         keep_prefixes.append("videos/final")
-    if getattr(project, "comic_pdf_url", None):
-        keep_prefixes.append("documents/comics")
     return keep_prefixes
 
 
@@ -599,7 +597,7 @@ async def restore_project_snapshot(project_id: str):
     total_scenes = len(getattr(getattr(project, "script", None), "scenes", []) or [])
     reference_ready = bool(getattr(project, "character_reference_images", None)) or bool(
         getattr(project, "scene_reference_images", None)
-    ) or bool(getattr(project, "storyboard_images", None))
+    )
 
     # 视频阶段是否已启动（用于云端多实例下前端权威对账）。
     # 参考图确认后即进入 images_generated；此时可能尚无任何视频 URL，
@@ -640,9 +638,6 @@ async def restore_project_snapshot(project_id: str):
             "next_scene_index": int(getattr(project, "next_scene_index", 0) or 0),
             "regenerating_scene_numbers": list(getattr(project, "regenerating_scene_numbers", []) or []),
             "final_video_url": getattr(project, "final_video_url", None),
-            "comic_pdf_url": getattr(project, "comic_pdf_url", None),
-            "comic_pdf_status": getattr(project, "comic_pdf_status", "pending") or "pending",
-            "comic_pdf_error": getattr(project, "comic_pdf_error", None),
             # 是否仍有分镜在重新生成/未通过审核（用于恢复后判断能否进入合成）。
             "merge_blocked": _scene_regeneration_blocks_merge(project),
         }
@@ -660,6 +655,8 @@ async def get_frontend_config():
         "success": True,
         "config": {
             "auto_run_countdown_seconds": max(0, int(auto_run_countdown_seconds)),
+            "total_duration_max": max(1, int(config.get("video_generation.total_duration_max", 1200))),
+            "max_storyboard_scenes": max(1, int(config.get("script_generation.max_storyboard_scenes", 80))),
             "reference_image_max_count": max(1, int(reference_config.get("upload_max_count", 40))),
             "character_reference_max_count": max(1, int(reference_config.get("upload_character_max_count", 20))),
             "scene_reference_max_count": max(1, int(reference_config.get("upload_scene_max_count", 20))),
@@ -730,7 +727,7 @@ async def continue_reference_stage(
         if access_error:
             return {"success": False, "error": access_error}
 
-        if stage not in ("category1", "category2", "category3"):
+        if stage not in ("category1", "category2"):
             return {"success": False, "error": translate(ui_language, "error.invalid_step", step=stage)}
 
         main_agent.set_project_output_language(project_id, ui_language)
@@ -811,9 +808,7 @@ async def regenerate(
                     }
 
                 # 校验目标是否存在 / 是否被锁定（同步、轻量），实际生成放到后台执行。
-                if normalized_reference_type == "storyboard":
-                    pass  # 故事版目标由后台任务按 scene_number 定位
-                elif normalized_reference_type in {"character_outfit", "scene_state", "key_action"}:
+                if normalized_reference_type in {"character_outfit", "scene_state", "key_action"}:
                     pass  # 装扮/状态/关键动作目标由后台任务按 variant_key 定位
                 else:
                     existing_reference_images = (
@@ -1344,12 +1339,8 @@ async def rollback_step(request: Request):
             project.character_outfit_images = []
             project.scene_state_images = []
             project.key_action_reference_images = []
-            project.storyboard_images = []
             project.reference_image_library = {}
             project.scene_reference_mappings = {}
-            project.comic_pdf_url = None
-            project.comic_pdf_status = "pending"
-            project.comic_pdf_error = None
             # 保留 reference_images（用户上传的原图）
 
         # 清空视频（如果是退回视频或更早）
@@ -1616,13 +1607,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     
             elif message_type == "confirm_reference_stage":
-                # 用户确认某个参考图子阶段（category1/category2/category3）
+                # 用户确认某个参考图子阶段（category1/category2）
                 confirmed = data.get("confirmed", True)
                 project_id = data.get("project_id")
                 stage = str(data.get("stage") or "").strip()
                 generation_mode = data.get("generation_mode")
 
-                if not project_id or stage not in ("category1", "category2", "category3"):
+                if not project_id or stage not in ("category1", "category2"):
                     await manager.send_message(client_id, {
                         "type": "error",
                         "data": {"message": translate(ui_language, "error.invalid_step", step=stage or "?")}
@@ -1632,7 +1623,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     has_category2 = bool(main_agent._reference_stage_has_category2(project)) if project else False
                     next_stage = _compute_next_reference_stage(stage, has_category2)
                     if next_stage == "videos":
-                        # category3 已确认：进入视频生成（复用既有流程）。
+                        # 最后一个参考图子阶段已确认：进入视频生成。
                         main_agent.set_project_video_generation_mode(project_id, generation_mode)
                         asyncio.create_task(
                             continue_generate_after_reference_confirmation(client_id, project_id)
@@ -1645,7 +1636,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             }
                         })
                     else:
-                        # 推进下一子阶段（category2 或 category3）。
+                        # 推进 category2。
                         asyncio.create_task(
                             execute_reference_stage(client_id, project_id, next_stage)
                         )
@@ -1871,7 +1862,7 @@ async def execute_images_step(client_id: str, project_id: str):
 async def execute_reference_image_step(client_id: str, project_id: str):
     """只执行参考图生成第一子阶段（category1：人物/角色图库 + 布景参考图库）。
 
-    参考图内部改造为严格串行三子阶段：category1 → category2（可选）→ category3。
+    参考图内部为串行两子阶段：category1 → category2（可选）。
     每个子阶段完成后等待用户确认（手动）或倒计时（自动）再推进下一阶段。
     """
     await execute_reference_stage(client_id, project_id, "category1")
@@ -1893,50 +1884,39 @@ _REFERENCE_STAGE_META = {
         "confirm_prompt_key": "message.reference.category2_confirm_prompt",
         "step_complete_key": "step.reference.category2_complete",
     },
-    "category3": {
-        "progress": 37,
-        "completed_progress": 40,
-        "completed_wait_key": "progress.reference.category3_completed_wait",
-        "confirm_prompt_key": "message.reference.category3_confirm_prompt",
-        "step_complete_key": "step.reference.category3_complete",
-    },
 }
 
 
 def _compute_next_reference_stage(stage: str, has_category2: bool) -> str:
-    """依据当前完成阶段与是否存在分类2，计算下一目标：category2/category3/videos。"""
+    """依据当前完成阶段与是否存在分类2，计算下一目标：category2/videos。"""
     if stage == "category1":
-        return "category2" if has_category2 else "category3"
-    if stage == "category2":
-        return "category3"
+        return "category2" if has_category2 else "videos"
     return "videos"
 
 
 def _current_reference_stage(project) -> str:
     """由 project.reference_stage（{stage}_done）推导“当前所处子阶段”，用于单张重生成输出。"""
     done = str(getattr(project, "reference_stage", "none") or "none")
-    if done.startswith("category3"):
-        return "category3"
     if done.startswith("category2"):
         return "category2"
     return "category1"
 
 
 async def execute_reference_stage(client_id: str, project_id: str, stage: str):
-    """通用分阶段参考图生成执行器（category1/category2/category3）。
+    """通用分阶段参考图生成执行器（category1/category2）。
 
     按 stage 调 generate_reference_stage_with_retry，发送 progress/agent_output/step_complete
     （均携带 reference_stage）。完成后 save_project_state 并将 reference_stage 标记为 {stage}_done。
-    若为 category2 但实际无装扮/状态差异（has_category2=False），直接跳到 category3。
+    若为 category2 但实际无变体资产，直接进入视频阶段。
     """
     project = main_agent.get_project(project_id)
     lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
     meta = _REFERENCE_STAGE_META.get(stage, _REFERENCE_STAGE_META["category1"])
 
-    # category2 跳过保护：若实际无分类2资产，直接推进 category3，避免卡死。
+    # category2 跳过保护：若实际无分类2资产，直接进入视频阶段，避免卡死。
     if stage == "category2" and not main_agent._reference_stage_has_category2(project):
-        logger.info(f"[REF-STAGE] project {project_id} has no category2 assets, skipping to category3")
-        await execute_reference_stage(client_id, project_id, "category3")
+        logger.info(f"[REF-STAGE] project {project_id} has no category2 assets, skipping to videos")
+        await continue_generate_after_reference_confirmation(client_id, project_id)
         return
 
     # 阶段开始即置位并持久化：进入某参考图子阶段（含无数据的生成窗口）时，
@@ -2110,7 +2090,7 @@ async def regenerate_reference_asset_background(
     reference_name: str,
     reference_slot_index: Optional[int] = None,
 ):
-    """后台重新生成单张参考图/角色装扮图/布景状态图/故事版，并通过 WebSocket 推送结果。
+    """后台重新生成单张参考图/角色装扮图/布景状态图/关键动作图，并通过 WebSocket 推送结果。
 
     云端 API 网关存在约 60s 超时，而单张图片重生成耗时可达 40~60s，
     若在 HTTP 请求内同步 await 会触发网关断连，前端 fetch 抛错误报“重新生成失败”。
@@ -2135,18 +2115,7 @@ async def regenerate_reference_asset_background(
         return
 
     try:
-        if normalized_reference_type == "storyboard":
-            try:
-                target_scene_number = int(float(normalized_reference_name))
-            except (TypeError, ValueError):
-                target_scene_number = 0
-            new_image = await main_agent.regenerate_storyboard_asset(
-                project,
-                scene_number=target_scene_number,
-                feedback="用户要求重新生成",
-            )
-            logger.info(f"Regenerated storyboard for scene {target_scene_number}: {new_image.url}")
-        elif normalized_reference_type in {"character_outfit", "scene_state", "key_action"}:
+        if normalized_reference_type in {"character_outfit", "scene_state", "key_action"}:
             new_image = await main_agent.regenerate_variant_asset(
                 project,
                 reference_type=normalized_reference_type,
@@ -2420,7 +2389,6 @@ async def cleanup_project_files(
                 "references/scenes",
                 "videos/scenes",
                 "videos/final",
-                "documents/comics",
             ],
         )
     except Exception as e:

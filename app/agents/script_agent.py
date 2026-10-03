@@ -11,6 +11,10 @@ from app.prompt_skill import load_optional_nsfw_prompt, nsfw_content_requested, 
 from app.services.llm_service import llm_service
 from app.utils.i18n import language_name, translate
 from app.utils.logger import get_logger
+from app.utils.outfit_similarity import (
+    are_outfits_visually_equivalent,
+    stable_outfit_description,
+)
 from app.models.schemas import Script, Scene, Character, SceneDefinition
 
 logger = get_logger("script_agent")
@@ -36,7 +40,7 @@ class ScriptAgent:
         # 从 yaml 配置读取视频时长设置
         self.default_total_duration = config.get('video_generation.total_duration', 60)  # 默认 60 秒
         self.total_duration_min = config.get('video_generation.total_duration_min', 30)  # 最小 30 秒
-        self.total_duration_max = config.get('video_generation.total_duration_max', 600)  # 最大时长由 yaml 配置控制
+        self.total_duration_max = config.get('video_generation.total_duration_max', 1200)  # 最大时长由 yaml 配置控制
         # 从 yaml 配置读取分镜时长范围
         self.scene_duration_min = config.get('video_generation.scene_duration.min', 10)
         self.scene_duration_max = config.get('video_generation.scene_duration.max', 30)
@@ -45,14 +49,22 @@ class ScriptAgent:
             config.get('script_generation.max_setting_definitions',
                        config.get('script_generation.max_scene_definitions', 40))
         )
-        self.max_storyboard_scenes = int(config.get('script_generation.max_storyboard_scenes', 50))
+        self.max_storyboard_scenes = int(config.get('script_generation.max_storyboard_scenes', 80))
         self.temperature = config.get('models.script.temperature', 0.8)
-        self.max_tokens = config.get('models.script.max_tokens', 4096)
+        self.max_tokens = int(config.get('models.script.max_tokens', 120000))
 
     def _disallowed_duration_examples(self) -> str:
         """返回超出分镜时长范围的示例值，用于提示词约束。"""
         first = self.scene_duration_max + 1
         return f"{first}、{first + 1}"
+
+    def _bounded_total_duration(self, value: Any) -> int:
+        """Clamp a requested total duration to the configured hard ceiling."""
+        try:
+            duration = int(value)
+        except (TypeError, ValueError):
+            duration = int(self.default_total_duration)
+        return max(1, min(duration, int(self.total_duration_max)))
 
     def _sanitize_script_private_prompt(self, text: str) -> str:
         """Remove local private extension lines that conflict with schema rules."""
@@ -109,7 +121,8 @@ class ScriptAgent:
         n = len(scenes)
         lo, hi = self.scene_duration_min, self.scene_duration_max
         # 目标钳制到当前分镜数可达的时长区间。
-        target = max(n * lo, min(n * hi, int(target_total_duration)))
+        bounded_total = self._bounded_total_duration(target_total_duration)
+        target = max(n * lo, min(n * hi, bounded_total))
 
         # 先确保每个分镜落在合法区间内，再按内容复杂度重分配。
         # 模型经常把所有分镜都输出成同一个时长；只做轮流 +1/-1
@@ -145,7 +158,7 @@ class ScriptAgent:
         complexity_keywords = (
             "追逐", "战斗", "打斗", "搏斗", "爆炸", "逃跑", "冲突", "反转",
             "发现", "调查", "切换", "多人", "同时", "连续", "镜头",
-            "抽插", "性爱", "高潮", "亲吻", "拥抱", "抚摸",
+            "性爱", "高潮", "亲吻", "拥抱", "抚摸",
         )
         score += min(2.0, sum(scene_text.count(keyword) for keyword in complexity_keywords) * 0.18)
 
@@ -166,7 +179,8 @@ class ScriptAgent:
             return
         lo, hi = self.scene_duration_min, self.scene_duration_max
         n = len(scenes)
-        target = max(n * lo, min(n * hi, int(target_total_duration)))
+        bounded_total = self._bounded_total_duration(target_total_duration)
+        target = max(n * lo, min(n * hi, bounded_total))
         extra = target - n * lo
         if extra <= 0:
             for scene in scenes:
@@ -286,11 +300,89 @@ class ScriptAgent:
             return outfits
 
         for name, outfit in items:
-            char_name = self._normalize_single_line(name)
-            outfit_desc = self._normalize_single_line(outfit)
+            char_name = self._strip_character_name_markers(name)
+            outfit_desc = stable_outfit_description(outfit)
             if char_name and outfit_desc:
                 outfits[char_name] = outfit_desc
         return outfits
+
+    def _strip_character_name_markers(self, value: Any) -> str:
+        name = self._normalize_single_line(value)
+        while len(name) >= 2 and (
+            (name.startswith("[") and name.endswith("]"))
+            or (name.startswith("【") and name.endswith("】"))
+        ):
+            name = name[1:-1].strip()
+        return name
+
+    def _canonicalize_similar_character_outfits(self, scenes: List[Dict[str, Any]]) -> None:
+        """Reuse the first wording for visually equivalent outfits across scenes."""
+        representatives: Dict[str, List[str]] = {}
+        for scene in scenes or []:
+            normalized_outfits = self._normalize_character_outfits(scene.get("character_outfits"))
+            canonical_outfits: Dict[str, str] = {}
+            for character_name, outfit_desc in normalized_outfits.items():
+                character_key = self._normalize_character_name_key(character_name)
+                prior_descriptions = representatives.setdefault(character_key, [])
+                canonical = next(
+                    (
+                        prior
+                        for prior in prior_descriptions
+                        if are_outfits_visually_equivalent(prior, outfit_desc)
+                    ),
+                    None,
+                )
+                if canonical is None:
+                    canonical = outfit_desc
+                    prior_descriptions.append(outfit_desc)
+                elif canonical != outfit_desc:
+                    logger.info(
+                        "Reused visually equivalent character_outfit: %s=%s -> %s",
+                        character_name,
+                        outfit_desc,
+                        canonical,
+                    )
+                canonical_outfits[character_name] = canonical
+            scene["character_outfits"] = canonical_outfits
+
+    def _annotate_character_names_in_text(self, value: Any, character_names: List[str]) -> str:
+        text = str(value or "")
+        names = sorted(
+            {self._strip_character_name_markers(name) for name in character_names if self._strip_character_name_markers(name)},
+            key=len,
+            reverse=True,
+        )
+        if not text or not names:
+            return text
+
+        alternatives = "|".join(re.escape(name) for name in names)
+        wrapped_pattern = re.compile(rf"[\[【]\s*({alternatives})\s*[\]】]")
+        text = wrapped_pattern.sub(lambda match: f"[{match.group(1)}]", text)
+        plain_pattern = re.compile(rf"(?<![\[【])({alternatives})(?![\]】])")
+        return plain_pattern.sub(lambda match: f"[{match.group(1)}]", text)
+
+    def _annotate_scene_character_names(
+        self,
+        scenes: List[Dict[str, Any]],
+        characters: List[Dict[str, Any]],
+    ) -> None:
+        character_names = [
+            self._strip_character_name_markers(character.get("name"))
+            for character in characters or []
+            if isinstance(character, dict) and self._strip_character_name_markers(character.get("name"))
+        ]
+        for scene in scenes or []:
+            for field in (
+                "description",
+                "dialogue",
+                "character_description",
+                "voice_description",
+                "camera_angle",
+            ):
+                scene[field] = self._annotate_character_names_in_text(
+                    scene.get(field),
+                    character_names,
+                )
 
     def _normalize_outfit_compare_text(self, value: Any) -> str:
         text = self._normalize_single_line(value).lower()
@@ -892,7 +984,7 @@ class ScriptAgent:
                 )
                 messages[0]["content"] = (
                     self._get_system_prompt(output_language, target_total_duration, user_input)
-                    + "\n\n【重试修正】上一轮输出未通过程序校验。请依据 system prompt 修复字段缺失、时长越界、description 秒段时间轴缺失或不连续、人物/镜头/光影细节不足、违反成人剧情镜头禁限、跨分镜风格/色调/镜头语言不连续、角色固定身份特征漂移、性格动机或知识边界不一致、位置/动作/道具/装扮/伤污等状态断裂、角色/布景引用缺失、特殊装扮未同步、对白缺失、相邻分镜缺少“上一镜结果 -> 下一镜反应 -> 新结果”的因果承接或分镜重复等问题，并重新输出完整 JSON。"
+                    + "\n\n【重试修正】上一轮输出未通过程序校验。请依据 system prompt 修复字段缺失、时长越界、description 秒段时间轴缺失/不连续/过短、人物动作/表演/镜头/光影细节不足、相邻秒段没有从上一段结束状态继续、成人剧情反复描写抽插等机械性交动作、跨分镜风格/色调/镜头语言不连续、角色固定身份特征漂移、性格动机或知识边界不一致、位置/动作/道具等状态断裂、把血污/湿透/伤口/局部破损误建为新 character_outfits、角色/布景引用缺失、对白缺失、相邻分镜缺少“上一镜结果 -> 下一镜反应 -> 新结果”的因果承接或分镜重复等问题，并重新输出完整 JSON。"
                 )
                 messages[1]["content"] = (
                     prompt
@@ -949,7 +1041,9 @@ class ScriptAgent:
         if not self.model:
             raise ValueError("Missing required config: models.script.endpoint")
 
-        total_duration = existing_script.total_duration or self.default_total_duration
+        total_duration = self._bounded_total_duration(
+            existing_script.total_duration or self.default_total_duration
+        )
         previous_script_json = json.dumps(existing_script.dict(), ensure_ascii=False, indent=2)
 
         prompt_parts = [
@@ -1016,7 +1110,7 @@ class ScriptAgent:
                 messages[0]["content"] = (
                     self._get_system_prompt(output_language, total_duration, edit_request, audio_text)
                     + "\n\n【改稿规则】请严格基于上一版剧本和修改要求输出一份完整 JSON。"
-                    + "\n【重试修正】上一轮改稿未通过程序校验。请修复分镜数量、字段完整性、时长范围、description 秒段时间轴及人物/镜头/光影细节、成人剧情镜头禁限、跨分镜风格/色调/镜头语言连续性、角色固定身份/性格动机/知识边界一致性、位置/动作/道具/装扮/伤污等状态承接、因果承接、转场、重复内容和上传参考图锁定名称等问题，并重新输出完整 JSON。"
+                    + "\n【重试修正】上一轮改稿未通过程序校验。请修复分镜数量、字段完整性、时长范围、description 秒段连续动作链及人物表演/镜头/光影细节、相邻秒段状态承接、成人剧情反复描写抽插等机械性交动作、跨分镜风格/色调/镜头语言连续性、角色固定身份/性格动机/知识边界一致性、位置/动作/道具等状态承接、把伤污湿润误建为新 character_outfits、因果承接、转场、重复内容和上传参考图锁定名称等问题，并重新输出完整 JSON。"
                 )
 
         logger.info(f"Script rewritten with {len(script_data['scenes'])} scenes")
@@ -1134,7 +1228,9 @@ class ScriptAgent:
         *trigger_texts: Any,
     ) -> str:
         """获取系统提示词"""
-        effective_total_duration = total_duration or self.default_total_duration
+        effective_total_duration = self._bounded_total_duration(
+            total_duration or self.default_total_duration
+        )
         prompt_parts = [render_prompt(
             "script_system_prompt.md",
             effective_total_duration=effective_total_duration,
@@ -1164,7 +1260,9 @@ class ScriptAgent:
         total_duration: Optional[int] = None
     ) -> str:
         """构建用户提示词"""
-        effective_total_duration = total_duration or self.default_total_duration
+        effective_total_duration = self._bounded_total_duration(
+            total_duration or self.default_total_duration
+        )
         prompt_parts = []
 
         prompt_parts.append("请根据以下信息生成一份完整、可执行的剧本 JSON。")
@@ -1192,7 +1290,14 @@ class ScriptAgent:
         if uploaded_reference_prompt:
             prompt_parts.append(f"\n{uploaded_reference_prompt}")
 
-        estimated_scene_count = effective_total_duration // ((self.scene_duration_min + self.scene_duration_max) // 2)
+        average_scene_duration = max(
+            1,
+            (self.scene_duration_min + self.scene_duration_max) // 2,
+        )
+        estimated_scene_count = min(
+            self.max_storyboard_scenes,
+            max(1, (effective_total_duration + average_scene_duration - 1) // average_scene_duration),
+        )
         prompt_parts.append("\n【动态执行参数】")
         prompt_parts.append(f"- 目标总时长：约{effective_total_duration}秒；分镜总时长要尽量贴近该值，且不得超过{self.total_duration_max}秒。")
         prompt_parts.append(f"- 分镜时长：每个 duration 必须是 {self.scene_duration_min}-{self.scene_duration_max} 秒之间的整数，禁止输出 {self._disallowed_duration_examples()} 或更大值。")
@@ -1205,7 +1310,7 @@ class ScriptAgent:
             if '不生成旁白' in user_input or '不要旁白' in user_input or '只生成对话' in user_input:
                 prompt_parts.append("\n【对话/旁白生成规则 - 强制】")
                 prompt_parts.append("- 用户明确要求：不生成旁白，只生成对话")
-                prompt_parts.append("- dialogue字段必须是对话形式，格式如：\"角色名：对话内容\"")
+                prompt_parts.append("- dialogue字段必须是对话形式，格式如：\"[角色名]：对话内容\"")
                 prompt_parts.append("- 禁止生成纯旁白描述，所有文本必须是角色对话")
                 prompt_parts.append("- 如果没有对话的场景，dialogue字段可以为空字符串")
             elif '不生成对话' in user_input or '不要对话' in user_input or '只生成旁白' in user_input:
@@ -1359,6 +1464,131 @@ class ScriptAgent:
             return False
         return True
 
+    def _extract_description_timeline_segments(self, description: Any) -> List[Dict[str, Any]]:
+        text = str(description or "")
+        matches = list(re.finditer(
+            r"(?P<start>\d+(?:\.\d+)?)\s*(?:-|–|—|~|～|至|到)\s*"
+            r"(?P<end>\d+(?:\.\d+)?)\s*(?:秒|seconds?|secs?|s|segundos?)\s*[:：]",
+            text,
+            flags=re.IGNORECASE,
+        ))
+        segments: List[Dict[str, Any]] = []
+        for index, match in enumerate(matches):
+            content_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            content = text[match.end():content_end].strip(" \t\r\n；;。")
+            segments.append({
+                "start": float(match.group("start")),
+                "end": float(match.group("end")),
+                "content": content,
+            })
+        return segments
+
+    def _collect_timeline_detail_issues(self, scenes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Validate that timed beats are continuous and detailed enough for video generation."""
+        issues: List[Dict[str, Any]] = []
+        camera_keywords = (
+            "镜头", "中景", "近景", "特写", "全景", "远景", "俯拍", "仰拍",
+            "平拍", "跟拍", "推近", "推进", "拉远", "摇镜", "环绕", "焦点",
+            "景深", "构图", "机位", "手持", "固定", "camera", "shot",
+            "close-up", "medium", "wide", "tracking", "dolly", "pan", "focus",
+            "カメラ", "ショット", "クローズアップ", "plano", "cámara",
+        )
+        performance_keywords = (
+            "眼", "眉", "嘴角", "表情", "神色", "呼吸", "手", "指尖", "肩",
+            "身体", "重心", "脚步", "转身", "抬头", "低头", "握", "抓", "站",
+            "坐", "跪", "躺", "靠", "望", "看", "停顿", "eye", "gaze",
+            "breath", "hand", "shoulder", "body", "turn", "step", "look",
+            "目", "視線", "呼吸", "手", "肩", "cuerpo", "mano", "mirada",
+        )
+        lighting_keywords = (
+            "光", "影", "灯", "明暗", "色温", "反光", "逆光", "轮廓",
+            "阴影", "亮", "暗", "雾", "雨", "烟", "尘", "light", "shadow",
+            "lamp", "glow", "reflection", "fog", "smoke", "luz", "sombra",
+        )
+
+        for index, scene in enumerate(scenes or [], start=1):
+            scene_number = scene.get("scene_number", index)
+            description = str(scene.get("description") or "")
+            segments = self._extract_description_timeline_segments(description)
+            try:
+                duration = float(scene.get("duration") or 0)
+            except (TypeError, ValueError):
+                duration = 0
+
+            if len(segments) < 2:
+                issues.append({"scene": scene_number, "reason": "missing_or_sparse_timeline"})
+                continue
+
+            if abs(segments[0]["start"]) > 0.01 or abs(segments[-1]["end"] - duration) > 0.01:
+                issues.append({"scene": scene_number, "reason": "timeline_does_not_cover_duration"})
+                continue
+
+            for segment_index, segment in enumerate(segments):
+                if segment["end"] <= segment["start"]:
+                    issues.append({"scene": scene_number, "reason": "invalid_timeline_range"})
+                    break
+                if segment_index and abs(segment["start"] - segments[segment_index - 1]["end"]) > 0.01:
+                    issues.append({"scene": scene_number, "reason": "timeline_gap_or_overlap"})
+                    break
+
+                content = self._normalize_single_line(segment["content"])
+                sentence_count = len([part for part in re.split(r"[。；;.!?！？]+", content) if part.strip()])
+                if len(content) < 32 or sentence_count < 2:
+                    issues.append({
+                        "scene": scene_number,
+                        "reason": f"segment_{segment_index + 1}_too_brief",
+                    })
+                    break
+                if not any(keyword in content for keyword in camera_keywords):
+                    issues.append({
+                        "scene": scene_number,
+                        "reason": f"segment_{segment_index + 1}_missing_camera",
+                    })
+                    break
+                if not any(keyword in content for keyword in performance_keywords):
+                    issues.append({
+                        "scene": scene_number,
+                        "reason": f"segment_{segment_index + 1}_missing_performance",
+                    })
+                    break
+                if not any(keyword in content for keyword in lighting_keywords):
+                    issues.append({
+                        "scene": scene_number,
+                        "reason": f"segment_{segment_index + 1}_missing_environment_feedback",
+                    })
+                    break
+        return issues
+
+    def _collect_repetitive_intimacy_action_issues(
+        self,
+        scenes: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        explicit_pattern = re.compile(
+            r"抽插|反复插入|持续插入|来回插入|活塞式(?:动作)?|"
+            r"下身(?:反复|持续|不断)?撞击|胯部(?:反复|持续|不断)?冲撞"
+        )
+        repeated_soft_pattern = re.compile(
+            r"腰(?:身|肢)?(?:反复|持续|不断)?起伏|身体随着节奏起伏|迎合(?:着)?节奏"
+        )
+        issues: List[Dict[str, Any]] = []
+        soft_occurrences: List[int] = []
+        for index, scene in enumerate(scenes or [], start=1):
+            scene_number = int(scene.get("scene_number") or index)
+            text = " ".join(
+                str(scene.get(field) or "")
+                for field in ("description", "character_description", "camera_angle")
+            )
+            if explicit_pattern.search(text):
+                issues.append({"scene": scene_number, "reason": "mechanical_sex_action"})
+            if repeated_soft_pattern.search(text):
+                soft_occurrences.append(scene_number)
+        if len(soft_occurrences) > 1:
+            issues.append({
+                "scene": soft_occurrences[1],
+                "reason": "repeated_intimacy_motion_across_scenes",
+            })
+        return issues
+
     def _is_script_quality_acceptable(self, script_data: Dict[str, Any], user_input: str) -> bool:
         """校验剧本质量，避免把明显残缺的脚本直接送入后续流程。"""
         scenes = script_data.get('scenes') or []
@@ -1386,16 +1616,13 @@ class ScriptAgent:
             phrase in normalized_input
             for phrase in ["不生成对话", "不要对话", "只生成旁白", "no dialogue", "narration only"]
         )
-        if user_explicitly_allows_empty_dialogue:
-            return True
-
-        non_empty_dialogues = 0
-        for scene in scenes:
-            if (scene.get('dialogue') or '').strip():
-                non_empty_dialogues += 1
-        if non_empty_dialogues == 0:
-            logger.warning("Script quality check failed: all scene dialogues are empty")
-            return False
+        if not user_explicitly_allows_empty_dialogue:
+            non_empty_dialogues = sum(
+                1 for scene in scenes if (scene.get('dialogue') or '').strip()
+            )
+            if non_empty_dialogues == 0:
+                logger.warning("Script quality check failed: all scene dialogues are empty")
+                return False
 
         duration_adjustments = script_data.get('_duration_adjustments') or []
         if duration_adjustments:
@@ -1405,6 +1632,26 @@ class ScriptAgent:
                 self.scene_duration_min,
                 self.scene_duration_max,
             )
+            return False
+
+        timeline_issues = self._collect_timeline_detail_issues(scenes)
+        if timeline_issues:
+            for issue in timeline_issues[:5]:
+                logger.warning(
+                    "Script quality check failed: scene %s timeline detail issue (%s)",
+                    issue["scene"],
+                    issue["reason"],
+                )
+            return False
+
+        intimacy_action_issues = self._collect_repetitive_intimacy_action_issues(scenes)
+        if intimacy_action_issues:
+            for issue in intimacy_action_issues[:5]:
+                logger.warning(
+                    "Script quality check failed: scene %s intimacy action issue (%s)",
+                    issue["scene"],
+                    issue["reason"],
+                )
             return False
 
         duplicate_issues = self._collect_duplicate_scene_issues(scenes)
@@ -1790,6 +2037,11 @@ class ScriptAgent:
                     data.get('characters') or [],
                 )
             self._enforce_character_outfit_continuity(
+                data.get('scenes') or [],
+                data.get('characters') or [],
+            )
+            self._canonicalize_similar_character_outfits(data.get('scenes') or [])
+            self._annotate_scene_character_names(
                 data.get('scenes') or [],
                 data.get('characters') or [],
             )
@@ -2577,6 +2829,7 @@ class ScriptAgent:
             model=self.model,
             messages=messages,
             temperature=0.8,
+            max_tokens=self.max_tokens,
             timeout=self.timeout
         )
 
@@ -2769,7 +3022,9 @@ class ScriptAgent:
         return names
 
     def _sanitize_character_candidate(self, value: Any) -> str:
-        candidate = str(value or '').strip().strip('“”"\' ')
+        candidate = self._strip_character_name_markers(
+            str(value or '').strip().strip('“”"\' ')
+        )
         if not candidate:
             return ''
 
@@ -2851,7 +3106,7 @@ class ScriptAgent:
         for item in raw_characters or []:
             if not isinstance(item, dict):
                 continue
-            name = str(item.get('name') or '').strip()
+            name = self._strip_character_name_markers(item.get('name'))
             key = self._normalize_character_name_key(name)
             if not key or key in seen_character_keys:
                 continue

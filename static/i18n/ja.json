@@ -17,7 +17,7 @@
     "tipTitle": "ヒント：",
     "tipText": "「動きのあるカメラ構成、ナレーションのみ、壮大なBGM、水墨画風、720p、9:16、30秒」のような指示を追加できます",
     "quickCommandsTitle": "クイックコマンド：",
-    "quickCommandsText": "「autorun」 / 「再生成」 / 「やり直し」 / 「regen」（現在のステップ） / 「rollback-script」 / 「rollback-storyboard-image」 / 「脚本に戻る」"
+    "quickCommandsText": "「autorun」 / 「再生成」 / 「やり直し」 / 「regen」（現在のステップ） / 「rollback-script」 / 「脚本に戻る」"
   },
   "input": {
     "uploadImage": "画像をアップロード",
@@ -67,11 +67,8 @@
     "processing": "処理中",
     "review": "レビュー",
     "video": "動画",
-    "storyboardImage": "絵コンテ画像",
-    "storyboardImageTitle": "🧩 絵コンテ画像生成",
     "referenceCategory1": "キャラクター/人物ライブラリと背景参考ライブラリ",
-    "referenceCategory2": "キャラクター衣装画像・背景セット状態画像・キーアクション参考画像",
-    "referenceCategory3": "各シーンの絵コンテ"
+    "referenceCategory2": "キャラクター衣装画像・背景セット状態画像・キーアクション参考画像"
   },
   "status": {
     "processing": "処理中...",
@@ -91,16 +88,14 @@
   "loading": {
     "script": "脚本を生成中...",
     "referenceImage": "参照画像を生成中...",
-    "videos": "絵コンテ動画を生成中...",
-    "merge": "最終動画を結合中...",
-    "storyboardImage": "絵コンテ画像を生成中..."
+    "videos": "シーン動画を生成中...",
+    "merge": "最終動画を結合中..."
   },
   "actions": {
     "regenerate": "🔄 再生成",
     "skip": "⏭️ スキップ",
     "download": "⬇️ ダウンロード",
     "downloadVideo": "⬇️ 動画をダウンロード",
-    "downloadPdf": "⬇️ PDFをダウンロード",
     "newProject": "🆕 新しいプロジェクト",
     "exitAutoRun": "自動モードを終了",
     "endProject": "プロジェクトを終了",
@@ -121,7 +116,7 @@
     "referenceImageUsingOriginal": "この参照画像はアップロードした元画像を直接使用しているため、再生成できません。",
     "endFrame": "終了フレーム",
     "scene": "シーン {scene}",
-    "generatedVideos": "🎬 絵コンテ動画",
+    "generatedVideos": "🎬 シーン動画",
     "waitingGenerate": "生成待ち...",
     "waitingGenerateReview": "⏳ 生成待ち",
     "reviewing": "⏳ レビュー中...",
@@ -173,8 +168,8 @@
     "seconds": "{count}秒",
     "countUnit": "{count}",
     "mergeTitle": "🎬 動画を結合中...",
-    "mergeDescription": "すべての絵コンテ動画が完成しました。最終結合を実行中です。進行状況とスピナーは右下のステータスバーに表示されます。",
-    "mergeStatusBarHint": "すべての絵コンテ動画の準備ができました。結合の進行状況は右下のステータスバーで確認できます。",
+    "mergeDescription": "すべてのシーン動画が完成しました。最終結合を実行中です。進行状況とスピナーは右下のステータスバーに表示されます。",
+    "mergeStatusBarHint": "すべてのシーン動画の準備ができました。結合の進行状況は右下のステータスバーで確認できます。",
     "finalVideoTitle": "🎉 動画生成が完了しました！",
     "browserNoVideo": "お使いのブラウザは動画再生に対応していません",
     "countdown": "⏱ カウントダウン: {count} 秒",
@@ -189,11 +184,6 @@
     "referenceNameSceneDefault": "シーン{index}",
     "referenceLibraryCharacters": "キャラクター参考画像ライブラリ",
     "referenceLibraryScenes": "背景セット参考画像ライブラリ",
-    "storyboardLibrary": "🎞️ シーン別絵コンテ",
-    "comicPdfTitle": "📄 コミックPDF",
-    "comicPdfGenerating": "コミックPDFを生成しています...",
-    "comicPdfReady": "コミックPDFをダウンロードできます。",
-    "comicPdfFailed": "コミックPDFの生成に失敗しました。",
     "variantAssetsLibrary": "🎭 シーン別-キャラ衣装-背景セット状態",
     "variantOutfits": "キャラ衣装画像",
     "variantSceneStates": "背景セット状態画像",
@@ -203,10 +193,7 @@
     "keyActionReferenceImage": "キーアクション参考画像",
     "sceneSettings": "🏞️ 背景セット設定 ({count})",
     "sceneUsage": "🏷️ 使用背景セット:",
-    "referenceLibraryUnified": "🎨 統合参照画像ライブラリ",
-    "generatedStoryboardImages": "🧩 絵コンテ画像",
-    "storyboardImageRegeneratingText": "絵コンテ画像を再生成しています...",
-    "storyboardImage": "絵コンテ画像"
+    "referenceLibraryUnified": "🎨 統合参照画像ライブラリ"
   },
   "messages": {
     "invalidScriptData": "❌ 脚本データが無効です",
@@ -217,7 +204,7 @@
     "audioRecognitionFailed": "❌ 音声認識に失敗しました: {error}",
     "audioProcessingFailed": "❌ 録音の文字起こしに失敗しました。録音形式またはネットワークを確認して再試行してください。",
     "imageUploadFailed": "画像のアップロードに失敗しました",
-    "referenceNameRequired": "続行する前に、次のアップロード画像に名前を入力してください: {items}",
+    "referenceNameRequired": "続行する前に、アップロードした各キャラクター画像と背景画像の名前を入力してください。",
     "referenceImageLimit": "参考画像は最大 {count} 枚までアップロードできます。",
     "characterReferenceLimit": "キャラクター参考画像は最大 {count} 枚までアップロードできます。",
     "sceneReferenceLimit": "主要シーン参考画像は最大 {count} 枚までアップロードできます。",
@@ -237,15 +224,14 @@
     "allStepsCompleted": "✅ すべてのステップが完了しました！",
     "allVideosCompleted": "🎉 動画生成がすべて完了しました！",
     "autoEnterNext": "次のステップへ自動で進みます: {step}...",
-    "autoEnterNextNewFlow": "次のステップへ自動で進みます: {step}...（新フロー：シーンごとに生成＋レビュー）",
+    "autoEnterNextNewFlow": "次のステップへ自動で進みます: {step}...（シーン生成＋レビュー）",
     "autoEnterNextReferenceStage": "次の段階へ自動で進みます: {stage}...",
     "referenceCategory1Complete": "🎨 キャラクター/人物ライブラリと背景参考ライブラリが生成されました！\n\nチャット欄に入力してください：\n• \"続行\" / \"次へ\" / \"ok\" / \"go\" / \"開始\" - 次の段階へ進む\n• \"再生成\" / \"やり直し\" / \"regen\" - この段階を作り直す\nまたは任意の画像で「再生成」をクリックして微調整できます",
     "referenceCategory2Complete": "🎨 キャラクター衣装画像・背景セット状態画像・キーアクション参考画像が生成されました！\n\nチャット欄に入力してください：\n• \"続行\" / \"次へ\" / \"ok\" / \"go\" / \"開始\" - 次の段階へ進む\n• \"再生成\" / \"やり直し\" / \"regen\" - この段階を作り直す\nまたは任意の画像で「再生成」をクリックして微調整できます",
-    "referenceCategory3Complete": "🧩 各シーンの絵コンテが生成されました！\n\nチャット欄に入力してください：\n• \"続行\" / \"次へ\" / \"ok\" / \"go\" / \"開始\" - 次のステップへ：🎬 動画生成\n• \"再生成\" / \"やり直し\" / \"regen\" - この段階を作り直す\nまたは任意の画像で「再生成」をクリックして微調整できます",
     "exitAutoRun": "⛔ 自動モードを終了しました。\n\nチャットに入力してください：\n• 「続ける」 / 「次へ」 / 「ok」 / 「go」 / 「start」 - 続行\n• 「再生成」 / 「やり直し」 / 「regen」 - 現在のステップを再生成",
     "exitAutoRunStatus": "自動モードを終了しました。チャットでコマンドを入力してください",
     "scriptComplete": "📖 脚本生成が完了しました！\n\nチャットに入力してください：\n• 「続ける」 / 「次へ」 / 「ok」 / 「go」 / 「start」 - 次のステップ：🎨 参照画像生成\n• 「再生成」 / 「やり直し」 / 「regen」 - 📖 脚本生成をやり直す",
-    "referenceComplete": "🎨 参照画像生成が完了しました！\n\nチャットに入力してください：\n• 「続ける」 / 「次へ」 / 「ok」 / 「go」 / 「start」 - 次のステップ：🧩 絵コンテ画像生成\n• 「再生成」 / 「やり直し」 / 「regen」 - 🎨 参照画像をやり直す",
+    "referenceComplete": "🎨 参照画像生成が完了しました！\n\nチャットに入力してください：\n• 「続ける」 / 「次へ」 / 「ok」 / 「go」 / 「start」 - 次のステップ：🎬 シーン動画生成\n• 「再生成」 / 「やり直し」 / 「regen」 - 🎨 参照画像をやり直す",
     "videosComplete": "🎬 動画生成が完了しました！\n\nチャットに入力してください：\n• 「続ける」 / 「次へ」 / 「ok」 / 「go」 / 「start」 - 次のステップ：🎥 動画結合\n• 「再生成」 / 「やり直し」 / 「regen」 - 🎬 動画生成をやり直す",
     "itemRegeneratedSuccess": "✅ {label} を再生成しました！",
     "createProjectFailedRetry": "❌ プロジェクトの作成に失敗しました。もう一度お試しください",
@@ -254,7 +240,7 @@
     "rollbackSuccess": "✅ ステップ「{step}」まで正常にロールバックしました。\n\n再生成しています...",
     "rollbackFailed": "❌ ロールバックに失敗しました: {error}",
     "rollbackStarting": "⏪ ステップ「{step}」へロールバックしています...\n\nこのステップ以降の進行状況をリセットし、再生成します。",
-    "rollbackInvalidStep": "❌ ステップ「{step}」は存在しません。\n\n利用可能なステップ: 脚本、参照画像、絵コンテ画像、絵コンテ動画、結合",
+    "rollbackInvalidStep": "❌ ステップ「{step}」は存在しません。\n\n利用可能なステップ: 脚本、参照画像、シーン動画、結合",
     "rollbackNoStartedStep": "❌ まだ開始されたステップがないため、ロールバックできません。\n\nまず「開始生成」または「autorun」を入力してください。",
     "rollbackStepNotCompleted": "❌ 「{step}」へはロールバックできません。そのステップはまだ完了していません。\n\n完了済みステップ: {completedSteps}\n完了済みのステップにのみ戻れます。",
     "projectEndConfirm": "プロジェクトを終了すると、このプロジェクトの TOS 一時ファイル、仮想アセットライブラリの素材、アセットグループが削除されます。終了してよろしいですか？",
@@ -267,10 +253,7 @@
     "genericStepCompleteStatus": "{step} が完了しました。チャットで「continue」または「next」を入力すると {nextStep} に進みます。再実行するには「regenerate」「redo」または「regen」を入力してください。",
     "genericStepComplete": "{step} が完了しました！\n\nチャットに入力してください：\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - 次のステップ: {nextStep}\n• \"regenerate\" / \"redo\" / \"regen\" - {step} をやり直す",
     "referenceAssetRegeneratedSuccess": "✅ 参照画像「{name}」を再生成しました！",
-    "storyboardComplete": "🧩 絵コンテ画像生成が完了しました！\n\nチャットに入力してください：\n• 「続ける」 / 「次へ」 / 「ok」 / 「go」 / 「start」 - 次のステップ：🎬 動画生成（新フロー：シーンごとに生成＋レビュー）\n• 「再生成」 / 「やり直し」 / 「regen」 - 🧩 絵コンテ画像をやり直す",
-    "storyboardRegeneratedSuccess": "✅ シーン {scene} の絵コンテ画像を再生成しました！",
-    "httpErrorStatus": "HTTP リクエストが失敗しました。ステータス: {status}",
-    "referenceNameRequired": "続行する前に、アップロードした各キャラクター画像と背景画像の名前を入力してください。"
+    "httpErrorStatus": "HTTP リクエストが失敗しました。ステータス: {status}"
   },
   "chat": {
     "system_prompt": "あなたはプロのAI動画生成アシスタントです。あなたの役割は次のとおりです。\n1. ユーザーの動画制作要件を理解する\n2. スタイル、登場人物、シーンなど必要な詳細を確認する\n3. 参考画像や音声説明の提供を案内する\n4. 情報が十分に集まったら、動画生成を開始できることを伝える\n\n丁寧でプロフェッショナルな口調で応答してください。",
@@ -279,9 +262,9 @@
   },
   "message": {
     "reference": {
-      "confirm_prompt": "参照画像ライブラリが生成されました。内容をご確認ください。問題なければ「confirm」と入力するか、続行ボタンを押して絵コンテ画像を生成してください。",
+      "confirm_prompt": "参照画像ライブラリが生成されました。内容をご確認ください。問題なければ「confirm」と入力するか、続行ボタンを押してシーン動画を生成してください。",
       "regenerated_confirm_prompt": "参照画像ライブラリが再生成されました。内容をご確認ください。",
-      "confirmed_start_videos": "参照画像ライブラリを確認しました。絵コンテ動画の生成を開始しています..."
+      "confirmed_start_videos": "参照画像ライブラリを確認しました。シーン動画の生成を開始しています..."
     },
     "direct_start_script": "ご要望を受け取りました。脚本生成を直接開始しています...",
     "script": {
@@ -316,7 +299,7 @@
       "complete": "📖 脚本生成が完了しました。画像生成に進みますか？"
     },
     "reference": {
-      "complete": "🎨 参照画像ライブラリが生成されました。問題なければ確認後に絵コンテ画像生成へ進んでください。"
+      "complete": "🎨 参照画像ライブラリが生成されました。問題なければ確認後にシーン動画生成へ進んでください。"
     },
     "videos": {
       "complete": "🎬 動画生成が完了しました。最終動画を結合しますか？"
@@ -342,7 +325,7 @@
     "missing_project_or_target_step": "project_id または target_step が不足しています",
     "reference_regeneration_locked": "動画生成はすでに開始されているため、参照画像の再生成はロックされています。",
     "reference_regeneration_locked_original": "現在の参照画像は「元画像を使用」から作成されているため、参照画像の再生成は利用できません。",
-    "no_scenes_remaining_after_skip": "すべてのシーンがスキップされました。生成または結合できる絵コンテ動画は残っていません。"
+    "no_scenes_remaining_after_skip": "すべてのシーンがスキップされました。生成または結合できるシーン動画は残っていません。"
   },
   "review": {
     "output_language_rule": "feedback フィールドは{language}で出力し、JSON のフィールド名は英語のまま維持してください。"

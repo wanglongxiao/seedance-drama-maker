@@ -42,7 +42,6 @@ let lastScriptData = null;
 let lastReferenceImageOutput = null;
 let lastImagesOutput = null;
 let lastFinalVideoUrl = null;
-let lastComicPdfOutput = null;
 let mergeStepVisible = false;
 let videoOutputsByScene = {};
 let videoReviewOutputsByScene = {};
@@ -53,10 +52,10 @@ let regeneratingReferenceAssetKeys = new Set();
 let regeneratingVideoSceneNumbers = new Set();
 let useOriginalReference = false;
 let referenceImageRegenerateLocked = false;
-// 参考图分阶段（category1/category2/category3）子状态机：
-let referenceStage = null; // 当前已完成子阶段：category1/category2/category3
-let pendingReferenceStage = null; // 待进入子阶段：category2/category3/videos
-let referenceStageHasCategory2 = false; // 后端下发：本项目是否存在分类2（装扮/布景状态）
+// 参考图分阶段（category1/category2）子状态机：
+let referenceStage = null; // 当前已完成子阶段：category1/category2
+let pendingReferenceStage = null; // 待进入子阶段：category2/videos
+let referenceStageHasCategory2 = false; // 后端下发：本项目是否存在分类2（装扮/布景状态/关键动作）
 let projectEnding = false;
 let projectEnded = false;
 let projectEndBeaconSent = false;
@@ -96,7 +95,7 @@ function getPersistedProjectId() {
         return null;
     }
 }
-const I18N_VERSION = '20260819a';
+const I18N_VERSION = '20261004c';
 const FRONTEND_CONFIG_VERSION = '20260811c';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
@@ -137,6 +136,8 @@ const UI_LANGUAGE_ALIASES = {
 let languageRequestSerial = 0;
 let frontendConfig = {
     auto_run_countdown_seconds: 10,
+    total_duration_max: 1200,
+    max_storyboard_scenes: 80,
     reference_image_max_count: 30,
     character_reference_max_count: 10,
     scene_reference_max_count: 20,
@@ -518,10 +519,6 @@ function rerenderPreviewCards() {
     if (referenceCard) referenceCard.remove();
     const keyActionReferenceCard = document.getElementById('key-action-reference-card');
     if (keyActionReferenceCard) keyActionReferenceCard.remove();
-    const storyboardCard = document.getElementById('storyboard-card');
-    if (storyboardCard) storyboardCard.remove();
-    const comicPdfCard = document.getElementById('comic-pdf-card');
-    if (comicPdfCard) comicPdfCard.remove();
     const imagesCard = document.getElementById('images-card');
     if (imagesCard) imagesCard.remove();
     const videosContainer = document.getElementById('videos-container');
@@ -539,10 +536,6 @@ function rerenderPreviewCards() {
     } else if (lastReferenceImageOutput) {
         displayReferenceImage(lastReferenceImageOutput);
     }
-    if (lastComicPdfOutput) {
-        displayComicPdfLink(lastComicPdfOutput);
-    }
-
     Object.values(videoOutputsByScene)
         .sort((a, b) => (a.scene_number || 0) - (b.scene_number || 0))
         .forEach((output) => displayVideos(output));
@@ -837,13 +830,13 @@ function refreshReferenceImageActionState() {
     });
 }
 
-// 统一刷新“参考图库/角色装扮图/布景状态图/各分镜故事版”四个模块的重新生成按钮状态。
+// 统一刷新参考图库、角色装扮图、布景状态图和关键动作图的重新生成按钮状态。
 // 视频生成开始（referenceImageLocked=true）等锁定态变化时必须调用本函数，
-// 否则装扮/布景状态/故事版按钮不会随之置灰（refreshReferenceImageActionState 只覆盖参考图库）。
+// 否则变体图按钮不会随之置灰（refreshReferenceImageActionState 只覆盖参考图库）。
 function refreshAllReferenceActionStates() {
     refreshReferenceImageActionState();
     refreshVariantAssetsActionState();
-    refreshStoryboardActionState();
+    refreshKeyActionReferenceActionState();
 }
 
 // 初始化
@@ -935,21 +928,13 @@ function applyRestoredSnapshot(snap) {
         updateStepHighlight('script_agent', 100);
     }
 
-    // 2) 参考图库（含装扮/布景状态/故事版）
+    // 2) 参考图库（含装扮/布景状态/关键动作）
     if (snap.reference_output) {
         // 恢复态下不希望再自动触发确认倒计时，这里标记为已确认完成。
         const refOutput = { ...snap.reference_output, ready_for_confirmation: false };
         displayReferenceImage(refOutput);
         referenceImageLocked = true;
         stepProgress.reference_image = 100;
-    }
-
-    if (snap.comic_pdf_url || snap.comic_pdf_status === 'generating' || snap.comic_pdf_status === 'failed') {
-        displayComicPdfLink({
-            status: snap.comic_pdf_status || (snap.comic_pdf_url ? 'completed' : 'pending'),
-            comic_pdf_url: snap.comic_pdf_url || '',
-            error: snap.comic_pdf_error || ''
-        });
     }
 
     // 3) 视频分镜
@@ -1133,7 +1118,7 @@ function reconcileUiFromSnapshot(snap) {
             updateStepHighlight('script_agent', 100);
         }
 
-        // 2) 参考图库（含角色/布景/装扮/布景状态/关键动作/故事版子模块）：
+        // 2) 参考图库（含角色/布景/装扮/布景状态/关键动作子模块）：
         //    只要快照带 reference_output，就用它幂等重绘（displayReferenceImage 内部按卡片
         //    id 复用节点、按数据增删子模块），从而补齐「进入某子阶段但右侧空白」的场景。
         if (snap.reference_output) {
@@ -1143,9 +1128,7 @@ function reconcileUiFromSnapshot(snap) {
                     || (snap.reference_output.scene_state_images || []).length);
             const missingKeyAction = !document.getElementById('key-action-reference-card')
                 && (snap.reference_output.key_action_reference_images || []).length;
-            const missingStoryboard = !document.getElementById('storyboard-card')
-                && (snap.reference_output.storyboard_images || []).length;
-            if (missingReference || missingVariant || missingKeyAction || missingStoryboard) {
+            if (missingReference || missingVariant || missingKeyAction) {
                 const refOutput = { ...snap.reference_output, ready_for_confirmation: false };
                 displayReferenceImage(refOutput);
                 referenceImageLocked = true;
@@ -1153,20 +1136,10 @@ function reconcileUiFromSnapshot(snap) {
             }
         }
 
-        // 3) 连环画 PDF：无卡片但快照已有状态 -> 补渲染。
-        if (!document.getElementById('comic-pdf-card')
-            && (snap.comic_pdf_url || snap.comic_pdf_status === 'generating' || snap.comic_pdf_status === 'failed')) {
-            displayComicPdfLink({
-                status: snap.comic_pdf_status || (snap.comic_pdf_url ? 'completed' : 'pending'),
-                comic_pdf_url: snap.comic_pdf_url || '',
-                error: snap.comic_pdf_error || ''
-            });
-        }
-
-        // 4) 视频分镜：renderVideosFromSnapshot 自身按分镜号幂等，可安全补齐缺失的分镜卡片/URL/审核态。
+        // 3) 视频分镜：renderVideosFromSnapshot 自身按分镜号幂等，可安全补齐缺失的分镜卡片/URL/审核态。
         renderVideosFromSnapshot(snap);
 
-        // 5) 最终合成视频：无最终视频卡片但快照已就绪 -> 补渲染并结束视频阶段。
+        // 4) 最终合成视频：无最终视频卡片但快照已就绪 -> 补渲染并结束视频阶段。
         if (snap.final_video_url && !lastFinalVideoUrl) {
             displayFinalVideo(snap.final_video_url);
             currentStep = 'merge';
@@ -1175,7 +1148,7 @@ function reconcileUiFromSnapshot(snap) {
         console.debug('reconcileUiFromSnapshot render failed:', e);
     }
 
-    // 6) 底部状态栏补齐：独立 try/catch，绝不放进上面的右侧渲染 try。
+    // 5) 底部状态栏补齐：独立 try/catch，绝不放进上面的右侧渲染 try。
     //    云端多实例下上游任一渲染分支（尤其视频审核态/某分镜资源 400/ERR_ABORTED）抛异常时，
     //    若与状态栏补齐同处一个 try，会把本条一并跳过——表现为「项目在跑、底部状态栏却消失，
     //    无法判断是否还在运行」，且因取决于该次快照哪个分支抛错而「诸多步骤不定期出现」。
@@ -1203,31 +1176,25 @@ function announceAutoTransitionsFromSnapshot(snap) {
     if (!snap || !(snap.auto_run || isAutoRunMode)) return;
 
     const refStage = String(snap.reference_stage || 'none');
-    const order = { 'none': 0, 'category1_done': 1, 'category2_done': 2, 'category3_done': 3 };
+    const order = { 'none': 0, 'category1_done': 1, 'category2_done': 2 };
     const reached = (s) => (order[refStage] || 0) >= (order[s] || 0);
     const refOut = snap.reference_output || {};
     const hasCategory2 = !!((refOut.character_outfit_images || []).length
-        || (refOut.scene_state_images || []).length);
+        || (refOut.scene_state_images || []).length
+        || (refOut.key_action_reference_images || []).length);
 
     // 剧本 -> 参考图（图片生成）
     if (snap.reference_output || refStage !== 'none' || snap.script) {
         announceTransitionOnce('reference_image', t('messages.autoEnterNext', { step: getStepName('reference_image') }));
     }
-    // 参考图 category1 完成 -> 装扮/布景状态子阶段（仅当存在 category2）
+    // 参考图 category1 完成 -> 装扮/布景状态/关键动作子阶段（仅当存在 category2）
     if (reached('category1_done') && hasCategory2) {
         announceTransitionOnce('refstage_category2', t('messages.autoEnterNextReferenceStage', { stage: getReferenceStageName('category2') }));
     }
-    // -> 各分镜故事版（category3）：有 category2 时需 category2 完成，无则 category1 完成即进入
-    if (reached('category2_done') || (reached('category1_done') && !hasCategory2)) {
-        announceTransitionOnce('refstage_category3', t('messages.autoEnterNextReferenceStage', { stage: getReferenceStageName('category3') }));
-    }
-    // 参考图（category3）完成 -> 视频生成（新流程）
+    // 最后一个参考图阶段完成 -> 视频生成。
     // 以 videoPhaseStarted 为唯一权威门槛：一旦后端进入视频阶段（current_step 为
     // images_generated/videos_generated/completed，或已有视频、processing_phase=videos），
-    // 「进入视频生成」这一转场就已确定发生。不再附加 reached('category3_done') 门槛——
-    // 云端多实例下后端自链进入视频阶段后，快照 reference_stage 未必稳定读到 category3_done
-    // （曾导致视频转场提示漏发：merge 分支仅依赖 videoPhaseStarted 能补发，videos 却因多一道
-    // category3_done 门槛而缺失）。与下方 merge 分支保持一致的判定口径。
+    // 「进入视频生成」这一转场就已确定发生，不再附加参考图阶段门槛。
     const videoPhaseStarted = !!snap.video_phase_started
         || snap.processing_phase === 'videos'
         || (snap.videos && snap.videos.length)
@@ -1264,7 +1231,6 @@ function reconcileStatusBarFromSnapshot(snap) {
             'script': { step: t('steps.scriptTitle'), text: t('progress.script.generating') },
             'reference_category1': { step: t('steps.referenceImageTitle'), text: t('progress.reference.generating') },
             'reference_category2': { step: t('steps.referenceImageTitle'), text: t('progress.reference.generating') },
-            'reference_category3': { step: t('steps.referenceImageTitle'), text: t('progress.reference.generating') },
             'videos': { step: t('steps.videosTitle'), text: t('status.startingVideoGeneration') },
             'merge': { step: t('steps.mergeTitle'), text: t('progress.merge.generating') },
         }[phase];
@@ -1825,7 +1791,6 @@ function getStepMapping() {
         '腳本': 'script',
         'script': 'script',
         'screenplay': 'script',
-        'storyboard script': 'script',
         'guion': 'script',
         'guión': 'script',
         '脚本': 'script',
@@ -1843,12 +1808,8 @@ function getStepMapping() {
         '分鏡視頻': 'videos',
         '分镜影片': 'videos',
         '分鏡影片': 'videos',
-        'storyboard video': 'videos',
-        'storyboard videos': 'videos',
         'scene video': 'videos',
         'scene videos': 'videos',
-        'video del storyboard': 'videos',
-        'videos del storyboard': 'videos',
         '视频': 'videos',
         '影片': 'videos',
         'video': 'videos',
@@ -2322,7 +2283,6 @@ function clearPreviewFromStep(targetStep) {
                 document.getElementById('reference-image-card')?.remove();
                 document.getElementById('variant-assets-card')?.remove();
                 document.getElementById('key-action-reference-card')?.remove();
-                document.getElementById('storyboard-card')?.remove();
                 break;
             case 'videos':
                 document.querySelectorAll('.video-item[id^="video-item-"]').forEach(item => item.remove());
@@ -2576,15 +2536,12 @@ function exitAutoRunMode() {
     showStatusSection(t('messages.exitAutoRunStatus'));
 }
 
-// ========== 参考图子阶段（category1/category2/category3）推进逻辑 ==========
+// ========== 参考图子阶段（category1/category2）推进逻辑 ==========
 
-// 依据当前完成阶段与是否存在分类2，计算下一目标：category2/category3/videos。
+// 依据当前完成阶段与是否存在分类2，计算下一目标：category2/videos。
 function computeNextReferenceStage(stage, hasCategory2) {
     if (stage === 'category1') {
-        return hasCategory2 ? 'category2' : 'category3';
-    }
-    if (stage === 'category2') {
-        return 'category3';
+        return hasCategory2 ? 'category2' : 'videos';
     }
     return 'videos';
 }
@@ -2600,7 +2557,6 @@ function showPendingReferenceStagePrompt(completedStage) {
     const messageKey = {
         category1: 'messages.referenceCategory1Complete',
         category2: 'messages.referenceCategory2Complete',
-        category3: 'messages.referenceCategory3Complete',
     }[completedStage] || 'messages.referenceComplete';
     addAgentMessage(t(messageKey));
 }
@@ -2614,7 +2570,7 @@ function handleReferenceStageComplete(stage, output) {
 
     const nextStage = computeNextReferenceStage(stage, referenceStageHasCategory2);
     if (nextStage === 'videos') {
-        // category3（各分镜故事版）已完成 -> 进入视频生成。
+        // 最后一个参考图子阶段已完成 -> 进入视频生成。
         pendingReferenceStage = 'videos';
         pendingStep = 'videos';
         isWaitingForConfirm = true;
@@ -2703,13 +2659,12 @@ function getReferenceStageName(stage) {
     const names = {
         category1: t('steps.referenceCategory1'),
         category2: t('steps.referenceCategory2'),
-        category3: t('steps.referenceCategory3'),
         videos: t('steps.videosTitle'),
     };
     return names[stage] || stage;
 }
 
-// 参考图完成后开始视频生成（新流程：逐个生成+审核）
+// 参考图完成后开始分镜视频生成与审核。
 function startVideoGenerationAfterReference() {
     if (!currentProjectId) {
         alert(t('messages.createProjectFirst'));
@@ -3117,13 +3072,6 @@ function handleAgentOutput(agent, output) {
         case 'video_review_agent':
             // 视频审核结果输出
             displayVideoReviewResult(output);
-            break;
-        case 'storyboard_review_agent':
-            // 故事版审核结果（自动重生成，前端仅记录日志，最终以刷新后的故事版为准）
-            console.log('[storyboard_review]', output);
-            break;
-        case 'comic_pdf_agent':
-            displayComicPdfLink(output);
             break;
         case 'merge_agent':
             // 检查是否是合成开始（没有final_video_url）还是合成完成
@@ -3800,7 +3748,7 @@ function displayReferenceImage(output) {
     const isReferenceStageComplete = !!(output && output.stage_ready === true);
 
     if (hasPendingReferenceRegeneration()) {
-        // 仍有参考图/装扮/布景状态/故事版在重新生成中：状态栏必须保持“图片重新生成中”，
+        // 仍有参考图/装扮/布景状态/关键动作图在重新生成中：状态栏必须保持“图片重新生成中”，
         // 不能因为 reference_output 携带 ready_for_confirmation 就误显示“已生成完成，请确认”。
         renderStatusBar(t('labels.referenceImageRegeneratingText'), 'loading', t('steps.referenceImageTitle'));
     } else if (isReferenceGenerationComplete || isReferenceStageComplete) {
@@ -3847,10 +3795,8 @@ function displayReferenceImage(output) {
 
     // 在布景参考图库之后渲染“各分镜-角色装扮-布景状态”模块。
     displayVariantAssets(output);
-    // 在角色装扮/布景状态模块之后、分镜故事版之前渲染“关键动作参考图”模块。
+    // 在角色装扮/布景状态模块之后渲染“关键动作参考图”模块。
     displayKeyActionReferenceImages(output);
-    // 在关键动作参考图之后、分镜视频之前渲染“各分镜故事版”模块。
-    displayStoryboards(output);
 
     contentDisplay.scrollTop = contentDisplay.scrollHeight;
 
@@ -3880,7 +3826,7 @@ function displayVariantAssets(output) {
         card.id = 'variant-assets-card';
     }
 
-    // 保证顺序：参考图库 → 角色装扮/布景状态 → 故事版。插入到参考图库卡片之后。
+    // 保证顺序：参考图库 → 角色装扮/布景状态 → 关键动作参考图。
     const referenceCard = document.getElementById('reference-image-card');
     if (referenceCard && referenceCard.parentNode === contentDisplay) {
         if (referenceCard.nextSibling !== card) {
@@ -3965,7 +3911,6 @@ function finishReferenceAssetRegeneration(referenceAssetKey, force = false) {
             refreshReferenceImageActionState();
             refreshVariantAssetsActionState();
             refreshKeyActionReferenceActionState();
-            refreshStoryboardActionState();
             return;
         }
         regeneratingReferenceAssetKeys.delete(referenceAssetKey);
@@ -3975,7 +3920,6 @@ function finishReferenceAssetRegeneration(referenceAssetKey, force = false) {
     refreshReferenceImageActionState();
     refreshVariantAssetsActionState();
     refreshKeyActionReferenceActionState();
-    refreshStoryboardActionState();
     // 处于参考图子阶段等待（category1/category2 完成后）时，重启该子阶段倒计时；
     // 否则走主步骤（videos/merge）倒计时逻辑。
     if (pendingReferenceStage && pendingReferenceStage !== 'videos') {
@@ -3985,7 +3929,7 @@ function finishReferenceAssetRegeneration(referenceAssetKey, force = false) {
     }
 }
 
-// 处理后端通过 WebSocket 推送的单张重生成结果（角色装扮图/布景状态图/故事版/参考图库）。
+// 处理后端通过 WebSocket 推送的单张重生成结果（参考图/装扮图/布景状态图/关键动作图）。
 function handleReferenceAssetRegenerated(data) {
     data = data || {};
     const referenceAssetKey = data.reference_asset_key || '';
@@ -4132,7 +4076,7 @@ function refreshKeyActionReferenceActionState() {
     });
 }
 
-// 渲染“关键动作参考图”模块：位于角色装扮/布景状态与分镜故事版之间。
+// 渲染“关键动作参考图”模块：位于角色装扮/布景状态之后。
 function displayKeyActionReferenceImages(output) {
     const keyActionImages = (output && output.key_action_reference_images) || [];
     const existing = document.getElementById('key-action-reference-card');
@@ -4198,197 +4142,6 @@ function displayKeyActionReferenceImages(output) {
     `;
 
     refreshKeyActionReferenceActionState();
-}
-
-// 刷新“各分镜故事版”模块内重新生成按钮状态。
-function refreshStoryboardActionState() {
-    const card = document.getElementById('storyboard-card');
-    if (!card) return;
-    const regenerateButtons = card.querySelectorAll('button.reference-regenerate-btn');
-    regenerateButtons.forEach((regenerateBtn) => {
-        const assetKey = regenerateBtn.dataset.referenceKey || '';
-        const enabled = canRegenerateReferenceImage(false, assetKey);
-        regenerateBtn.disabled = !enabled;
-        regenerateBtn.style.opacity = enabled ? '' : '0.65';
-        regenerateBtn.style.cursor = enabled ? 'pointer' : 'not-allowed';
-    });
-}
-
-// 渲染“各分镜故事版”模块：位于布景参考图库与分镜视频之间，布局参照参考图库。
-function displayStoryboards(output) {
-    const storyboardImages = (output && output.storyboard_images) || [];
-    const existing = document.getElementById('storyboard-card');
-
-    if (!storyboardImages.length) {
-        if (existing) existing.remove();
-        return;
-    }
-
-    let card = existing;
-    if (!card) {
-        card = document.createElement('div');
-        card.className = 'content-card';
-        card.id = 'storyboard-card';
-    }
-
-    // 保证顺序：参考图库 → 角色装扮/布景状态 → 关键动作参考图 → 故事版 → 分镜视频。
-    const anchorCard = document.getElementById('key-action-reference-card') || document.getElementById('variant-assets-card') || document.getElementById('reference-image-card');
-    if (anchorCard && anchorCard.parentNode === contentDisplay) {
-        if (anchorCard.nextSibling !== card) {
-            contentDisplay.insertBefore(card, anchorCard.nextSibling);
-        }
-    } else if (card.parentNode !== contentDisplay) {
-        contentDisplay.appendChild(card);
-    }
-
-    const linkAttrs = getExternalLinkAttrs();
-    const sortedImages = [...storyboardImages].sort(
-        (a, b) => (Number(a.scene_number) || 0) - (Number(b.scene_number) || 0)
-    );
-
-    const items = sortedImages.map((item) => {
-        const sceneNumber = Number(item.scene_number) || 0;
-        const sceneLabel = t('labels.scene', { scene: sceneNumber });
-        const slotIndex = Number.isFinite(Number(item.slot_index)) ? Number(item.slot_index) : (sceneNumber - 1);
-        return `
-            <div class="reference-item" style="display:flex; flex-direction:column; gap:8px; padding: 12px; border: 1px solid #f0f0f0; border-radius: 10px; background: #fff; font-size: 13px; line-height: 1.5;">
-                <div style="position: relative; width: 100%; cursor: pointer; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.12);" onclick="openMediaModal('image', '${item.url}')">
-                    <img src="${item.url}" alt="${escapeHtml(item.name || sceneLabel)}" style="width:100%; height:180px; object-fit:cover; display:block;">
-                    <div style="position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.6); color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px;">
-                        ${t('labels.clickToZoom')}
-                    </div>
-                </div>
-                <div style="font-size: 13px; color: #888;">${t('labels.storyboardImage')}</div>
-                <div style="font-size: 16px; font-weight:600; color:#333; line-height: 1.4;">${escapeHtml(sceneLabel)}</div>
-                <div class="item-actions" style="display:flex; gap:8px; flex-wrap: wrap;">
-                    <button
-                        class="item-btn regenerate reference-regenerate-btn"
-                        data-locked="false"
-                        data-reference-key="${escapeHtml(buildReferenceAssetKey('storyboard', sceneNumber))}"
-                        onclick="event.stopPropagation(); regenerateStoryboardAsset(${sceneNumber}, ${slotIndex})"
-                        style="background: #faad14; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer;"
-                    >${t('actions.regenerate')}</button>
-                    <a href="${item.url}" ${linkAttrs} class="item-btn download" style="background: #1890ff; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; width: fit-content;">${t('actions.download')}</a>
-                </div>
-            </div>
-        `;
-    }).join('');
-
-    card.innerHTML = `
-        <h4 style="margin: 0 0 15px 0; font-size: 18px; font-weight: 600; color: #333; border-bottom: 2px solid #1890ff; padding-bottom: 10px;">${t('labels.storyboardLibrary')}</h4>
-        <div class="reference-grid">${items}</div>
-    `;
-
-    refreshStoryboardActionState();
-}
-
-function displayComicPdfLink(output) {
-    const normalizedOutput = {
-        status: output?.status || (output?.comic_pdf_url ? 'completed' : 'pending'),
-        comic_pdf_url: output?.comic_pdf_url || '',
-        error: output?.error || ''
-    };
-    lastComicPdfOutput = normalizedOutput;
-
-    let card = document.getElementById('comic-pdf-card');
-    if (!card) {
-        card = document.createElement('div');
-        card.className = 'content-card';
-        card.id = 'comic-pdf-card';
-    }
-
-    const storyboardCard = document.getElementById('storyboard-card');
-    const videosContainer = document.getElementById('videos-container');
-    if (storyboardCard && storyboardCard.parentNode === contentDisplay) {
-        if (storyboardCard.nextSibling !== card) {
-            contentDisplay.insertBefore(card, storyboardCard.nextSibling);
-        }
-    } else if (videosContainer && videosContainer.parentNode === contentDisplay) {
-        contentDisplay.insertBefore(card, videosContainer);
-    } else if (card.parentNode !== contentDisplay) {
-        contentDisplay.appendChild(card);
-    }
-
-    const linkAttrs = getExternalLinkAttrs();
-    const isCompleted = normalizedOutput.status === 'completed' && normalizedOutput.comic_pdf_url;
-    const isFailed = normalizedOutput.status === 'failed';
-    const title = t('labels.comicPdfTitle');
-    const statusText = isCompleted
-        ? t('labels.comicPdfReady')
-        : (isFailed ? t('labels.comicPdfFailed') : t('labels.comicPdfGenerating'));
-
-    card.innerHTML = `
-        <h4 style="margin: 0 0 12px 0; font-size: 18px; font-weight: 600; color: #333; border-bottom: 2px solid #1890ff; padding-bottom: 10px;">${title}</h4>
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
-            <div style="font-size:14px; color:${isFailed ? '#cf1322' : '#555'}; line-height:1.5;">
-                ${escapeHtml(statusText)}
-                ${isFailed && normalizedOutput.error ? `<div style="font-size:12px; color:#8c8c8c; margin-top:4px;">${escapeHtml(normalizedOutput.error)}</div>` : ''}
-            </div>
-            ${isCompleted ? `<a href="${normalizedOutput.comic_pdf_url}" ${linkAttrs} class="action-btn" style="background:#1890ff; color:white; padding:8px 14px; border-radius:6px; text-decoration:none; display:inline-flex; align-items:center; gap:5px; white-space:nowrap;">${t('actions.downloadPdf')}</a>` : ''}
-        </div>
-    `;
-}
-
-// 重新生成单张分镜故事版
-async function regenerateStoryboardAsset(sceneNumber, slotIndex = -1) {
-    if (!currentProjectId) {
-        alert(t('messages.createProjectFirst'));
-        return;
-    }
-    const referenceAssetKey = buildReferenceAssetKey('storyboard', sceneNumber);
-    if (!canRegenerateReferenceImage(false, referenceAssetKey)) {
-        return;
-    }
-
-    regeneratingReferenceAssetKeys.add(referenceAssetKey);
-    referenceImageRegenerating = regeneratingReferenceAssetKeys.size > 0;
-    cancelAutoRunCountdown();
-    refreshReferenceImageActionState();
-    refreshVariantAssetsActionState();
-    refreshStoryboardActionState();
-    renderStatusBar(t('labels.referenceImageRegeneratingText'), 'loading', t('steps.referenceImageTitle'));
-
-    try {
-        const response = await fetch('/regenerate', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: new URLSearchParams({
-                project_id: currentProjectId,
-                type: 'image',
-                scene_number: '0',
-                reference_type: 'storyboard',
-                reference_name: String(sceneNumber),
-                reference_slot_index: String(Number.isFinite(Number(slotIndex)) ? Number(slotIndex) : -1),
-                client_id: wsClientId || '',
-                ui_language: currentLanguage
-            })
-        });
-
-        const result = await response.json();
-        if (result.success && result.async) {
-            // 后台异步生成：保持按钮锁定，结果通过 WebSocket 推送后再解锁与刷新。
-            markReferenceAssetRegenerationPending(referenceAssetKey);
-            return;
-        }
-        if (result.success) {
-            displayReferenceImage(result.reference_output);
-            renderStatusBar(
-                t('messages.storyboardRegeneratedSuccess', { scene: sceneNumber }),
-                'info',
-                t('steps.referenceImageTitle')
-            );
-            addAgentMessage(t('messages.storyboardRegeneratedSuccess', { scene: sceneNumber }));
-        } else {
-            addAgentMessage(t('messages.regenerateFailedWithError', { error: result.error }));
-        }
-    } catch (error) {
-        console.error('Regenerate storyboard asset error:', error);
-        addAgentMessage(t('messages.regenerateFailed'));
-    } finally {
-        finishReferenceAssetRegeneration(referenceAssetKey);
-    }
 }
 
 // 重新生成单张参考图

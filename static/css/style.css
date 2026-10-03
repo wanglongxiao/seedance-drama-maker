@@ -581,7 +581,7 @@ body {
     gap: 16px;
 }
 
-/* 参考图库 / 各分镜故事版 网格：自适应列数 */
+/* 参考图库网格：自适应列数 */
 .reference-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));

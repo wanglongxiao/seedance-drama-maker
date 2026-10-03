@@ -101,7 +101,7 @@ class GeneratedImage(BaseModel):
     url: str
     prompt: str
     name: Optional[str] = None
-    reference_type: Optional[Literal["character", "scene", "character_outfit", "scene_state", "key_action", "storyboard"]] = None
+    reference_type: Optional[Literal["character", "scene", "character_outfit", "scene_state", "key_action"]] = None
     variant_key: Optional[str] = None  # 装扮图/布景状态图去重键，如 "角色key::装扮key" 或 "场景key::时间key::天气key"
     source: str = "generated"
     used_original: bool = False
@@ -163,9 +163,6 @@ class VideoProject(BaseModel):
     images: List[GeneratedImage] = Field(default_factory=list)
     videos: List[GeneratedVideo] = Field(default_factory=list)
     final_video_url: Optional[str] = None
-    comic_pdf_url: Optional[str] = None
-    comic_pdf_status: str = "pending"
-    comic_pdf_error: Optional[str] = None
     status: str = "pending"
     current_step: str = "init"
     progress: int = 0
@@ -186,7 +183,6 @@ class VideoProject(BaseModel):
     character_outfit_images: List[GeneratedImage] = Field(default_factory=list)
     scene_state_images: List[GeneratedImage] = Field(default_factory=list)
     key_action_reference_images: List[GeneratedImage] = Field(default_factory=list)
-    storyboard_images: List[GeneratedImage] = Field(default_factory=list)
     reference_image_library: Dict[str, Any] = Field(default_factory=dict)
     scene_reference_mappings: Dict[int, Dict[str, Any]] = Field(default_factory=dict)
     task_tos_prefix: Optional[str] = None
@@ -198,15 +194,14 @@ class VideoProject(BaseModel):
     end_reason: Optional[str] = None
     # 两步图片生成相关字段
     reference_image: Optional[GeneratedImage] = None  # 参考图库主图
-    # 参考图分阶段生成进度：none/category1_done/category2_done/category3_done
+    # 参考图分阶段生成进度：none/category1_done/category2_done
     reference_stage: str = "none"
     # 当前正在执行（生成中）的阶段标记，供云端多实例下前端权威对账。
     # 云端多实例时，进入某阶段的实时 status/progress/agent_output 推送可能落在其它
     # 实例而丢失，导致「进入某阶段后右侧内容与底部状态栏空白」（本地单实例不复现）。
     # 该字段在每个阶段「开始」时置位、「产出数据或完成」后清空，随项目状态持久化到 TOS，
     # 前端据此即使在「已进入但尚无数据」的生成窗口也能补出状态栏与占位 UI。
-    # 取值：""（空闲）/ script / reference_category1 / reference_category2 /
-    #      reference_category3 / videos / merge
+    # 取值：""（空闲）/ script / reference_category1 / reference_category2 / videos / merge
     processing_phase: str = ""
     video_review_mode: str = "manual"
     # 全自动模式：项目是否处于「一键生成」自动推进流程。

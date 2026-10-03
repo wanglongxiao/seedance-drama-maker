@@ -14,6 +14,10 @@ from app.prompt_skill import nsfw_content_requested, private_nsfw_enabled
 from app.services.asr_service import asr_service
 from app.utils.i18n import normalize_locale, translate
 from app.utils.logger import get_logger
+from app.utils.outfit_similarity import (
+    are_outfits_visually_equivalent,
+    stable_outfit_description,
+)
 from app.utils.task_paths import ensure_project_temp_dir
 from app.utils.thread_pools import run_generation, run_interactive
 from app.models.schemas import VideoProject, Script, GeneratedImage, GeneratedVideo, VideoSceneState, UploadedReferenceImage
@@ -21,10 +25,8 @@ from app.agents.script_agent import ScriptAgent
 from app.agents.image_agent import ImageAgent
 from app.agents.video_agent import VideoAgent
 from app.agents.video_review_agent import VideoReviewAgent
-from app.agents.storyboard_review_agent import StoryboardReviewAgent
 from app.agents.merge_agent import MergeAgent
 from app.services.asset_library_service import asset_library_service, AssetLibraryError
-from app.services.comic_pdf_service import comic_pdf_service
 from app.services.tos_service import tos_service
 
 logger = get_logger("main_agent")
@@ -179,12 +181,11 @@ class MainAgent:
     def __init__(self):
         self.model = config.get('models.main_agent.endpoint')
         self.temperature = config.get('models.main_agent.temperature', 0.8)
-        self.max_tokens = config.get('models.main_agent.max_tokens', 4096)
+        self.max_tokens = int(config.get('models.main_agent.max_tokens', 120000))
         self.script_agent = ScriptAgent()
         self.image_agent = ImageAgent()
         self.video_agent = VideoAgent()
         self.video_review_agent = VideoReviewAgent()
-        self.storyboard_review_agent = StoryboardReviewAgent()
         self.merge_agent = MergeAgent()
         self.projects: Dict[str, VideoProject] = {}
         self._reference_generation_slots: Dict[str, Dict[str, List[Optional[GeneratedImage]]]] = {}
@@ -192,7 +193,6 @@ class MainAgent:
         self._reference_generation_tasks: Dict[str, asyncio.Task] = {}
         self._reference_asset_regeneration_tasks: Dict[str, asyncio.Task] = {}
         self._project_prepare_tasks: Dict[str, asyncio.Task] = {}
-        self._comic_pdf_tasks: Dict[str, asyncio.Task] = {}
 
     def _build_asset_group_name(self, project_id: str) -> str:
         return f"seedance-project-{project_id}"
@@ -223,10 +223,6 @@ class MainAgent:
             if generation_task and not generation_task.done():
                 generation_task.cancel()
 
-        comic_task = self._comic_pdf_tasks.pop(project_id, None)
-        if comic_task and not comic_task.done():
-            comic_task.cancel()
-
         for task_key, task in list(self._reference_asset_regeneration_tasks.items()):
             if not task_key.startswith(f"{project_id}:"):
                 continue
@@ -245,7 +241,6 @@ class MainAgent:
             if task_key == project_id or task_key.startswith(f"{project_id}:"):
                 self._reference_generation_tasks.pop(task_key, None)
         self._project_prepare_tasks.pop(project_id, None)
-        self._comic_pdf_tasks.pop(project_id, None)
         for task_key in list(self._reference_asset_regeneration_tasks.keys()):
             if task_key.startswith(f"{project_id}:"):
                 self._reference_asset_regeneration_tasks.pop(task_key, None)
@@ -651,7 +646,6 @@ class MainAgent:
         scene_limit = max(1, int(config.get("video_generation.reference_images.scene_max_count", 30)))
         character_count = len(list((getattr(getattr(project, "script", None), "characters", None) or [])[:character_limit]))
         scene_count = len(self._extract_scene_reference_definitions(getattr(project, "script", None), scene_limit))
-        scene_story_count = len(getattr(getattr(project, "script", None), "scenes", None) or [])
         variant_plan = self._plan_scene_variant_assets(project) if getattr(project, "script", None) else {"outfits": [], "scene_states": [], "key_actions": []}
         outfit_count = len(variant_plan.get("outfits", []))
         scene_state_count = len(variant_plan.get("scene_states", []))
@@ -662,8 +656,7 @@ class MainAgent:
             "character_outfits": outfit_count,
             "scene_states": scene_state_count,
             "key_actions": key_action_count,
-            "storyboards": scene_story_count,
-            "total": character_count + scene_count + outfit_count + scene_state_count + key_action_count + scene_story_count,
+            "total": character_count + scene_count + outfit_count + scene_state_count + key_action_count,
         }
 
     def _is_reference_library_ready_for_confirmation(self, project: VideoProject) -> bool:
@@ -671,7 +664,7 @@ class MainAgent:
         if session_slots is not None:
             return all(
                 image is not None
-                for key in ("characters", "scenes", "character_outfits", "scene_states", "key_actions", "storyboards")
+                for key in ("characters", "scenes", "character_outfits", "scene_states", "key_actions")
                 for image in session_slots.get(key, [])
             )
 
@@ -681,14 +674,12 @@ class MainAgent:
         actual_outfit_count = len(getattr(project, "character_outfit_images", []) or [])
         actual_scene_state_count = len(getattr(project, "scene_state_images", []) or [])
         actual_key_action_count = len(getattr(project, "key_action_reference_images", []) or [])
-        actual_storyboard_count = len(getattr(project, "storyboard_images", []) or [])
         return (
             actual_character_count >= expected["characters"]
             and actual_scene_count >= expected["scenes"]
             and actual_outfit_count >= expected["character_outfits"]
             and actual_scene_state_count >= expected["scene_states"]
             and actual_key_action_count >= expected["key_actions"]
-            and actual_storyboard_count >= expected["storyboards"]
         )
 
     def _reference_stage_has_category2(self, project: VideoProject) -> bool:
@@ -697,7 +688,7 @@ class MainAgent:
         return (expected["character_outfits"] + expected["scene_states"] + expected["key_actions"]) > 0
 
     def _is_reference_stage_ready(self, project: VideoProject, stage: str) -> bool:
-        """按子阶段判定是否就绪：category1=角色+场景；category2=装扮+状态；category3=故事版。"""
+        """按子阶段判定是否就绪：category1=角色+场景；category2=装扮+状态+关键动作。"""
         if stage == "category1":
             character_limit = max(1, int(config.get("video_generation.reference_images.character_max_count", 30)))
             scene_limit = max(1, int(config.get("video_generation.reference_images.scene_max_count", 30)))
@@ -752,16 +743,6 @@ class MainAgent:
                 and expected_scene_state_keys.issubset(actual_scene_state_keys)
                 and expected_key_action_keys.issubset(actual_key_action_keys)
             )
-        if stage == "category3":
-            expected_scene_numbers = {
-                int(getattr(scene, "scene_number", 0) or index + 1)
-                for index, scene in enumerate(getattr(getattr(project, "script", None), "scenes", None) or [])
-            }
-            actual_scene_numbers = {
-                int(getattr(image, "scene_number", 0) or 0)
-                for image in (getattr(project, "storyboard_images", []) or [])
-            }
-            return bool(expected_scene_numbers) and expected_scene_numbers.issubset(actual_scene_numbers)
         return self._is_reference_library_ready_for_confirmation(project)
 
     def _serialize_reference_images(
@@ -773,9 +754,7 @@ class MainAgent:
         serialized: List[Dict[str, Any]] = []
         for fallback_index, image in enumerate(images):
             item = image.model_dump()
-            if reference_type == "storyboard":
-                slot_index = max(0, int(getattr(image, "scene_number", 1) or 1) - 1)
-            elif reference_type in ("character_outfit", "scene_state", "key_action"):
+            if reference_type in ("character_outfit", "scene_state", "key_action"):
                 # 装扮图/布景状态图/关键动作参考图为去重复用列表，直接按顺序索引
                 slot_index = fallback_index
             else:
@@ -802,13 +781,6 @@ class MainAgent:
         for scene in getattr(getattr(project, "script", None), "scenes", None) or []:
             scene_number = max(1, int(getattr(scene, "scene_number", 1) or 1))
             base_assets = self._select_base_reference_assets_for_scene(project, scene)
-            storyboard = next(
-                (
-                    image for image in (getattr(project, "storyboard_images", []) or [])
-                    if int(getattr(image, "scene_number", 0) or 0) == scene_number
-                ),
-                None,
-            )
             key_action = self._find_key_action_asset_for_scene(project, scene_number)
             scene_feature_names: List[str] = []
             seen_scene_feature_keys = set()
@@ -844,10 +816,6 @@ class MainAgent:
                     {"name": key_action.name, "asset_id": key_action.asset_id, "url": key_action.url}
                     if key_action else None
                 ),
-                "storyboard": (
-                    {"name": storyboard.name, "asset_id": storyboard.asset_id, "url": storyboard.url}
-                    if storyboard else None
-                ),
             }
         return mappings
 
@@ -863,14 +831,12 @@ class MainAgent:
         outfit_images = list(getattr(project, "character_outfit_images", []) or [])
         scene_state_images = list(getattr(project, "scene_state_images", []) or [])
         key_action_images = list(getattr(project, "key_action_reference_images", []) or [])
-        storyboard_images = list(getattr(project, "storyboard_images", []) or [])
-        images = character_images + scene_images + outfit_images + scene_state_images + key_action_images + storyboard_images
+        images = character_images + scene_images + outfit_images + scene_state_images + key_action_images
         serialized_character_images = self._serialize_reference_images(project, character_images, "character")
         serialized_scene_images = self._serialize_reference_images(project, scene_images, "scene")
         serialized_outfit_images = self._serialize_reference_images(project, outfit_images, "character_outfit")
         serialized_scene_state_images = self._serialize_reference_images(project, scene_state_images, "scene_state")
         serialized_key_action_images = self._serialize_reference_images(project, key_action_images, "key_action")
-        serialized_storyboard_images = self._serialize_reference_images(project, storyboard_images, "storyboard")
         expected_counts = self._expected_reference_counts(project)
         resolved_message = message
         if resolved_message is None and include_default_message:
@@ -885,21 +851,18 @@ class MainAgent:
                 + serialized_outfit_images
                 + serialized_scene_state_images
                 + serialized_key_action_images
-                + serialized_storyboard_images
             ),
             "character_images": serialized_character_images,
             "scene_images": serialized_scene_images,
             "character_outfit_images": serialized_outfit_images,
             "scene_state_images": serialized_scene_state_images,
             "key_action_reference_images": serialized_key_action_images,
-            "storyboard_images": serialized_storyboard_images,
             "library": {
                 "characters": serialized_character_images,
                 "scenes": serialized_scene_images,
                 "character_outfits": serialized_outfit_images,
                 "scene_states": serialized_scene_state_images,
                 "key_actions": serialized_key_action_images,
-                "storyboards": serialized_storyboard_images,
             },
             "scene_reference_mappings": self._build_scene_reference_mappings(project),
             "ready_for_confirmation": self._is_reference_library_ready_for_confirmation(project),
@@ -912,7 +875,6 @@ class MainAgent:
             "expected_character_outfit_count": expected_counts["character_outfits"],
             "expected_scene_state_count": expected_counts["scene_states"],
             "expected_key_action_count": expected_counts["key_actions"],
-            "expected_storyboard_count": expected_counts["storyboards"],
             "message": resolved_message,
         }
 
@@ -921,14 +883,12 @@ class MainAgent:
         project: VideoProject,
         character_images: List[Optional[GeneratedImage]],
         scene_images: List[Optional[GeneratedImage]],
-        storyboard_images: List[Optional[GeneratedImage]],
         outfit_images: Optional[List[Optional[GeneratedImage]]] = None,
         scene_state_images: Optional[List[Optional[GeneratedImage]]] = None,
         key_action_images: Optional[List[Optional[GeneratedImage]]] = None,
     ) -> None:
         completed_character_images = [image for image in character_images if image is not None]
         completed_scene_images = [image for image in scene_images if image is not None]
-        completed_storyboards = [image for image in storyboard_images if image is not None]
         completed_outfit_images = [image for image in (outfit_images or []) if image is not None]
         completed_scene_state_images = [image for image in (scene_state_images or []) if image is not None]
         completed_key_action_images = [image for image in (key_action_images or []) if image is not None]
@@ -937,14 +897,12 @@ class MainAgent:
         project.character_outfit_images = completed_outfit_images
         project.scene_state_images = completed_scene_state_images
         project.key_action_reference_images = completed_key_action_images
-        project.storyboard_images = completed_storyboards
         project.reference_image_library = {
             "characters": completed_character_images,
             "scenes": completed_scene_images,
             "character_outfits": completed_outfit_images,
             "scene_states": completed_scene_state_images,
             "key_actions": completed_key_action_images,
-            "storyboards": completed_storyboards,
         }
         project.scene_reference_mappings = self._build_scene_reference_mappings(project)
         project.images = (
@@ -953,7 +911,6 @@ class MainAgent:
             + completed_outfit_images
             + completed_scene_state_images
             + completed_key_action_images
-            + completed_storyboards
         )
         project.reference_image = (
             project.character_reference_images[0]
@@ -961,7 +918,7 @@ class MainAgent:
             else (
                 project.scene_reference_images[0]
                 if project.scene_reference_images
-                else (project.storyboard_images[0] if project.storyboard_images else None)
+                else None
             )
         )
 
@@ -970,7 +927,6 @@ class MainAgent:
         project: VideoProject,
         character_count: int,
         scene_count: int,
-        storyboard_count: int,
         outfit_count: int = 0,
         scene_state_count: int = 0,
         key_action_count: int = 0,
@@ -981,7 +937,6 @@ class MainAgent:
             "character_outfits": [None] * max(0, outfit_count),
             "scene_states": [None] * max(0, scene_state_count),
             "key_actions": [None] * max(0, key_action_count),
-            "storyboards": [None] * max(0, storyboard_count),
         }
         self._reference_generation_slots[project.project_id] = slots
         self._hydrate_reference_generation_slots(project, slots)
@@ -995,8 +950,7 @@ class MainAgent:
         """Backfill generation slots from persisted project state.
 
         Stage retries and browser reconnects may create a fresh in-memory session while
-        some assets have already been generated and persisted on the project. Hydrating
-        prevents retrying the entire storyboard batch when only a subset is missing.
+        some assets have already been generated and persisted on the project.
         """
         def put(slot_name: str, index: int, image: GeneratedImage) -> None:
             slot = slots.get(slot_name, [])
@@ -1027,7 +981,9 @@ class MainAgent:
 
         for index, image in enumerate(getattr(project, "character_outfit_images", []) or []):
             variant_key = str(getattr(image, "variant_key", "") or "")
-            put("character_outfits", outfit_index_by_key.get(variant_key, index), image)
+            slot_index = outfit_index_by_key.get(variant_key)
+            if slot_index is not None:
+                put("character_outfits", slot_index, image)
 
         for index, image in enumerate(getattr(project, "scene_state_images", []) or []):
             variant_key = str(getattr(image, "variant_key", "") or "")
@@ -1036,10 +992,6 @@ class MainAgent:
         for index, image in enumerate(getattr(project, "key_action_reference_images", []) or []):
             variant_key = str(getattr(image, "variant_key", "") or "")
             put("key_actions", key_action_index_by_key.get(variant_key, index), image)
-
-        for image in getattr(project, "storyboard_images", []) or []:
-            index = int(getattr(image, "scene_number", 0) or 0) - 1
-            put("storyboards", index, image)
 
     def _get_reference_generation_session(
         self,
@@ -1052,7 +1004,6 @@ class MainAgent:
         project: VideoProject,
         character_count: int,
         scene_count: int,
-        storyboard_count: int,
         outfit_count: int = 0,
         scene_state_count: int = 0,
         key_action_count: int = 0,
@@ -1070,7 +1021,6 @@ class MainAgent:
                 existing,
                 character_count=character_count,
                 scene_count=scene_count,
-                storyboard_count=storyboard_count,
                 outfit_count=outfit_count,
                 scene_state_count=scene_state_count,
                 key_action_count=key_action_count,
@@ -1081,7 +1031,6 @@ class MainAgent:
             project,
             character_count=character_count,
             scene_count=scene_count,
-            storyboard_count=storyboard_count,
             outfit_count=outfit_count,
             scene_state_count=scene_state_count,
             key_action_count=key_action_count,
@@ -1092,7 +1041,6 @@ class MainAgent:
         slots: Dict[str, List[Optional[GeneratedImage]]],
         character_count: int,
         scene_count: int,
-        storyboard_count: int,
         outfit_count: int,
         scene_state_count: int,
         key_action_count: int,
@@ -1104,7 +1052,6 @@ class MainAgent:
             "character_outfits": max(0, outfit_count),
             "scene_states": max(0, scene_state_count),
             "key_actions": max(0, key_action_count),
-            "storyboards": max(0, storyboard_count),
         }
         for slot_name, target_len in expected.items():
             current = slots.get(slot_name)
@@ -1187,6 +1134,7 @@ class MainAgent:
         }
 
         outfit_tasks: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        outfit_tasks_by_character: Dict[str, List[Dict[str, Any]]] = {}
         scene_state_tasks: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         key_action_tasks: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         nsfw_active = self._nsfw_enhancement_active(project)
@@ -1201,8 +1149,9 @@ class MainAgent:
                     "scene_number": scene_number,
                 }
             outfits = getattr(scene, "character_outfits", None) or {}
+            canonical_scene_outfits: Dict[str, str] = {}
             for character_name, outfit in outfits.items():
-                outfit_desc = str(outfit or "").strip()
+                outfit_desc = stable_outfit_description(outfit)
                 if not outfit_desc:
                     continue
                 character_key = self._normalize_name_key(character_name)
@@ -1212,16 +1161,38 @@ class MainAgent:
                 default_clothing = self._normalize_name_key(getattr(character, "clothing", "") or "")
                 if self._normalize_name_key(outfit_desc) == default_clothing and default_clothing:
                     continue
+                equivalent_task = next(
+                    (
+                        task
+                        for task in outfit_tasks_by_character.get(character_key, [])
+                        if are_outfits_visually_equivalent(task["outfit"], outfit_desc)
+                    ),
+                    None,
+                )
+                if equivalent_task is not None:
+                    logger.info(
+                        "Reusing visually equivalent outfit variant: character=%s, outfit=%s, canonical=%s",
+                        character_name,
+                        outfit_desc,
+                        equivalent_task["outfit"],
+                    )
+                    canonical_scene_outfits[character_name] = equivalent_task["outfit"]
+                    continue
                 dedup_key = f"{character_key}::{self._normalize_name_key(outfit_desc)}"
                 if dedup_key in outfit_tasks:
+                    canonical_scene_outfits[character_name] = outfit_tasks[dedup_key]["outfit"]
                     continue
-                outfit_tasks[dedup_key] = {
+                task = {
                     "dedup_key": dedup_key,
                     "character": character,
                     "character_key": character_key,
                     "outfit": outfit_desc,
                     "scene_number": scene_number,
                 }
+                outfit_tasks[dedup_key] = task
+                outfit_tasks_by_character.setdefault(character_key, []).append(task)
+                canonical_scene_outfits[character_name] = outfit_desc
+            scene.character_outfits = canonical_scene_outfits
 
             scene_tod = str(getattr(scene, "time_of_day", "") or "").strip()
             scene_weather = str(getattr(scene, "weather", "") or "").strip()
@@ -1265,7 +1236,21 @@ class MainAgent:
         character_key: str,
         outfit_desc: str,
     ) -> Optional[GeneratedImage]:
-        dedup_key = f"{character_key}::{self._normalize_name_key(outfit_desc)}"
+        character_key = self._normalize_name_key(character_key)
+        matching_task = next(
+            (
+                task
+                for task in self._plan_scene_variant_assets(project).get("outfits", [])
+                if task["character_key"] == character_key
+                and are_outfits_visually_equivalent(task["outfit"], outfit_desc)
+            ),
+            None,
+        )
+        dedup_key = (
+            matching_task["dedup_key"]
+            if matching_task is not None
+            else f"{character_key}::{self._normalize_name_key(outfit_desc)}"
+        )
         for image in getattr(project, "character_outfit_images", []) or []:
             if getattr(image, "variant_key", None) == dedup_key:
                 return image
@@ -1411,16 +1396,6 @@ class MainAgent:
 
         return selected
 
-    def _get_scene_level_reference_asset(
-        self,
-        project: VideoProject,
-        scene_number: int,
-    ) -> Optional[GeneratedImage]:
-        for image in getattr(project, "storyboard_images", []) or []:
-            if int(getattr(image, "scene_number", 0) or 0) == scene_number:
-                return image
-        return None
-
     def _find_key_action_asset_for_scene(
         self,
         project: VideoProject,
@@ -1440,9 +1415,6 @@ class MainAgent:
         key_action_image = self._find_key_action_asset_for_scene(project, scene_number)
         if key_action_image is not None:
             selected.append(key_action_image)
-        scene_level_image = self._get_scene_level_reference_asset(project, scene_number)
-        if scene_level_image is not None:
-            selected.append(scene_level_image)
 
         deduped: List[GeneratedImage] = []
         seen_keys = set()
@@ -1709,7 +1681,6 @@ class MainAgent:
         if (
             getattr(project, "character_reference_images", None)
             or getattr(project, "scene_reference_images", None)
-            or getattr(project, "storyboard_images", None)
         ):
             return False
         return getattr(project, "current_step", "") == "script_generated"
@@ -1779,57 +1750,6 @@ class MainAgent:
             project.status = "failed"
             await self._update_progress(websocket, "error", 0, self._t(project, "error.generation_failed", error=str(e)))
             raise
-
-    def start_comic_pdf_generation(self, project: VideoProject, websocket=None) -> None:
-        """Start comic PDF generation once, without blocking video generation."""
-        self._raise_if_project_ended(project)
-        if getattr(project, "comic_pdf_url", None):
-            project.comic_pdf_status = "completed"
-            return
-
-        existing_task = self._comic_pdf_tasks.get(project.project_id)
-        if existing_task and not existing_task.done():
-            return
-
-        project.comic_pdf_status = "generating"
-        project.comic_pdf_error = None
-        self.save_project_state(project.project_id)
-
-        async def _run() -> None:
-            current_project = self.get_project(project.project_id)
-            if not current_project:
-                return
-            try:
-                pdf_url = await run_generation(comic_pdf_service.generate_and_upload, current_project)
-                current_project.comic_pdf_url = pdf_url
-                current_project.comic_pdf_status = "completed"
-                current_project.comic_pdf_error = None
-                self.save_project_state(current_project.project_id)
-                await self._send_agent_output(websocket, "comic_pdf_agent", {
-                    "status": "completed",
-                    "comic_pdf_url": pdf_url,
-                })
-                logger.info(f"Comic PDF generated for project {current_project.project_id}: {pdf_url}")
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                current_project.comic_pdf_status = "failed"
-                current_project.comic_pdf_error = str(e)
-                self.save_project_state(current_project.project_id)
-                await self._send_agent_output(websocket, "comic_pdf_agent", {
-                    "status": "failed",
-                    "error": str(e),
-                })
-                logger.error(f"Comic PDF generation failed for project {current_project.project_id}: {str(e)}")
-            finally:
-                task = self._comic_pdf_tasks.get(project.project_id)
-                if task is asyncio.current_task():
-                    self._comic_pdf_tasks.pop(project.project_id, None)
-
-        self._comic_pdf_tasks[project.project_id] = asyncio.create_task(
-            _run(),
-            name=f"comic-pdf:{project.project_id}",
-        )
 
     async def continue_generate_after_reference_confirmation(
         self,
@@ -1901,11 +1821,9 @@ class MainAgent:
                 + list(getattr(project, "character_outfit_images", []) or [])
                 + list(getattr(project, "scene_state_images", []) or [])
                 + list(getattr(project, "key_action_reference_images", []) or [])
-                + list(getattr(project, "storyboard_images", []) or [])
             )
             project.current_step = "images_generated"
             self._ensure_video_flow_state(project, review_mode=review_mode, reset=not resume)
-            self.start_comic_pdf_generation(project, websocket=websocket)
 
             # 新流程：逐个生成分镜视频并审核
             num_scenes = len(project.script.scenes)
@@ -2098,7 +2016,7 @@ class MainAgent:
         按视频生成并发数并行生成+审核，全部完成后返回。
 
         每个分镜仍复用 `_generate_and_review_video_with_retries`，但传入
-        `use_previous_video=False`，因此参考素材只包含角色图 + 场景图 + 该分镜 storyboard，
+        `use_previous_video=False`，因此参考素材只包含角色图、场景图与关键动作参考图，
         不再串联前一分镜视频，从而可以并行生成以提高速度。
         """
         video_workers = int(config.get("generation.concurrency.video_workers", 0) or 0)
@@ -2770,7 +2688,6 @@ class MainAgent:
         project.character_outfit_images = []
         project.scene_state_images = []
         project.key_action_reference_images = []
-        project.storyboard_images = []
         project.reference_image_library = {}
         project.scene_reference_mappings = {}
         project.videos = []
@@ -2790,9 +2707,8 @@ class MainAgent:
 
         stage 控制惰性分阶段生成：
         - "category1": 仅角色图库 + 布景参考图库
-        - "category2": 仅角色装扮图 + 布景状态图（无差异则跳过）
-        - "category3": 仅各分镜故事版
-        - "all": 三类一次性生成（兼容旧 execute_images_step 路径）
+        - "category2": 仅角色装扮图 + 布景状态图 + 关键动作参考图（无差异则跳过）
+        - "all": 两类一次性生成（兼容旧 execute_images_step 路径）
         """
         self._raise_if_project_ended(project)
         logger.info(f"Step 1: Generating reference image library (stage={stage}) for project {project.project_id}")
@@ -2835,7 +2751,6 @@ class MainAgent:
             project,
             character_count=len(target_characters),
             scene_count=len(scene_definitions),
-            storyboard_count=len(getattr(project.script, "scenes", None) or []),
             outfit_count=len(outfit_tasks_plan),
             scene_state_count=len(scene_state_tasks_plan),
             key_action_count=len(key_action_tasks_plan),
@@ -2845,7 +2760,6 @@ class MainAgent:
         generated_outfit_images = session_slots["character_outfits"]
         generated_scene_state_images = session_slots["scene_states"]
         generated_key_action_images = session_slots["key_actions"]
-        generated_storyboard_images = session_slots["storyboards"]
         semaphore = asyncio.Semaphore(reference_max_concurrency)
         progress_lock = asyncio.Lock()
 
@@ -2854,7 +2768,6 @@ class MainAgent:
                 project,
                 generated_character_images,
                 generated_scene_images,
-                generated_storyboard_images,
                 outfit_images=generated_outfit_images,
                 scene_state_images=generated_scene_state_images,
                 key_action_images=generated_key_action_images,
@@ -2874,7 +2787,7 @@ class MainAgent:
                 "key_action": generated_key_action_images,
             }
             async with progress_lock:
-                target_slot = slot_by_category.get(category, generated_storyboard_images)
+                target_slot = slot_by_category[category]
                 # 防御性兜底：若索引因计划变更越界，扩容补 None 后再写入，避免整批失败。
                 if index >= len(target_slot):
                     target_slot.extend([None] * (index + 1 - len(target_slot)))
@@ -3054,39 +2967,8 @@ class MainAgent:
                 stored.variant_key = task["dedup_key"]
             await finalize_generated_image("key_action", index, stored)
 
-        async def generate_storyboard_job(index: int, scene) -> None:
-            self._raise_if_project_ended(project)
-            if index < len(generated_storyboard_images) and generated_storyboard_images[index] is not None:
-                logger.info(f"Skipping existing storyboard slot {index + 1} for project {project.project_id}")
-                return
-            base_reference_images = self._select_base_reference_assets_for_scene(project, scene)
-            key_action_image = self._find_key_action_asset_for_scene(
-                project,
-                max(1, int(getattr(scene, "scene_number", index + 1) or index + 1)),
-            )
-            if key_action_image is not None:
-                base_reference_images.append(key_action_image)
-            async with semaphore:
-                storyboard = await self._generate_storyboard_with_review(
-                    project=project,
-                    scene=scene,
-                    reference_images=base_reference_images,
-                    user_style_info=user_style_info,
-                    aspect_ratio=aspect_ratio,
-                    scene_number=index + 1,
-                )
-                stored_storyboard = await self._store_reference_asset_async(
-                    project,
-                    storyboard,
-                    "storyboard",
-                    storyboard.name or f"scene_{index + 1:02d}_storyboard",
-                    index,
-                )
-            await finalize_generated_image("storyboard", index, stored_storyboard)
-
         run_category1 = stage in ("all", "category1")
         run_category2 = stage in ("all", "category2")
-        run_category3 = stage in ("all", "category3")
 
         async def gather_or_raise(stage_name: str, pending_tasks: List[asyncio.Task]) -> None:
             if not pending_tasks:
@@ -3166,35 +3048,14 @@ class MainAgent:
                     )
                     _sync_all()
 
-            if run_category3:
-                # 所有角色图（含装扮图）+ 场景图（含状态图）生成完成后，再逐个分镜生成 9 宫格 storyboard。
-                # 多个分镜的 storyboard 并行生成，并发数由参考图库配置的 max_concurrency（semaphore）控制。
-                scenes = list(getattr(project.script, "scenes", None) or [])
-                storyboard_tasks = [
-                    asyncio.create_task(generate_storyboard_job(index, scene))
-                    for index, scene in enumerate(scenes)
-                    if not (index < len(generated_storyboard_images) and generated_storyboard_images[index] is not None)
-                ]
-                logger.info(
-                    f"Storyboard generation stage for project {project.project_id}: "
-                    f"total={len(scenes)}, pending={len(storyboard_tasks)}, "
-                    f"skipped={len(scenes) - len(storyboard_tasks)}, max_concurrency={reference_max_concurrency}"
-                )
-                if storyboard_tasks:
-                    started_at = time.monotonic()
-                    await gather_or_raise("category3", storyboard_tasks)
-                    logger.info(
-                        f"Storyboard generation stage completed for project {project.project_id}: "
-                        f"generated={len(storyboard_tasks)}, elapsed={time.monotonic() - started_at:.2f}s"
-                    )
-
             _sync_all()
 
             return project.reference_image
         finally:
-            # 分阶段生成时，仅在 category3（或旧 all 路径）完成后才结束 session，
-            # 以保住 category1/category2 之间单张重生成所需的 session_slots 上下文。
-            if stage in ("all", "category3"):
+            # 最后一个实际参考图阶段完成后结束 session；无分类2时 category1 即为终点。
+            if stage in ("all", "category2") or (
+                stage == "category1" and not self._reference_stage_has_category2(project)
+            ):
                 self._finish_reference_generation_session(project)
 
     def _reset_reference_library_state(self, project: VideoProject) -> None:
@@ -3203,7 +3064,6 @@ class MainAgent:
         project.character_outfit_images = []
         project.scene_state_images = []
         project.key_action_reference_images = []
-        project.storyboard_images = []
         project.reference_image_library = {}
         project.scene_reference_mappings = {}
         project.images = []
@@ -3269,11 +3129,11 @@ class MainAgent:
         stage: str,
         progress_callback: Optional[Callable[[VideoProject], Awaitable[None]]] = None,
     ) -> GeneratedImage:
-        """分阶段生成参考图（category1/category2/category3），含自动重试。
+        """分阶段生成参考图（category1/category2），含自动重试。
 
         - 分阶段重试不清空已成功图片，只幂等重跑本阶段缺失槽位。
         - 幂等表 key 使用 `f"{project_id}:{stage}"`，避免不同阶段互相 shield。
-        - session 仅在 category3 完成后清理（见 `_generate_reference_image` finally）。
+        - session 在最后一个实际参考图阶段完成后清理（见 `_generate_reference_image` finally）。
         """
         self._raise_if_project_ended(project)
         await self.ensure_project_prepared(project.project_id)
@@ -3290,7 +3150,6 @@ class MainAgent:
                 project.reference_image = (
                     (project.character_reference_images[0] if project.character_reference_images else None)
                     or (project.scene_reference_images[0] if project.scene_reference_images else None)
-                    or (project.storyboard_images[0] if project.storyboard_images else None)
                 )
             if project.reference_image:
                 return project.reference_image
@@ -3475,7 +3334,6 @@ class MainAgent:
                     project,
                     session_slots["characters"],
                     session_slots["scenes"],
-                    session_slots.get("storyboards", []),
                     outfit_images=session_slots.get("character_outfits", []),
                     scene_state_images=session_slots.get("scene_states", []),
                     key_action_images=session_slots.get("key_actions", []),
@@ -3493,7 +3351,6 @@ class MainAgent:
                     + list(getattr(project, "character_outfit_images", []) or [])
                     + list(getattr(project, "scene_state_images", []) or [])
                     + list(getattr(project, "key_action_reference_images", []) or [])
-                    + list(getattr(project, "storyboard_images", []) or [])
                 )
                 project.reference_image = (
                     project.character_reference_images[0]
@@ -3501,7 +3358,7 @@ class MainAgent:
                     else (
                         project.scene_reference_images[0]
                         if project.scene_reference_images
-                        else (project.storyboard_images[0] if project.storyboard_images else None)
+                        else None
                     )
                 )
             return stored
@@ -3682,7 +3539,6 @@ class MainAgent:
                 project,
                 list(getattr(project, "character_reference_images", []) or []),
                 list(getattr(project, "scene_reference_images", []) or []),
-                list(getattr(project, "storyboard_images", []) or []),
                 outfit_images=outfit_images,
                 scene_state_images=scene_state_images,
                 key_action_images=key_action_images,
@@ -3692,183 +3548,6 @@ class MainAgent:
         regeneration_task = asyncio.create_task(
             run_regeneration(),
             name=f"variant-regeneration:{task_key}",
-        )
-        self._reference_asset_regeneration_tasks[task_key] = regeneration_task
-        try:
-            return await asyncio.shield(regeneration_task)
-        finally:
-            if self._reference_asset_regeneration_tasks.get(task_key) is regeneration_task:
-                self._reference_asset_regeneration_tasks.pop(task_key, None)
-
-    def _build_character_gender_map(self, project: VideoProject) -> Dict[str, str]:
-        """构建 角色名 -> 性别 映射，供故事版审核判断性别是否画错。"""
-        gender_map: Dict[str, str] = {}
-        for character in getattr(getattr(project, "script", None), "characters", None) or []:
-            name = str(getattr(character, "name", "") or "").strip()
-            gender = str(getattr(character, "gender", "") or "").strip()
-            if name:
-                gender_map[name] = gender
-        return gender_map
-
-    async def _generate_storyboard_with_review(
-        self,
-        project: VideoProject,
-        scene,
-        reference_images: List[GeneratedImage],
-        user_style_info: Optional[str],
-        aspect_ratio: Optional[str],
-        websocket=None,
-        scene_number: Optional[int] = None,
-    ) -> GeneratedImage:
-        """生成单个分镜的 9 宫格故事版，并按 3 条件自动审核 + 自动重生成。
-
-        审核 3 条件（任一不满足即重生成）：白描线稿多宫格 / 同一角色不重复且肢体正常 / 性别正确。
-        重生成次数上限参考视频重试逻辑，由 `storyboard_review.max_retries` 控制。
-        """
-        review_enabled = bool(config.get('storyboard_review.enabled', True))
-        review_mode = str(config.get('storyboard_review.default_mode', 'auto') or 'auto').strip().lower()
-        max_retries = max(0, int(config.get('storyboard_review.max_retries', 2)))
-        # 总生成次数 = 首次 + 最多 max_retries 次重生成
-        max_attempts = max_retries + 1
-
-        project_language = self._project_language(project)
-        gender_map = self._build_character_gender_map(project)
-        characters_present = list(getattr(scene, "characters_present", None) or [])
-        scene_desc = str(getattr(scene, "description", "") or "")
-        scene_no = int(scene_number if scene_number is not None else (getattr(scene, "scene_number", 0) or 0))
-
-        generated: Optional[GeneratedImage] = None
-        for attempt in range(1, max_attempts + 1):
-            self._raise_if_project_ended(project)
-            generated = await run_generation(
-                self.image_agent.generate_scene_storyboard_image,
-                scene=scene,
-                script=project.script,
-                reference_images=reference_images,
-                user_style_info=user_style_info,
-                aspect_ratio=aspect_ratio,
-            )
-
-            if not review_enabled or review_mode != "auto":
-                return generated
-
-            self._raise_if_project_ended(project)
-            approved, feedback = await run_generation(
-                self.storyboard_review_agent.review_storyboard,
-                image_url=generated.url,
-                scene_description=scene_desc,
-                characters_present=characters_present,
-                character_gender_map=gender_map,
-                output_language=project_language,
-            )
-            logger.info(
-                f"[SB_REVIEW] Scene {scene_no} storyboard review attempt {attempt}/{max_attempts}: "
-                f"approved={approved}"
-            )
-            if websocket is not None:
-                await self._send_agent_output(websocket, "storyboard_review_agent", {
-                    "scene_number": scene_no,
-                    "attempt": attempt,
-                    "max_attempts": max_attempts,
-                    "approved": bool(approved),
-                    "feedback": feedback,
-                })
-
-            if approved or attempt >= max_attempts:
-                if not approved:
-                    logger.warning(
-                        f"[SB_REVIEW] Scene {scene_no} storyboard still not approved after "
-                        f"{max_attempts} attempts, keeping last result"
-                    )
-                return generated
-            logger.info(f"[SB_REVIEW] Scene {scene_no} storyboard rejected, regenerating (attempt {attempt + 1})")
-
-        return generated
-
-    async def regenerate_storyboard_asset(
-        self,
-        project: VideoProject,
-        scene_number: int,
-        feedback: str = "用户要求重新生成",
-    ) -> GeneratedImage:
-        """重新生成指定分镜的 9 宫格故事版图片（参考该分镜的角色图 + 场景图 + 分镜内容）。"""
-        self._raise_if_project_ended(project)
-        scene_number = int(scene_number or 0)
-        scenes = list(getattr(getattr(project, "script", None), "scenes", None) or [])
-        target_scene = next(
-            (
-                scene for scene in scenes
-                if int(getattr(scene, "scene_number", 0) or 0) == scene_number
-            ),
-            None,
-        )
-        if target_scene is None and 1 <= scene_number <= len(scenes):
-            target_scene = scenes[scene_number - 1]
-        if target_scene is None:
-            raise ValueError(
-                self._t(
-                    project,
-                    "error.reference_asset_not_found",
-                    reference_type="storyboard",
-                    name=str(scene_number),
-                )
-            )
-
-        task_key = self._build_reference_asset_task_key(project.project_id, "storyboard", str(scene_number))
-        active_task = self._reference_asset_regeneration_tasks.get(task_key)
-        if active_task and not active_task.done():
-            return await asyncio.shield(active_task)
-
-        async def run_regeneration() -> GeneratedImage:
-            self._raise_if_project_ended(project)
-            index = scene_number - 1 if scene_number >= 1 else 0
-            base_reference_images = self._select_base_reference_assets_for_scene(project, target_scene)
-            key_action_image = self._find_key_action_asset_for_scene(project, scene_number)
-            if key_action_image is not None:
-                base_reference_images.append(key_action_image)
-            user_style_info = getattr(project, "combined_input", None)
-            aspect_ratio = getattr(project, "aspect_ratio", None)
-
-            generated = await self._generate_storyboard_with_review(
-                project=project,
-                scene=target_scene,
-                reference_images=base_reference_images,
-                user_style_info=user_style_info,
-                aspect_ratio=aspect_ratio,
-                scene_number=scene_number,
-            )
-            stored = await self._store_reference_asset_async(
-                project,
-                generated,
-                "storyboard",
-                generated.name or f"scene_{index + 1:02d}_storyboard",
-                index,
-            )
-
-            # 用新故事版替换现有列表中同分镜的条目。
-            storyboards = list(getattr(project, "storyboard_images", []) or [])
-            replaced = False
-            for i, image in enumerate(storyboards):
-                if int(getattr(image, "scene_number", 0) or 0) == scene_number:
-                    storyboards[i] = stored
-                    replaced = True
-                    break
-            if not replaced:
-                storyboards.append(stored)
-            self._sync_reference_library_state(
-                project,
-                list(getattr(project, "character_reference_images", []) or []),
-                list(getattr(project, "scene_reference_images", []) or []),
-                storyboards,
-                outfit_images=list(getattr(project, "character_outfit_images", []) or []),
-                scene_state_images=list(getattr(project, "scene_state_images", []) or []),
-                key_action_images=list(getattr(project, "key_action_reference_images", []) or []),
-            )
-            return stored
-
-        regeneration_task = asyncio.create_task(
-            run_regeneration(),
-            name=f"storyboard-regeneration:{task_key}",
         )
         self._reference_asset_regeneration_tasks[task_key] = regeneration_task
         try:

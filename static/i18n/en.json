@@ -17,7 +17,7 @@
     "tipTitle": "Tip:",
     "tipText": "You can add instructions like: \"dynamic camera composition, narration only, epic background music, ink wash style, 720p, 9:16, 30 seconds\"",
     "quickCommandsTitle": "Quick commands:",
-    "quickCommandsText": "\"autorun\" / \"regenerate\" / \"redo\" / \"regen\" (current step) / \"rollback-script\" / \"rollback-storyboard-image\" / \"go back to script\""
+    "quickCommandsText": "\"autorun\" / \"regenerate\" / \"redo\" / \"regen\" (current step) / \"rollback-script\" / \"go back to script\""
   },
   "input": {
     "uploadImage": "Upload image",
@@ -67,11 +67,8 @@
     "processing": "Processing",
     "review": "Review",
     "video": "Video",
-    "storyboardImage": "Storyboard",
-    "storyboardImageTitle": "🧩 Storyboard Images",
     "referenceCategory1": "Character gallery & scene reference gallery",
-    "referenceCategory2": "Character outfit, backdrop state & key action reference images",
-    "referenceCategory3": "Storyboard images"
+    "referenceCategory2": "Character outfit, backdrop state & key action reference images"
   },
   "status": {
     "processing": "Processing...",
@@ -91,16 +88,14 @@
   "loading": {
     "script": "Generating script...",
     "referenceImage": "Generating reference image...",
-    "videos": "Generating storyboard videos...",
-    "merge": "Merging final video...",
-    "storyboardImage": "Generating storyboard images..."
+    "videos": "Generating scene videos...",
+    "merge": "Merging final video..."
   },
   "actions": {
     "regenerate": "🔄 Regenerate",
     "skip": "⏭️ Skip",
     "download": "⬇️ Download",
     "downloadVideo": "⬇️ Download Video",
-    "downloadPdf": "⬇️ Download PDF",
     "newProject": "🆕 New Project",
     "exitAutoRun": "Exit Auto Mode",
     "endProject": "End Project",
@@ -121,7 +116,7 @@
     "referenceImageUsingOriginal": "This reference item uses the uploaded original image directly, so it cannot be regenerated.",
     "endFrame": "End Frame",
     "scene": "Scene {scene}",
-    "generatedVideos": "🎬 Storyboard Videos",
+    "generatedVideos": "🎬 Scene Videos",
     "waitingGenerate": "Waiting to generate...",
     "waitingGenerateReview": "⏳ Waiting to generate",
     "reviewing": "⏳ Reviewing...",
@@ -162,7 +157,7 @@
     "mood": "😊 Mood:",
     "camera": "📷 Camera:",
     "charactersPresent": "👥 Characters Present:",
-    "noSceneData": "No storyboard data",
+    "noSceneData": "No scene data",
     "scriptCardTitle": "📖 Script: {title}",
     "style": "🎨 Style:",
     "era": "🕰️ Era:",
@@ -173,8 +168,8 @@
     "seconds": "{count}s",
     "countUnit": "{count}",
     "mergeTitle": "🎬 Merging video...",
-    "mergeDescription": "All storyboard videos are ready. Final merging is in progress. The progress and spinner are shown in the bottom status bar on the right.",
-    "mergeStatusBarHint": "All storyboard videos are ready. Please check the bottom-right status bar for the live merge progress.",
+    "mergeDescription": "All scene videos are ready. Final merging is in progress. The progress and spinner are shown in the bottom status bar on the right.",
+    "mergeStatusBarHint": "All scene videos are ready. Please check the bottom-right status bar for the live merge progress.",
     "finalVideoTitle": "🎉 Video Generation Complete!",
     "browserNoVideo": "Your browser does not support video playback",
     "countdown": "⏱ Countdown: {count}s",
@@ -189,11 +184,6 @@
     "referenceNameSceneDefault": "Scene {index}",
     "referenceLibraryCharacters": "Character Reference Library",
     "referenceLibraryScenes": "Backdrop Reference Library",
-    "storyboardLibrary": "🎞️ Scene Storyboards",
-    "comicPdfTitle": "📄 Comic PDF",
-    "comicPdfGenerating": "Generating the comic PDF...",
-    "comicPdfReady": "The comic PDF is ready to download.",
-    "comicPdfFailed": "Comic PDF generation failed.",
     "variantAssetsLibrary": "🎭 Scene Outfits & Backdrop States",
     "variantOutfits": "Character Outfit Images",
     "variantSceneStates": "Backdrop State Images",
@@ -203,10 +193,7 @@
     "keyActionReferenceImage": "Key Action Reference",
     "sceneSettings": "🏞️ Backdrop Settings ({count})",
     "sceneUsage": "🏷️ Backdrop Used:",
-    "referenceLibraryUnified": "🎨 Unified Reference Library",
-    "generatedStoryboardImages": "🧩 Storyboard Images",
-    "storyboardImageRegeneratingText": "Regenerating storyboard images...",
-    "storyboardImage": "Storyboard image"
+    "referenceLibraryUnified": "🎨 Unified Reference Library"
   },
   "messages": {
     "invalidScriptData": "❌ Invalid script data",
@@ -217,7 +204,7 @@
     "audioRecognitionFailed": "❌ Speech recognition failed: {error}",
     "audioProcessingFailed": "❌ Speech-to-text failed. Check the recording format or network and try again.",
     "imageUploadFailed": "Image upload failed",
-    "referenceNameRequired": "Please enter names for the following uploaded images before continuing: {items}",
+    "referenceNameRequired": "Please enter a name for every uploaded character and backdrop image before continuing.",
     "referenceImageLimit": "You can upload up to {count} reference images.",
     "characterReferenceLimit": "You can upload up to {count} character reference images.",
     "sceneReferenceLimit": "You can upload up to {count} main scene reference images.",
@@ -237,15 +224,14 @@
     "allStepsCompleted": "✅ All steps are complete!",
     "allVideosCompleted": "🎉 Video generation is fully complete!",
     "autoEnterNext": "Automatically entering next step: {step}...",
-    "autoEnterNextNewFlow": "Automatically entering next step: {step}... (new flow: generate and review scene by scene)",
+    "autoEnterNextNewFlow": "Automatically entering next step: {step}... (scene generation + review)",
     "autoEnterNextReferenceStage": "Automatically entering next stage: {stage}...",
     "referenceCategory1Complete": "🎨 Character gallery and scene reference gallery are ready!\n\nType in the chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - proceed to the next stage\n• \"regenerate\" / \"redo\" / \"regen\" - remake this stage\nor click \"Regenerate\" on any single image to fine-tune it",
     "referenceCategory2Complete": "🎨 Character outfit images, backdrop state images, and key action reference images are ready!\n\nType in the chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - proceed to the next stage\n• \"regenerate\" / \"redo\" / \"regen\" - remake this stage\nor click \"Regenerate\" on any single image to fine-tune it",
-    "referenceCategory3Complete": "🧩 Storyboard images are ready!\n\nType in the chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - proceed to the next step: 🎬 Video generation\n• \"regenerate\" / \"redo\" / \"regen\" - remake this stage\nor click \"Regenerate\" on any single image to fine-tune it",
     "exitAutoRun": "⛔ Auto mode exited.\n\nEnter in chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - continue\n• \"regenerate\" / \"redo\" / \"regen\" - regenerate current step",
     "exitAutoRunStatus": "Auto mode exited. Enter a command in chat to continue",
     "scriptComplete": "📖 Script generation complete!\n\nEnter in chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - next step: 🎨 Reference image\n• \"regenerate\" / \"redo\" / \"regen\" - regenerate 📖 Script generation",
-    "referenceComplete": "🎨 Reference image generation complete!\n\nEnter in chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - next step: 🧩 Storyboard images\n• \"regenerate\" / \"redo\" / \"regen\" - regenerate 🎨 Reference image",
+    "referenceComplete": "🎨 Reference image generation complete!\n\nEnter in chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - next step: 🎬 Scene video generation\n• \"regenerate\" / \"redo\" / \"regen\" - regenerate 🎨 Reference image",
     "videosComplete": "🎬 Video generation complete!\n\nEnter in chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - next step: 🎥 Video merge\n• \"regenerate\" / \"redo\" / \"regen\" - regenerate 🎬 Video generation",
     "itemRegeneratedSuccess": "✅ {label} regenerated!",
     "createProjectFailedRetry": "❌ Project creation failed, please try again",
@@ -254,17 +240,14 @@
     "rollbackSuccess": "✅ Rolled back to step \"{step}\" successfully.\n\nRegenerating...",
     "rollbackFailed": "❌ Rollback failed: {error}",
     "rollbackStarting": "⏪ Rolling back to step \"{step}\"...\n\nAll progress from this step onward will be reset and regenerated.",
-    "rollbackInvalidStep": "❌ Step \"{step}\" does not exist.\n\nAvailable steps: Script, Reference Image, Storyboard Image, Storyboard Video, Merge",
+    "rollbackInvalidStep": "❌ Step \"{step}\" does not exist.\n\nAvailable steps: Script, Reference Image, Scene Video, Merge",
     "rollbackNoStartedStep": "❌ No step has started yet, so rollback is not available.\n\nPlease enter \"start\" or \"autorun\" first.",
     "rollbackStepNotCompleted": "❌ Cannot roll back to \"{step}\" because that step has not been completed.\n\nCompleted steps: {completedSteps}\nYou can only roll back to a completed step.",
     "rollbackRequestFailed": "❌ Rollback request failed, please try again",
     "genericStepCompleteStatus": "{step} is complete! Enter \"continue\" or \"next\" in chat to proceed to {nextStep}, or enter \"regenerate\", \"redo\", or \"regen\" to redo it.",
     "genericStepComplete": "{step} is complete!\n\nEnter in chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - next step: {nextStep}\n• \"regenerate\" / \"redo\" / \"regen\" - redo {step}",
     "referenceAssetRegeneratedSuccess": "✅ Reference image \"{name}\" regenerated!",
-    "storyboardComplete": "🧩 Storyboard images complete!\n\nEnter in chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - next step: 🎬 Video generation (new flow: generate and review scene by scene)\n• \"regenerate\" / \"redo\" / \"regen\" - regenerate 🧩 Storyboard images",
-    "storyboardRegeneratedSuccess": "✅ Storyboard image for scene {scene} regenerated!",
     "httpErrorStatus": "HTTP request failed with status {status}",
-    "referenceNameRequired": "Please enter a name for every uploaded character and backdrop image before continuing.",
     "projectEndConfirm": "Ending the project will delete this project's temporary TOS files, virtual asset library assets, and asset group. Do you want to continue?",
     "projectEnding": "Ending the project and cleaning resources...",
     "projectEnded": "✅ The project has been ended and resource cleanup has started.",
@@ -279,9 +262,9 @@
   },
   "message": {
     "reference": {
-      "confirm_prompt": "The reference library has been generated. Please confirm whether it is satisfactory. If it is, enter 'confirm' or click Continue to generate storyboard images.",
+      "confirm_prompt": "The reference library has been generated. Please confirm whether it is satisfactory. If it is, enter 'confirm' or click Continue to generate scene videos.",
       "regenerated_confirm_prompt": "The reference library has been regenerated. Please confirm whether it is satisfactory.",
-      "confirmed_start_videos": "Reference library confirmed. Starting storyboard video generation..."
+      "confirmed_start_videos": "Reference library confirmed. Starting scene video generation..."
     },
     "direct_start_script": "Your request has been received. Starting script generation directly...",
     "script": {
@@ -316,7 +299,7 @@
       "complete": "📖 Script generation is complete. Continue to image generation?"
     },
     "reference": {
-      "complete": "🎨 The reference library is ready. Please confirm it before continuing with storyboard image generation."
+      "complete": "🎨 The reference library is ready. Please confirm it before continuing with scene video generation."
     },
     "videos": {
       "complete": "🎬 Video generation is complete. Merge the final video now?"
@@ -342,7 +325,7 @@
     "missing_project_or_target_step": "Missing project_id or target_step",
     "reference_regeneration_locked": "Video generation has already started, so reference image regeneration is locked.",
     "reference_regeneration_locked_original": "The current reference image comes from Use Original Image, so reference image regeneration is not available.",
-    "no_scenes_remaining_after_skip": "All scenes have been skipped. There are no remaining storyboard videos to generate or merge."
+    "no_scenes_remaining_after_skip": "All scenes have been skipped. There are no remaining scene videos to generate or merge."
   },
   "review": {
     "output_language_rule": "The feedback field must be written in {language}; JSON field names must remain in English."

@@ -53,7 +53,7 @@ models:
     endpoint: "${MAIN_AGENT_ENDPOINT}"
     api_key: "${MAIN_AGENT_API_KEY}"
     temperature: 0.7
-    max_tokens: 32000
+    max_tokens: 120000
 
   # 剧本分镜 Agent：负责剧本、角色、分镜脚本生成
   # 对应代码：app/agents/script_agent.py
@@ -61,7 +61,7 @@ models:
     endpoint: "${SCRIPT_ENDPOINT}"
     api_key: "${SCRIPT_API_KEY}"
     temperature: 0.9
-    max_tokens: 32000
+    max_tokens: 120000
 
   # 生图模型：用于参考图生成与参考图重新生成
   # 对应代码：app/agents/image_agent.py
@@ -88,15 +88,6 @@ models:
     temperature: 0.3
     max_tokens: 16000
 
-  # 故事版审核模型：用于分镜故事版（白描线稿多宫格）图像理解审核
-  # 对应代码：app/agents/storyboard_review_agent.py
-  # 未单独配置 STORYBOARD_REVIEW_ENDPOINT 时，自动回落复用 video_review 的多模态端点
-  storyboard_review:
-    endpoint: "${STORYBOARD_REVIEW_ENDPOINT:-}"
-    api_key: "${STORYBOARD_REVIEW_API_KEY:-}"
-    temperature: 0.3
-    max_tokens: 16000
-
   # ASR 资源配置：用于音频转文字
   # 对应代码：app/services/asr_service.py
   asr:
@@ -119,10 +110,10 @@ tos:
 
 # 视频生成配置
 video_generation:
-  # 视频总时长（秒）- 默认值 60，最大值 600
+  # 视频总时长（秒）- 默认值 60，最大值 1200
   total_duration: 60
   total_duration_min: 30
-  total_duration_max: 600
+  total_duration_max: 1200
   # 每个分镜时长范围（秒）- 最短 10，最长 30（适配 seedance-2.5）
   scene_duration:
     min: 10
@@ -170,24 +161,11 @@ video_review:
     physical-laws: 0.30                # 物理世界规律
     script_semantic_consistency: 0.30  # 与分镜脚本意义上一致
 
-# 故事版审核配置（白描线稿多宫格图片审核）
-# 对应代码：app/agents/storyboard_review_agent.py + main_agent._generate_storyboard_with_review
-storyboard_review:
-  # 是否启用故事版自动审核
-  enabled: true
-  # 默认审核模式：auto=审核不通过自动重生成, manual=不自动审核
-  default_mode: "auto"
-  # 审核不通过时的最大重生成次数（总生成次数 = 首次 + max_retries）
-  max_retries: 2
-  # 审核请求本身的失败重试次数与间隔（针对限流/网络错误）
-  request_retry_count: 2
-  request_retry_delay_seconds: 2
-
 # 剧本生成约束
 script_generation:
   max_characters: 30         # 剧本中的主要人物/角色最多 30 人
   max_setting_definitions: 30  # 剧本中的布景设定最多 30 个
-  max_storyboard_scenes: 50  # 剧本分镜数量上限
+  max_storyboard_scenes: 80  # 剧本分镜数量上限
 
 # 生成策略配置
 generation:

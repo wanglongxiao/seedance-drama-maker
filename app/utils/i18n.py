@@ -96,9 +96,9 @@ BACKEND_TRANSLATIONS = {
     "message.reference.confirmed_start_videos": {
         "zh-CN": "已确认参考图库，正在开始生成分镜视频...",
         "zh-TW": "已確認參考圖庫，正在開始生成分鏡影片...",
-        "en": "Reference library confirmed. Starting storyboard video generation...",
-        "ja": "参照画像ライブラリを確認しました。絵コンテ動画の生成を開始しています...",
-        "es": "La biblioteca de referencias se confirmó. Iniciando la generación de videos del storyboard...",
+        "en": "Reference library confirmed. Starting scene video generation...",
+        "ja": "参照画像ライブラリを確認しました。シーン動画の生成を開始しています...",
+        "es": "La biblioteca de referencias se confirmó. Iniciando la generación de videos por escena...",
     },
     "message.direct_start_script": {
         "zh-CN": "已收到你的需求，正在直接开始生成剧本...",
@@ -156,13 +156,6 @@ BACKEND_TRANSLATIONS = {
         "ja": "キャラクター衣装画像・背景セット状態画像・キーアクション参考画像の生成が完了しました。内容をご確認ください。問題なければ「confirm」と入力するか、続行ボタンを押して次の段階へ進んでください。",
         "es": "Las imágenes de vestuario de los personajes, las imágenes de estado de escenografía y las referencias de acción clave están listas. Confírmalas y, si están bien, escribe 'confirm' o pulsa Continuar para pasar a la siguiente etapa.",
     },
-    "message.reference.category3_confirm_prompt": {
-        "zh-CN": "各分镜故事版已生成完成，请确认是否满意。满意后请输入'确认'或点击继续按钮开始生成分镜视频。",
-        "zh-TW": "各分鏡故事版已生成完成，請確認是否滿意。滿意後請輸入「確認」或點擊繼續按鈕開始生成分鏡影片。",
-        "en": "The storyboard images for all scenes are ready. Please confirm. If they look good, enter 'confirm' or click Continue to start generating the scene videos.",
-        "ja": "各シーンの絵コンテ画像の生成が完了しました。内容をご確認ください。問題なければ「confirm」と入力するか、続行ボタンを押してシーン動画の生成を開始してください。",
-        "es": "Las imágenes del storyboard de todas las escenas están listas. Confírmalas y, si están bien, escribe 'confirm' o pulsa Continuar para empezar a generar los videos por escena.",
-    },
     "progress.reference.category1_completed_wait": {
         "zh-CN": "人物/角色图库与布景参考图库生成完成，等待用户确认...",
         "zh-TW": "人物/角色圖庫與布景參考圖庫生成完成，等待使用者確認...",
@@ -177,13 +170,6 @@ BACKEND_TRANSLATIONS = {
         "ja": "キャラクター衣装画像・背景セット状態画像・キーアクション参考画像の生成が完了しました。確認待ちです...",
         "es": "Se generaron las imágenes de vestuario de los personajes, las imágenes de estado de escenografía y las referencias de acción clave. Esperando confirmación...",
     },
-    "progress.reference.category3_completed_wait": {
-        "zh-CN": "各分镜故事版生成完成，等待用户确认...",
-        "zh-TW": "各分鏡故事版生成完成，等待使用者確認...",
-        "en": "Storyboard images generated. Waiting for confirmation...",
-        "ja": "各シーンの絵コンテ画像の生成が完了しました。確認待ちです...",
-        "es": "Se generaron las imágenes del storyboard. Esperando confirmación...",
-    },
     "step.reference.category1_complete": {
         "zh-CN": "🎨 人物/角色图库与布景参考图库已生成完成！请确认后继续。",
         "zh-TW": "🎨 人物/角色圖庫與布景參考圖庫已生成完成！請確認後繼續。",
@@ -197,13 +183,6 @@ BACKEND_TRANSLATIONS = {
         "en": "🎨 The character outfit images, backdrop state images, and key action reference images are complete. Confirm to continue.",
         "ja": "🎨 キャラクター衣装画像・背景セット状態画像・キーアクション参考画像の生成が完了しました。確認して続行してください。",
         "es": "🎨 Las imágenes de vestuario de los personajes, las imágenes de estado de escenografía y las referencias de acción clave están completas. Confirma para continuar.",
-    },
-    "step.reference.category3_complete": {
-        "zh-CN": "🎨 各分镜故事版已生成完成！请确认后继续生成分镜视频。",
-        "zh-TW": "🎨 各分鏡故事版已生成完成！請確認後繼續生成分鏡影片。",
-        "en": "🎨 The storyboard images are complete. Confirm before continuing to scene video generation.",
-        "ja": "🎨 各シーンの絵コンテ画像の生成が完了しました。確認後にシーン動画生成へ進んでください。",
-        "es": "🎨 Las imágenes del storyboard están completas. Confírmalas antes de continuar con la generación de videos por escena.",
     },
     "progress.video.scene_generating": {
         "zh-CN": "分镜 {scene} 生成中...",
@@ -523,9 +502,9 @@ BACKEND_TRANSLATIONS = {
     "error.no_scenes_remaining_after_skip": {
         "zh-CN": "所有分镜都已被跳过，当前没有可继续生成或合成的分镜视频。",
         "zh-TW": "所有分鏡都已被跳過，目前沒有可繼續生成或合成的分鏡影片。",
-        "en": "All scenes have been skipped. There are no remaining storyboard videos to generate or merge.",
-        "ja": "すべてのシーンがスキップされました。生成または結合できる絵コンテ動画は残っていません。",
-        "es": "Se omitieron todas las escenas. No quedan videos del storyboard para generar o unir.",
+        "en": "All scenes have been skipped. There are no remaining scene videos to generate or merge.",
+        "ja": "すべてのシーンがスキップされました。生成または結合できるシーン動画は残っていません。",
+        "es": "Se omitieron todas las escenas. No quedan videos por escena para generar o unir.",
     },
     "error.reference_generation_failed_after_retries": {
         "zh-CN": "参考图库生成失败，已自动重试 {retries} 次：{error}",

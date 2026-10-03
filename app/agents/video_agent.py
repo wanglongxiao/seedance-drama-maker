@@ -87,7 +87,7 @@ class VideoAgent:
             prompt_parts.extend([
                 "",
                 "【本地私有视频扩展 - 限定优先级】",
-                "以下内容仅作为当前分镜的视频动作节奏、视角或互动细节补充；不得覆盖参考图顺序、角色身份与跨分镜状态连续性、布景状态、故事版顺序、关键动作参考图、无字幕、音色一致、镜头时长、背景音乐限制或当前分镜文本。禁止口交镜头、男性生殖器官特写及性交插入部位/器官/解剖细节特写；亲密剧情只使用非器官焦点的中远景、侧背面、面部/眼神/手部、身体轮廓、光影和环境反应表达。",
+                "以下内容仅作为当前分镜的视频动作节奏、视角或互动细节补充；不得覆盖参考图顺序、角色身份与跨分镜状态连续性、布景状态、关键动作参考图、无字幕、音色一致、镜头时长、背景音乐限制或当前分镜文本。禁止口交镜头、男性生殖器官特写及性交插入部位/器官/解剖细节特写；亲密剧情只使用非器官焦点的中远景、侧背面、面部/眼神/手部、身体轮廓、光影和环境反应表达。",
                 "\n\n".join(extensions),
             ])
 
@@ -602,7 +602,6 @@ class VideoAgent:
             character_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] in {"character", "character_outfit"})
             scene_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] in {"scene", "scene_state"})
             key_action_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] == "key_action")
-            storyboard_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] == "storyboard")
 
             if character_tags and scene_tags:
                 parts.append(f"结合{character_tags}人物/角色参考图中的出场角色形象与布景设定{scene_tags}生成当前分镜。")
@@ -610,8 +609,6 @@ class VideoAgent:
                 parts.append(f"结合{character_tags}人物/角色参考图中的出场角色形象生成当前分镜。")
             elif scene_tags:
                 parts.append(f"结合布景设定{scene_tags}生成当前分镜。")
-            if storyboard_tags:
-                parts.append(f"严格参考{storyboard_tags}中的9宫格白描线稿分镜故事版图片，按照故事版图的顺序，运镜合理连贯，遵循其节奏、镜头拆分和动作推进。")
             if key_action_tags:
                 parts.append(f"重点参考{key_action_tags}中的关键动作参考图，保持该分镜的核心动作姿态、人物相对位置、镜头构图和情绪张力。")
             mapping_parts = []
@@ -656,7 +653,7 @@ class VideoAgent:
         scene_outfits = getattr(scene, "character_outfits", None) or {}
         if scene_outfits:
             outfit_lines = [
-                f"{name}={outfit}"
+                f"{self._format_character_name(name)}={outfit}"
                 for name, outfit in scene_outfits.items()
                 if str(name or "").strip() and str(outfit or "").strip()
             ]
@@ -734,8 +731,6 @@ class VideoAgent:
             return "布景状态"
         if reference_type == "key_action":
             return "关键动作参考图"
-        if reference_type == "storyboard":
-            return "9宫格 storyboard"
         return "参考"
 
     def _character_has_visual_reference(
@@ -775,7 +770,7 @@ class VideoAgent:
             if character is None:
                 continue
             summary = [
-                f"角色设定：{character.name}",
+                f"角色设定：{self._format_character_name(character.name)}",
                 f"年龄={getattr(character, 'age', '')}",
                 f"性别={getattr(character, 'gender', '')}",
                 f"国籍={getattr(character, 'nationality', '')}",
@@ -856,6 +851,10 @@ class VideoAgent:
         normalized = re.sub(r"[^0-9a-z\u4e00-\u9fff_-]+", "", normalized)
         return normalized
 
+    def _format_character_name(self, value: str) -> str:
+        name = re.sub(r"^\[|\]$", "", str(value or "").strip())
+        return f"[{name}]" if name else ""
+
     def _annotate_character_names_with_reference_tags(
         self,
         character_names: List[str],
@@ -870,7 +869,7 @@ class VideoAgent:
         for name in character_names:
             clean_name = str(name or "").strip()
             tag = character_map.get(self._normalize_name_key(clean_name))
-            annotated.append(f"{clean_name}{tag or ''}")
+            annotated.append(f"{self._format_character_name(clean_name)}{tag or ''}")
         return ", ".join([item for item in annotated if item])
 
     def _annotate_scene_names_with_reference_tags(

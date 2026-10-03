@@ -148,13 +148,17 @@ class ImageAgent:
             prompt_parts.extend([
                 "",
                 "[PRIVATE VISUAL EXTENSION - BOUNDED PRIORITY]",
-                "Use the following local private guidance only as supplemental visual-detail guidance. Do not override aspect ratio, identity preservation, full-body framing, background rules, storyboard line-art rules, reference usage rules, current scene context, or cross-scene continuity. Never create oral-sex shots, male-genital close-ups, or genital/insertion-detail close-ups; use non-genital medium/wide framing, facial emotion, body posture, hands, silhouette, lighting, and environmental reaction instead.",
+                "Use the following local private guidance only as supplemental visual-detail guidance. Do not override aspect ratio, identity preservation, full-body framing, background rules, reference usage rules, current scene context, or cross-scene continuity. Never create oral-sex shots, male-genital close-ups, or genital/insertion-detail close-ups; use non-genital medium/wide framing, facial emotion, body posture, hands, silhouette, lighting, and environmental reaction instead.",
                 "\n\n".join(extensions),
             ])
 
     def _normalize_asset_name(self, name: Optional[str], fallback: str) -> str:
         normalized = re.sub(r"\s+", " ", str(name or "").strip())
         return normalized or fallback
+
+    def _format_character_name(self, name: Optional[str]) -> str:
+        normalized = re.sub(r"^\[|\]$", "", str(name or "").strip())
+        return f"[{normalized}]" if normalized else ""
 
     def _build_scene_reference_name(self, scene_description: str, index: int) -> str:
         cleaned = re.sub(r"\s+", " ", str(scene_description or "").strip())
@@ -166,7 +170,7 @@ class ImageAgent:
     def _build_character_profile_lines(self, character: Character) -> List[str]:
         """Stable character profile fields shared by all character-related image prompts."""
         field_specs = [
-            ("Name", getattr(character, "name", "")),
+            ("Name", self._format_character_name(getattr(character, "name", ""))),
             ("Age", getattr(character, "age", "")),
             ("Gender", getattr(character, "gender", "")),
             ("Nationality", getattr(character, "nationality", None)),
@@ -298,7 +302,7 @@ class ImageAgent:
             prompt_parts.append("[VARIATION REQUIREMENTS]")
             prompt_parts.append(variation_requirements)
 
-        prompt_parts.append(f"[CHARACTER REFERENCE] {character.name}")
+        prompt_parts.append(f"[CHARACTER REFERENCE] {self._format_character_name(character.name)}")
         if user_reference_images:
             prompt_parts.append("[CRITICAL] Preserve the uploaded character identity and key appearance traits.")
             prompt_parts.append("[CRITICAL] Keep the face, hairstyle, clothing details, and silhouette recognizable.")
@@ -416,7 +420,7 @@ class ImageAgent:
             prompt_parts.append("[REFERENCE STYLE REQUIREMENTS]")
             prompt_parts.append(reference_style_info)
 
-        prompt_parts.append(f"[CHARACTER OUTFIT VARIANT] {character.name}")
+        prompt_parts.append(f"[CHARACTER OUTFIT VARIANT] {self._format_character_name(character.name)}")
         prompt_parts.append("[CRITICAL] Keep the SAME person as the reference image: preserve face, hairstyle, facial features, skin tone and identity exactly.")
         prompt_parts.extend(self._build_character_profile_lines(character))
         prompt_parts.append(f"[OUTFIT REQUIREMENT] Change ONLY the clothing/outfit to: {outfit}")
@@ -556,7 +560,7 @@ class ImageAgent:
         scene_outfits = getattr(scene, "character_outfits", None) or {}
         if scene_outfits:
             outfit_lines = [
-                f"{name}: {outfit}"
+                f"{self._format_character_name(name)}: {outfit}"
                 for name, outfit in scene_outfits.items()
                 if str(name or "").strip() and str(outfit or "").strip()
             ]
@@ -568,7 +572,10 @@ class ImageAgent:
         if getattr(scene, "camera_angle", None):
             prompt_parts.append(f"Camera angle: {scene.camera_angle}")
         if getattr(scene, "characters_present", None):
-            prompt_parts.append(f"Characters present: {', '.join(scene.characters_present)}")
+            prompt_parts.append(
+                "Characters present: "
+                + ", ".join(self._format_character_name(name) for name in scene.characters_present)
+            )
         self._append_image_private_extensions(
             prompt_parts,
             ["key_action_reference_image.md"],
@@ -672,10 +679,10 @@ class ImageAgent:
         for name in character_names:
             character = character_map.get(self._normalize_lookup_key(name))
             if character is None:
-                lines.append(f"- {name}")
+                lines.append(f"- {self._format_character_name(name)}")
                 continue
             summary = [
-                f"- {character.name}",
+                f"- {self._format_character_name(character.name)}",
                 f"age={character.age}",
                 f"gender={character.gender}",
                 f"face={character.face_features}",
@@ -707,60 +714,6 @@ class ImageAgent:
         type_set = self._get_reference_type_set(reference_images)
         return any(str(reference_type).strip().lower() in type_set for reference_type in reference_types)
 
-    def _build_storyboard_cast_constraints(self, scene, script: Script) -> List[str]:
-        """构建故事版专用的角色数量/性别/防重复约束。
-
-        故事版偶发同一角色在一个画面里重复出现、或性别画错，
-        因此显式列出本分镜的角色清单（数量 + 性别），并强约束：
-        每个角色在每个分格中最多出现一次、严格遵守性别。
-        """
-        character_names = [
-            str(name or "").strip()
-            for name in (getattr(scene, "characters_present", None) or [])
-            if str(name or "").strip()
-        ]
-        if not character_names:
-            return []
-
-        character_map = {
-            self._normalize_lookup_key(getattr(character, "name", "")): character
-            for character in getattr(script, "characters", None) or []
-        }
-        # 去重，保持出场顺序
-        seen_keys = set()
-        roster: List[str] = []
-        for name in character_names:
-            key = self._normalize_lookup_key(name)
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            character = character_map.get(key)
-            gender = str(getattr(character, "gender", "") or "").strip() if character else ""
-            if gender:
-                roster.append(f"{name} (gender={gender})")
-            else:
-                roster.append(name)
-
-        distinct_count = len(roster)
-        lines: List[str] = ["[CAST CONSTRAINTS]"]
-        lines.append(
-            f"This scene has EXACTLY {distinct_count} distinct main character(s): "
-            + "; ".join(roster)
-        )
-        lines.append(
-            "[CRITICAL] Draw exactly these characters. Do NOT invent extra people and do NOT drop any of them."
-        )
-        lines.append(
-            "[CRITICAL] Each character is ONE unique person. The SAME character must NEVER appear more than once within a single panel (no duplicated/cloned faces of the same person in one cell)."
-        )
-        lines.append(
-            "[CRITICAL] Strictly respect each character's gender exactly as listed above; never swap or mistake a character's gender."
-        )
-        lines.append(
-            "[CRITICAL] Keep the total number of distinct people consistent with the cast list across all panels."
-        )
-        return lines
-
     def _build_scene_reference_context(self, reference_images: Optional[List[GeneratedImage]]) -> List[str]:
         prompt_parts: List[str] = []
         if not reference_images:
@@ -779,8 +732,6 @@ class ImageAgent:
                 label = "backdrop state reference"
             elif reference_type == "key_action":
                 label = "key action reference"
-            elif reference_type == "storyboard":
-                label = "9-panel storyboard"
             else:
                 label = reference_type
             prompt_parts.append(f"- Image {index}: {getattr(image, 'name', f'Reference {index}')} ({label})")
@@ -798,7 +749,6 @@ class ImageAgent:
             "character": 2,
             "scene": 3,
             "key_action": 4,
-            "storyboard": 5,
         }
         return sorted(
             list(reference_images),
@@ -843,82 +793,6 @@ class ImageAgent:
             "Combine the scene script, the current outfit/state references above, and the NSFW key-action prompt rules to stage one decisive action frame."
         )
         return parts
-
-    def generate_scene_storyboard_image(
-        self,
-        scene,
-        script: Script,
-        reference_images: Optional[List[GeneratedImage]] = None,
-        user_style_info: str = None,
-        aspect_ratio: str = None,
-    ) -> GeneratedImage:
-        if not aspect_ratio:
-            aspect_ratio = self.default_aspect_ratio
-
-        prompt_parts: List[str] = [f"Aspect ratio: {aspect_ratio}"]
-
-        # 故事版必须是白描线稿 9 宫格：把强制样式约束放在最前且最显著，
-        # 且刻意不注入用户的彩色/写实/电影感风格要求（会与白描线稿冲突，
-        # 曾导致模型偶发输出单张彩色写实图而非多宫格白描线稿）。
-        prompt_parts.extend(load_prompt("storyboard_image.md").splitlines())
-
-        scene_context = self._resolve_scene_definition_context(getattr(scene, "scene_name", ""), script)
-        reference_context = self._build_scene_reference_context(reference_images)
-        has_character_reference = self._has_any_reference_type(reference_images, "character", "character_outfit")
-        if reference_context:
-            prompt_parts.extend(reference_context)
-            prompt_parts.append("[REFERENCE USAGE] The reference images above are content/identity references only. Do NOT copy their coloring or realistic finish — redraw everything as black-and-white line art.")
-        if not has_character_reference:
-            prompt_parts.extend(self._build_scene_character_context(scene, script))
-        prompt_parts.extend(self._build_storyboard_cast_constraints(scene, script))
-        prompt_parts.append("[STORYBOARD SHEET]")
-        prompt_parts.append(f"Scene name: {getattr(scene, 'scene_name', '')}")
-        if scene_context["descriptions"]:
-            prompt_parts.append(f"Scene backdrop definition: {'; '.join(scene_context['descriptions'])}")
-        resolved_time_of_day = str(getattr(scene, "time_of_day", "") or scene_context["time_of_day"]).strip()
-        resolved_weather = str(getattr(scene, "weather", "") or scene_context["weather"]).strip()
-        resolved_scene_state = str(getattr(scene, "scene_state", "") or "").strip()
-        if resolved_scene_state:
-            prompt_parts.append(f"Current backdrop state: {resolved_scene_state}")
-        if resolved_time_of_day:
-            prompt_parts.append(f"Time of day: {resolved_time_of_day}")
-        if resolved_weather:
-            prompt_parts.append(f"Weather: {resolved_weather}")
-        resolved_scene_features = list(scene_context["scene_features"])
-        if resolved_scene_features:
-            prompt_parts.append(f"Scene features: {', '.join(resolved_scene_features)}")
-        scene_outfits = getattr(scene, "character_outfits", None) or {}
-        if scene_outfits:
-            outfit_lines = [
-                f"{name}: {outfit}"
-                for name, outfit in scene_outfits.items()
-                if str(name or "").strip() and str(outfit or "").strip()
-            ]
-            if outfit_lines:
-                prompt_parts.append(f"Current character outfit and hairstyle state: {'; '.join(outfit_lines)}")
-        prompt_parts.append(f"Scene description: {getattr(scene, 'description', '')}")
-        prompt_parts.append(f"Character action: {getattr(scene, 'character_description', '')}")
-        prompt_parts.append(f"Mood: {getattr(scene, 'mood', '')}")
-        if getattr(scene, "camera_angle", None):
-            prompt_parts.append(f"Camera angle: {scene.camera_angle}")
-        if getattr(scene, "characters_present", None):
-            prompt_parts.append(f"Characters present: {', '.join(scene.characters_present)}")
-        prompt = "\n".join(prompt_parts)
-        response = llm_service.generate_image(
-            prompt=prompt,
-            model=self.model,
-            size=self.size,
-            image_urls=[image.url for image in (reference_images or [])] or None,
-            ratio=aspect_ratio,
-        )
-        return GeneratedImage(
-            scene_number=max(1, int(getattr(scene, "scene_number", 1) or 1)),
-            url=response["data"][0]["url"],
-            prompt=prompt,
-            name=self._build_scene_asset_name(scene, "Storyboard"),
-            reference_type="storyboard",
-            is_reference=True,
-        )
 
     def generate_reference_image(
         self,

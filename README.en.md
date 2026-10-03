@@ -12,18 +12,16 @@ English documentation. Simplified Chinese version: `README.md`
 
 Powered by the **SeeDance 2.5** video model — turn one sentence into a cinematic AI short drama:
 
-- 🎬 **Up to 30-second shots**: each storyboard scene can run up to 30 seconds (6–30s adjustable) for more continuous long-take storytelling, with a final cut up to `600` seconds.
+- 🎬 **Up to 30-second shots**: each scene can run up to 30 seconds (6–30s adjustable) for more continuous long-take storytelling, with a final cut up to `1200` seconds.
 - 🖼️ **Up to 50 reference inputs**: a single task can fuse up to 50 character / backdrop reference images for highly consistent characters and scenes across shots.
 - 🌍 **14 languages natively supported**: native multilingual dialogue and narration across Chinese, English, Japanese, Spanish, and 14 languages total.
 - 🎞️ **Cinematic audiovisual quality**: native audio-video sync, adaptive aspect ratio, and the final cut is remuxed to high-fidelity `MP4` (H.264/AAC, `+faststart`) that streams progressively in the browser.
-- 🎭 **Character-outfit / backdrop-state variants**: per scene the system derives character-outfit images and backdrop time/weather-state images, and references them consistently in storyboards and scene videos.
-- 🧩 **Line-art storyboard + AI review**: line-art multi-panel storyboards are generated first and auto-reviewed (style, no duplicated character and normal limbs, correct gender); failures regenerate automatically.
-- 📄 **Comic PDF export**: when scene-video generation starts, the system generates a script-title PDF in parallel, including a cover, character page, and one storyboard page per scene, then exposes it in the Web UI for download.
-- 🤖 **Fully automated multi-agent pipeline**: script → reference library → character-outfit/backdrop-state variants → storyboards → scene generation & review → long-video merge, end to end.
+- 🎭 **Character-outfit / backdrop-state variants**: per scene the system derives character-outfit images and backdrop time/weather-state images, and references them consistently in scene videos.
+- 🤖 **Fully automated multi-agent pipeline**: script → reference library → character-outfit/backdrop-state variants and key-action references → scene generation & review → long-video merge, end to end.
 
 ## Overview
 
-This project focuses on AI long-video generation with both automatic and manual operating modes. While maintaining generation quality, it minimizes manual work across the entire pipeline, including script planning, character and backdrop alignment, storyboard continuity, quality review, regeneration control, and final video merge.
+This project focuses on AI long-video generation with both automatic and manual operating modes. While maintaining generation quality, it minimizes manual work across the entire pipeline, including script planning, character and backdrop alignment, scene continuity, quality review, regeneration control, and final video merge.
 
 Typical use cases include:
 
@@ -37,12 +35,12 @@ The system automatically coordinates script writing, character definitions, back
 Current primary workflow:
 
 ```text
-User Input -> Script Generation -> Reference Library Confirmation -> Character-Outfit/Backdrop-State Variants -> Storyboard Generation And Review -> Comic PDF Export + Scene Video Generation And Review -> Final Merge
+User Input -> Script Generation -> Reference Library Confirmation -> Character-Outfit/Backdrop-State Variants And Key-Action References -> Scene Video Generation And Review -> Final Merge
 ```
 
 The system focuses on:
 
-- Generating script, character definitions, backdrop definitions, and storyboard scenes together
+- Generating script, character definitions, backdrop definitions, and scene scripts together
 - Coordinating multiple reference images for characters and backdrops
 - Keeping auto mode and manual mode consistent at the workflow level
 - Combining automatic retry with manual takeover when video review fails
@@ -53,13 +51,9 @@ The system focuses on:
 
 ### UI And Generation Flow
 
-**UI overview and script generation**: from a single-sentence prompt the system auto-generates the title, style, character definitions, backdrop definitions, and storyboard scripts.
+**UI overview and script generation**: from a single-sentence prompt the system auto-generates the title, style, character definitions, backdrop definitions, and scene scripts.
 
 <img src="./demo/gen-story.png" alt="UI overview and script generation" width="100%" />
-
-**Storyboard reference generation**: a line-art multi-panel storyboard is generated per scene and auto-reviewed by `StoryboardReviewAgent` (style / no duplicated character with normal limbs / correct gender).
-
-<img src="./demo/storyboard-image.png" alt="Storyboard reference generation" width="100%" />
 
 **Scene videos and merge**: each scene is generated, AI-reviewed, and merged into the final long video.
 
@@ -78,17 +72,17 @@ The system focuses on:
 ## BytePlus Products Used
 
 - `TOS`
-  Stores and serves uploaded assets, reference images, comic PDFs, scene videos, and final videos.
+  Stores and serves uploaded assets, reference images, scene videos, and final videos.
 - `Seed-Speech`
   Converts voice input into text for the creation workflow.
 - `DeepSeek-V4.1-Flash`
-  Powers the main conversational agent and storyboard script generation.
+  Powers the main conversational agent and scene-script generation.
 - `Seed-2.1-turbo`
   Reviews generated scene videos for character consistency, physical plausibility, and script alignment.
 - `SeeDream-5.0-flash`
   Generates and regenerates character and backdrop reference images.
 - `SeeDance-2.5`
-  Generates storyboard scene videos with 6–30s per shot, up to 50 reference inputs, and native dialogue in 14 languages with native audio-video sync.
+  Generates scene videos with 6–30s per shot, up to 50 reference inputs, and native dialogue in 14 languages with native audio-video sync.
 
 All of the above are available through [byteplus.com](https://www.byteplus.com/).
 
@@ -104,7 +98,6 @@ All of the above are available through [byteplus.com](https://www.byteplus.com/)
 
 - Python `3.9+`
 - `ffmpeg` and `ffprobe` available in the runtime environment, including local runs, Docker, and cloud veFaaS images
-- CJK-capable fonts and common emoji fonts installed in the runtime environment, for example `fonts-noto-cjk`, `fonts-noto-color-emoji`, and `fontconfig`; otherwise Chinese/Japanese/Korean text or emoji in cloud-generated comic PDFs may render as tofu boxes
 - Network access to BytePlus / ModelArk / Seed-Speech / TOS
 
 ### Required Service Enablement
@@ -202,13 +195,13 @@ The speech-to-text path preserves the browser's actual recording format. Chrome 
 - Title, style, and background
 - Character definitions
 - Backdrop definitions
-- Storyboard scene scripts
+- Scene scripts
 
 Current rules:
 
-- Total video duration limit: `600` seconds
+- Total video duration limit: `1200` seconds
 - Per-scene duration range: `6`–`30` seconds (tuned for `SeeDance-2.5`)
-- Storyboard scene limit: `50`
+- Scene limit: `80`
 - Character definition limit: `30`
 - Backdrop definition limit: `30`
 - Adjacent scenes must stay continuous without repeating the same narrative beat
@@ -262,25 +255,15 @@ After all character main images and scene main images are generated, the system 
 - Character-outfit image = the scene's outfit description + the corresponding character main image
 - Backdrop-state image = the scene's time/weather state + the corresponding scene main image
 - Variants across scenes are generated in parallel, bounded by the image concurrency setting (`video_generation.reference_images.max_concurrency`)
-- Variants are deduplicated (each `character::outfit` or `scene::time::weather` is generated once) and preferred in storyboards and scene videos
+- Variants are deduplicated (each `character::outfit` or `scene::time::weather` is generated once) and preferred in scene videos
 
-### 3.3 Storyboard Generation And Review
-
-`ImageAgent` generates a line-art multi-panel storyboard per scene, and `StoryboardReviewAgent` uses a multimodal vision model to check 3 hard conditions (any failure triggers auto-regeneration):
-
-1. Line-art (black-and-white sketch) style with `4`–`7` panels (no fixed 2x3 layout required)
-2. The same character does not repeat within a panel, and no character shows more than 2 arms or more than 2 legs
-3. Character gender matches the cast list
-
-Storyboard `Regenerate` logic, UI, and retry cap mirror scene videos, controlled by `storyboard_review.max_retries` (default `2`, total generations = first + retries).
-
-### 4. Scene Video Generation
+### 3.3 Scene Video Generation
 
 `VideoAgent` generates each scene video with:
 
 - Character image (preferring the character-outfit image when the scene has one)
 - Scene image (preferring the backdrop-state image when the scene has one)
-- The scene's line-art 9-panel storyboard
+- The scene's key-action reference image
 - The current scene script and user style requirements
 
 Character references now use `asset://asset-id` URIs in video generation requests whenever an asset is available, for example:
@@ -297,7 +280,7 @@ Character references now use `asset://asset-id` URIs in video generation request
 
 Reference selection differs by video mode (switchable in the UI):
 
-- **Parallel mode (default)**: multiple scenes are generated at the same time for faster throughput; each scene references only the character image / scene image / storyboard, without the previous scene's video
+- **Parallel mode (default)**: multiple scenes are generated at the same time for faster throughput; each scene references only character images, backdrop images, and key-action references, without the previous scene's video
 - **Extend mode**: scenes are generated serially, which is slower but optimizes scene-to-scene transitions — every scene except scene 1 additionally references the previous scene's generated video as `reference_video`, used only to keep character appearance/outfit/scene/lighting consistent while advancing the new scene from a fresh camera angle, avoiding near-identical adjacent shots
 
 Key rules:
@@ -306,22 +289,14 @@ Key rules:
 - Manual `Regenerate` clicks do not consume the automatic failure budget
 - The video prompt appends a no-background-music constraint by default unless the user explicitly requests a music style
 
-### 4.1 Prompt And Skill Management
+### 3.4 Prompt And Skill Management
 
 - Reusable LLM prompts, image/video generation constraints, review rubrics, and script-generation rules live in `app/prompt_skill/*.md`
 - Agents load Markdown templates through `app.prompt_skill.load_prompt()` or `app.prompt_skill.render_prompt()`; stable prompt text should be added as `.md` files instead of being hard-coded in Agent classes
 - Markdown templates use `$variable` placeholders so JSON examples can keep literal `{}` braces without escaping
 - Runtime context such as user input, ASR text, reference image URLs, scene fields, character names, and backdrop names is still assembled in code
 
-### 4.2 Project Ending And Cleanup
-
-When the workflow enters scene-video generation, the system starts comic PDF generation in parallel:
-
-- The PDF is named after the script title and uploaded to the `documents/comics` path in `TOS`
-- Page 1 shows the script title, era, and background; page 2 shows main character names and character images
-- Each following page maps to one scene in order, with the storyboard image on top and the scene description plus dialogue/narration below
-- The Web UI shows the PDF download entry between the storyboards section and the scene-videos section
-- Project cleanup preserves the comic PDF and does not treat it as a temporary file
+### 3.5 Project Ending And Cleanup
 
 The Web UI now includes an `End Project` button. Cleanup can be triggered in three ways:
 
@@ -337,7 +312,7 @@ Cleanup removes:
 
 If the project has already produced a final video, the final export under `videos/final` is preserved.
 
-### 5. Video Review And Flow Control
+### 4. Video Review And Flow Control
 
 `VideoReviewAgent` uses `Seed-2.1-turbo` to review each scene video.
 
@@ -345,7 +320,7 @@ Review dimensions:
 
 - Character consistency
 - Physical world rules
-- Semantic consistency with the storyboard script
+- Semantic consistency with the scene script
 
 Current default review configuration:
 
@@ -362,7 +337,7 @@ Flow rules:
 - In parallel mode, each scene is persisted as soon as it finishes, preventing completed late-index scenes from being lost when another scene hits a 504 timeout
 - When auto mode reaches the retry cap and selects the highest-scoring candidate, the scene is marked as accepted-over-retry and does not block the final merge
 
-### 6. Merge
+### 5. Merge
 
 `MergeAgent` and `FFmpegService` handle the final merge.
 
@@ -414,7 +389,6 @@ FastAPI App
 MainAgent
   |- ScriptAgent
   |- ImageAgent
-  |- StoryboardReviewAgent
   |- VideoAgent
   |- VideoReviewAgent
   |- MergeAgent
@@ -431,11 +405,10 @@ Services
 - All sensitive credentials live in `.env`; `config.yaml` keeps only `${VAR}` placeholders injected by `app/config.py` at runtime
 - The UI supports `zh-CN`, `zh-TW`, `en`, `ja`, and `es`; `SeeDance-2.5` video dialogue is natively supported in 14 languages
 - The pipeline generates in `MOV` and remuxes the final cut to `MP4` (`+faststart`), with `TOS` normalizing `Content-Type` for reliable web playback
-- Comic PDF generation renders text with runtime system fonts, so container images must include CJK/emoji fonts and a `fontconfig` font cache
 - Each project is bound to its browser connection to support isolated multi-tab execution
 - Long-running background tasks can continue pushing results after WebSocket reconnects through a stable client ID
 - Reference generation, video generation, review, and merge are rendered progressively in the UI
-- Exported artifacts such as comic PDFs and final videos are preserved during project-ending cleanup
+- Final videos are preserved during project-ending cleanup
 - Uploads, ASR, and other real-time interactions use the dedicated `interactive` thread pool; image generation, video generation, review, and merge use the `generation` pool, reducing queue timeout risk on cloud single-instance multi-project workloads
 
 ## Usage

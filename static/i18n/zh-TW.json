@@ -17,7 +17,7 @@
     "tipTitle": "提示：",
     "tipText": "可在描述中增加指令：「動態運用鏡頭組合，只生成旁白，史詩背景音樂，水墨風格，解析度 720p，比例 9:16，時長 30 秒」",
     "quickCommandsTitle": "快捷指令：",
-    "quickCommandsText": "「一鍵生成」 / 「autorun」｜「重新生成」 / 「重做」 / 「regen」（目前步驟）｜「退回-劇本」 / 「rollback-script」（退回某步驟，支援劇本/參考圖/分鏡圖/分鏡影片/合成）"
+    "quickCommandsText": "「一鍵生成」 / 「autorun」｜「重新生成」 / 「重做」 / 「regen」（目前步驟）｜「退回-劇本」 / 「rollback-script」（退回某步驟，支援劇本/參考圖/分鏡影片/合成）"
   },
   "input": {
     "uploadImage": "上傳圖片",
@@ -67,11 +67,8 @@
     "processing": "生成中",
     "review": "審核",
     "video": "影片",
-    "storyboardImage": "分鏡圖",
-    "storyboardImageTitle": "🧩 分鏡圖生成",
     "referenceCategory1": "人物/角色圖庫與佈景參考圖庫",
-    "referenceCategory2": "角色裝扮圖、布景狀態圖與關鍵動作參考圖",
-    "referenceCategory3": "各分鏡圖"
+    "referenceCategory2": "角色裝扮圖、布景狀態圖與關鍵動作參考圖"
   },
   "status": {
     "processing": "正在處理...",
@@ -92,15 +89,13 @@
     "script": "正在生成劇本...",
     "referenceImage": "正在生成參考圖...",
     "videos": "正在生成分鏡影片...",
-    "merge": "正在合成最終影片...",
-    "storyboardImage": "正在生成分鏡圖..."
+    "merge": "正在合成最終影片..."
   },
   "actions": {
     "regenerate": "🔄 重新生成",
     "skip": "⏭️ 跳過",
     "download": "⬇️ 下載",
     "downloadVideo": "⬇️ 下載影片",
-    "downloadPdf": "⬇️ 下載PDF",
     "newProject": "🆕 建立新專案",
     "exitAutoRun": "退出自動模式",
     "endProject": "結束專案",
@@ -189,11 +184,6 @@
     "referenceNameSceneDefault": "場景{index}",
     "referenceLibraryCharacters": "人物/角色參考圖庫",
     "referenceLibraryScenes": "布景參考圖庫",
-    "storyboardLibrary": "🎞️ 各分鏡分鏡圖",
-    "comicPdfTitle": "📄 連環畫 PDF",
-    "comicPdfGenerating": "正在生成連環畫 PDF...",
-    "comicPdfReady": "連環畫 PDF 已生成，可下載保存。",
-    "comicPdfFailed": "連環畫 PDF 生成失敗。",
     "variantAssetsLibrary": "🎭 各分鏡-角色裝扮-布景狀態",
     "variantOutfits": "角色裝扮圖",
     "variantSceneStates": "布景狀態圖",
@@ -203,10 +193,7 @@
     "keyActionReferenceImage": "關鍵動作參考圖",
     "sceneSettings": "🏞️ 布景設定 ({count}個)",
     "sceneUsage": "🏷️ 使用布景:",
-    "referenceLibraryUnified": "🎨 統一參考圖庫",
-    "generatedStoryboardImages": "🧩 分鏡圖",
-    "storyboardImageRegeneratingText": "正在重新生成分鏡圖...",
-    "storyboardImage": "分鏡圖"
+    "referenceLibraryUnified": "🎨 統一參考圖庫"
   },
   "messages": {
     "invalidScriptData": "❌ 劇本資料無效",
@@ -217,7 +204,7 @@
     "audioRecognitionFailed": "❌ 語音辨識失敗: {error}",
     "audioProcessingFailed": "❌ 錄音轉文字失敗，請檢查錄音格式或網路後重試",
     "imageUploadFailed": "圖片上傳失敗",
-    "referenceNameRequired": "請先為以下上傳圖片填寫名稱：{items}",
+    "referenceNameRequired": "請先為每張上傳的人物/角色圖片和布景圖片填寫名稱。",
     "referenceImageLimit": "最多只能上傳 {count} 張參考圖",
     "characterReferenceLimit": "人物/角色參考圖最多 {count} 張",
     "sceneReferenceLimit": "布景參考圖最多 {count} 張",
@@ -237,15 +224,14 @@
     "allStepsCompleted": "✅ 所有步驟已完成！",
     "allVideosCompleted": "🎉 影片生成全部完成！",
     "autoEnterNext": "自動進入下一步：{step}...",
-    "autoEnterNextNewFlow": "自動進入下一步：{step}...（新流程：逐個生成＋審核）",
+    "autoEnterNextNewFlow": "自動進入下一步：{step}...（分鏡生成＋審核）",
     "autoEnterNextReferenceStage": "自動進入下一階段：{stage}...",
     "referenceCategory1Complete": "🎨 人物/角色圖庫與佈景參考圖庫已生成完成！\n\n請在聊天區輸入：\n• \"繼續\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"開始\" - 進入下一階段\n• \"重新生成\" / \"重做\" / \"regen\" - 重新製作本階段\n或對任意一張圖片點擊\"重新生成\"進行微調",
     "referenceCategory2Complete": "🎨 角色裝扮圖、布景狀態圖與關鍵動作參考圖已生成完成！\n\n請在聊天區輸入：\n• \"繼續\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"開始\" - 進入下一階段\n• \"重新生成\" / \"重做\" / \"regen\" - 重新製作本階段\n或對任意一張圖片點擊\"重新生成\"進行微調",
-    "referenceCategory3Complete": "🧩 各分鏡圖已生成完成！\n\n請在聊天區輸入：\n• \"繼續\" / \"下一步\" / \"ok\" / \"好\" / \"go\" / \"開始\" - 進行下一步：🎬 影片生成\n• \"重新生成\" / \"重做\" / \"regen\" - 重新製作本階段\n或對任意一張圖片點擊\"重新生成\"進行微調",
     "exitAutoRun": "⛔ 已退出自動模式。\n\n請在聊天區輸入：\n• 「繼續」 / 「下一步」 / 「ok」 / 「好」 / 「go」 / 「開始」 - 繼續生成\n• 「重新生成」 / 「重做」 / 「regen」 - 重新製作當前步驟",
     "exitAutoRunStatus": "已退出自動模式，請在聊天區輸入指令繼續",
     "scriptComplete": "📖 劇本生成已完成！\n\n請在聊天區輸入：\n• 「繼續」 / 「下一步」 / 「ok」 / 「好」 / 「go」 / 「開始」 - 進行下一步：🎨 參考圖生成\n• 「重新生成」 / 「重做」 / 「regen」 - 重新製作📖 劇本生成",
-    "referenceComplete": "🎨 參考圖庫生成已完成！\n\n請在聊天區輸入：\n• 「繼續」 / 「下一步」 / 「ok」 / 「好」 / 「go」 / 「開始」 - 進行下一步：🧩 分鏡圖生成\n• 「重新生成」 / 「重做」 / 「regen」 - 重新製作🎨 參考圖庫",
+    "referenceComplete": "🎨 參考圖庫生成已完成！\n\n請在聊天區輸入：\n• 「繼續」 / 「下一步」 / 「ok」 / 「好」 / 「go」 / 「開始」 - 進行下一步：🎬 分鏡影片生成\n• 「重新生成」 / 「重做」 / 「regen」 - 重新製作🎨 參考圖庫",
     "videosComplete": "🎬 影片生成已完成！\n\n請在聊天區輸入：\n• 「繼續」 / 「下一步」 / 「ok」 / 「好」 / 「go」 / 「開始」 - 進行下一步：🎥 影片合成\n• 「重新生成」 / 「重做」 / 「regen」 - 重新製作🎬 影片生成",
     "itemRegeneratedSuccess": "✅ {label}已重新生成！",
     "createProjectFailedRetry": "❌ 專案建立失敗，請重試",
@@ -254,7 +240,7 @@
     "rollbackSuccess": "✅ 已成功退回到「{step}」步驟。\n\n正在重新生成...",
     "rollbackFailed": "❌ 退回失敗: {error}",
     "rollbackStarting": "⏪ 正在退回到「{step}」步驟...\n\n將重置該步驟及之後的所有進度，並重新生成。",
-    "rollbackInvalidStep": "❌ 步驟名稱「{step}」不存在。\n\n可用步驟：劇本、參考圖、分鏡圖、分鏡影片、合成",
+    "rollbackInvalidStep": "❌ 步驟名稱「{step}」不存在。\n\n可用步驟：劇本、參考圖、分鏡影片、合成",
     "rollbackNoStartedStep": "❌ 目前尚未開始任何步驟，無法退回。\n\n請先輸入「開始生成」或「一鍵生成」開始製作。",
     "rollbackStepNotCompleted": "❌ 無法退回到「{step}」，因為該步驟尚未完成。\n\n目前已完成步驟：{completedSteps}\n只能退回到已完成的步驟。",
     "projectEndConfirm": "結束專案後，將刪除此專案在 TOS 中的臨時檔案、虛擬素材庫素材與素材資產組。確認要結束嗎？",
@@ -267,10 +253,7 @@
     "genericStepCompleteStatus": "{step}已完成！請在聊天區輸入「繼續」或「下一步」進行{nextStep}，或輸入「重新生成」、「重做」或「regen」重新製作",
     "genericStepComplete": "{step}已完成！\n\n請在聊天區輸入：\n• 「繼續」 / 「下一步」 / 「ok」 / 「好」 / 「go」 / 「開始」 - 進行下一步：{nextStep}\n• 「重新生成」 / 「重做」 / 「regen」 - 重新製作{step}",
     "referenceAssetRegeneratedSuccess": "✅ 參考圖「{name}」已重新生成！",
-    "storyboardComplete": "🧩 分鏡圖生成已完成！\n\n請在聊天區輸入：\n• 「繼續」 / 「下一步」 / 「ok」 / 「好」 / 「go」 / 「開始」 - 進行下一步：🎬 影片生成（新流程：逐個生成＋審核）\n• 「重新生成」 / 「重做」 / 「regen」 - 重新製作🧩 分鏡圖",
-    "storyboardRegeneratedSuccess": "✅ 分鏡 {scene} 的分鏡圖已重新生成！",
-    "httpErrorStatus": "HTTP 請求失敗，狀態碼：{status}",
-    "referenceNameRequired": "請先為每張上傳的人物/角色圖片和布景圖片填寫名稱。"
+    "httpErrorStatus": "HTTP 請求失敗，狀態碼：{status}"
   },
   "chat": {
     "system_prompt": "你是一個專業的AI影片生成助手。你的任務是：\n1. 理解使用者的影片創作需求\n2. 詢問必要的細節（如風格、角色、場景等）\n3. 引導使用者提供參考圖片或語音描述\n4. 當資訊足夠時，告知使用者可以開始生成影片\n\n請用友善、專業的語氣與使用者交流。",
@@ -279,7 +262,7 @@
   },
   "message": {
     "reference": {
-      "confirm_prompt": "參考圖庫已生成，請確認是否滿意。滿意後請輸入「確認」或點擊繼續按鈕以生成分鏡圖片。",
+      "confirm_prompt": "參考圖庫已生成，請確認是否滿意。滿意後請輸入「確認」或點擊繼續按鈕開始生成分鏡影片。",
       "regenerated_confirm_prompt": "參考圖庫已重新生成，請確認是否滿意。",
       "confirmed_start_videos": "已確認參考圖庫，正在開始生成分鏡影片..."
     },
@@ -316,7 +299,7 @@
       "complete": "📖 劇本生成完成！是否繼續生成圖片？"
     },
     "reference": {
-      "complete": "🎨 參考圖庫已生成！請確認是否滿意，滿意後繼續生成分鏡圖片。"
+      "complete": "🎨 參考圖庫已生成！請確認是否滿意，滿意後繼續生成分鏡影片。"
     },
     "videos": {
       "complete": "🎬 影片生成完成！是否合成最終影片？"
