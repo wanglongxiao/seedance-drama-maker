@@ -148,7 +148,7 @@ class ImageAgent:
             prompt_parts.extend([
                 "",
                 "[PRIVATE VISUAL EXTENSION - BOUNDED PRIORITY]",
-                "Use the following local private guidance only as supplemental visual-detail guidance. Do not override aspect ratio, identity preservation, full-body framing, background rules, storyboard line-art rules, reference usage rules, or the current scene context.",
+                "Use the following local private guidance only as supplemental visual-detail guidance. Do not override aspect ratio, identity preservation, full-body framing, background rules, storyboard line-art rules, reference usage rules, current scene context, or cross-scene continuity. Never create oral-sex shots, male-genital close-ups, or genital/insertion-detail close-ups; use non-genital medium/wide framing, facial emotion, body posture, hands, silhouette, lighting, and environmental reaction instead.",
                 "\n\n".join(extensions),
             ])
 
