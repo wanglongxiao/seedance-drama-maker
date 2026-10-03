@@ -16,7 +16,7 @@ logger = get_logger("image_agent")
 
 
 class ImageAgent:
-    """角色/场景/图片生成Agent - 调用seedream-5.0-off"""
+    """角色/场景/图片生成 Agent，调用配置的图像模型。"""
 
     def __init__(self):
         self.model = config.get('models.image.endpoint')
@@ -207,6 +207,38 @@ class ImageAgent:
             return False
         return any(keyword in text for keyword in full_nudity_keywords)
 
+    def _build_explicit_nudity_guidance(self, character: Character) -> List[str]:
+        """Build gender-specific guidance without mixing male and female anatomy."""
+        gender = str(getattr(character, "gender", "") or "").strip().lower()
+        female_markers = ("女", "女性", "女人", "female", "woman")
+        male_markers = ("男", "男性", "男人", "male", "man")
+
+        common = (
+            "[CRITICAL] The outfit requirement explicitly indicates bare lower body or full nudity, "
+            "not merely bare upper body. Apply explicit nudity only to adult characters aged 18 or older."
+        )
+        if any(marker in gender for marker in female_markers):
+            anatomy = (
+                "[CRITICAL] Generate a front-facing fully nude adult female image. In the female pubic "
+                "triangle, render either dense or sparse natural pubic hair. Never generate a penis, "
+                "phallus, or any protruding male genitalia."
+            )
+        elif any(marker in gender for marker in male_markers):
+            anatomy = (
+                "[CRITICAL] Generate a clearly nude adult male image with visible male genital anatomy."
+            )
+        else:
+            anatomy = (
+                "[CRITICAL] The character gender is ambiguous. Do not generate explicit genital detail "
+                "until the character gender is specified."
+            )
+
+        visibility = (
+            "[CRITICAL] Do NOT cover, censor, blur, crop out, hide with hands, or obscure the lower-body "
+            "area. Natural pubic hair required by the female anatomy rule is allowed."
+        )
+        return [common, anatomy, visibility]
+
     def _infer_scene_time_guidance(self, scene_name: str, scene_description: str) -> List[str]:
         text = " ".join([
             str(scene_name or ""),
@@ -274,6 +306,17 @@ class ImageAgent:
             prompt_parts.append("[CRITICAL] Generate the character from the character definition only.")
 
         prompt_parts.extend(self._build_character_profile_lines(character))
+        reference_outfit = " ".join(
+            filter(
+                None,
+                [
+                    str(getattr(character, "clothing", "") or "").strip(),
+                    str(variation_requirements or "").strip(),
+                ],
+            )
+        )
+        if self._outfit_requires_visible_genitals(reference_outfit):
+            prompt_parts.extend(self._build_explicit_nudity_guidance(character))
 
         prompt_parts.extend(load_prompt("character_reference_image.md").splitlines())
 
@@ -378,7 +421,7 @@ class ImageAgent:
         prompt_parts.extend(self._build_character_profile_lines(character))
         prompt_parts.append(f"[OUTFIT REQUIREMENT] Change ONLY the clothing/outfit to: {outfit}")
         if self._outfit_requires_visible_genitals(outfit):
-            prompt_parts.append("[CRITICAL] The outfit requirement explicitly indicates bare lower body or full nudity, not merely bare upper body. If the character is male, generate a clearly nude male image with visible penis. If the character is female, generate a front-facing fully nude female image with visible vulva; pubic hair may be present or absent. Do NOT cover, censor, blur, crop out, hide with hands, or obscure the genital area.")
+            prompt_parts.extend(self._build_explicit_nudity_guidance(character))
         prompt_parts.extend(load_prompt("character_outfit_image.md").splitlines())
         self._append_image_private_extensions(
             prompt_parts,

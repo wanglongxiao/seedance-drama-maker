@@ -87,7 +87,7 @@ class ScriptAgent:
         prompt_parts.extend([
             "",
             "【本地私有扩展 - 限定优先级】",
-            "以下扩展仅用于成人题材的内容细化与角色装扮判定参考；不得覆盖本系统提示中的 JSON 结构、字段顺序、时长范围、角色/布景上限、风格原文、事实来源、语言和质量校验规则。",
+            "以下扩展仅用于成人题材的内容细化与角色装扮判定参考；不得覆盖本系统提示中的 JSON 结构、字段顺序、时长范围、角色/布景上限、风格原文、成人剧情镜头禁限、跨分镜视觉连续性、事实来源、语言和质量校验规则。",
             "\n\n".join(extensions),
         ])
 
@@ -892,7 +892,7 @@ class ScriptAgent:
                 )
                 messages[0]["content"] = (
                     self._get_system_prompt(output_language, target_total_duration, user_input)
-                    + "\n\n【重试修正】上一轮输出未通过程序校验。请依据 system prompt 修复字段缺失、时长越界、角色/布景引用缺失、特殊装扮未同步、对白缺失、相邻分镜缺少因果承接或分镜重复等问题，并重新输出完整 JSON。"
+                    + "\n\n【重试修正】上一轮输出未通过程序校验。请依据 system prompt 修复字段缺失、时长越界、description 秒段时间轴缺失或不连续、人物/镜头/光影细节不足、违反成人剧情镜头禁限、跨分镜风格/色调/镜头语言不连续、角色/布景引用缺失、特殊装扮未同步、对白缺失、相邻分镜缺少因果承接或分镜重复等问题，并重新输出完整 JSON。"
                 )
                 messages[1]["content"] = (
                     prompt
@@ -1016,7 +1016,7 @@ class ScriptAgent:
                 messages[0]["content"] = (
                     self._get_system_prompt(output_language, total_duration, edit_request, audio_text)
                     + "\n\n【改稿规则】请严格基于上一版剧本和修改要求输出一份完整 JSON。"
-                    + "\n【重试修正】上一轮改稿未通过程序校验。请修复分镜数量、字段完整性、时长范围、因果承接、转场、重复内容和上传参考图锁定名称等问题，并重新输出完整 JSON。"
+                    + "\n【重试修正】上一轮改稿未通过程序校验。请修复分镜数量、字段完整性、时长范围、description 秒段时间轴及人物/镜头/光影细节、成人剧情镜头禁限、跨分镜风格/色调/镜头语言连续性、因果承接、转场、重复内容和上传参考图锁定名称等问题，并重新输出完整 JSON。"
                 )
 
         logger.info(f"Script rewritten with {len(script_data['scenes'])} scenes")
