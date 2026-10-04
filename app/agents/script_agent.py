@@ -1869,6 +1869,23 @@ class ScriptAgent:
                 f"相邻分镜 {issue.get('scene_a')} -> {issue.get('scene_b')} 重复前镜内容；"
                 "下一镜应先响应前镜结果，再推进新动作或信息。"
             )
+        for issue in self._collect_intrusive_transition_issues(scenes)[:10]:
+            reason = issue.get("reason")
+            if reason == "meta_transition_language":
+                feedback.append(
+                    f"分镜 {issue.get('scene')} 使用了“{issue.get('marker')}”等元叙事转场文字；"
+                    "请直接写可见动作、视线、声音、道具、遮挡、构图或光影承接，不要向观众解释转场。"
+                )
+            elif reason == "repeated_transition_effect":
+                feedback.append(
+                    f"“{issue.get('effect')}”转场在多个分镜重复使用；请按剧情分别改用动作匹配、"
+                    "视线/道具/构图匹配、声桥或自然遮挡，必要时直接承接而不加特效。"
+                )
+            else:
+                feedback.append(
+                    f"分镜 {issue.get('scene')} 堆叠了过多显式转场效果；"
+                    "只保留一个有剧情动机且符合整体镜头语言的衔接方式。"
+                )
 
         characters = script_data.get("characters") or []
         character_keys = {
@@ -2107,6 +2124,14 @@ class ScriptAgent:
             logger.warning(
                 "Script quality check failed: scene definitions missing used backdrops: %s",
                 ", ".join(missing_scene_definitions[:10]),
+            )
+            return False
+
+        intrusive_transition_issues = self._collect_intrusive_transition_issues(scenes)
+        if intrusive_transition_issues:
+            logger.warning(
+                "Script quality check failed: intrusive or repetitive transition design: %s",
+                intrusive_transition_issues[:5],
             )
             return False
 
@@ -2752,6 +2777,111 @@ class ScriptAgent:
 
         return issues
 
+    def _collect_intrusive_transition_issues(
+        self,
+        scenes: List[Dict],
+    ) -> List[Dict[str, Any]]:
+        """Detect transition language/effects that call attention to the edit itself."""
+        issues: List[Dict[str, Any]] = []
+        meta_markers = [
+            "下一镜",
+            "下一个镜头",
+            "进入下个镜头",
+            "进入下一场",
+            "推进下一镜",
+            "承接下一镜",
+            "带到下一镜",
+            "转场钩子",
+            "悬念钩子",
+            "留下悬念",
+            "制造悬念",
+            "埋下伏笔",
+            "next scene",
+            "next shot",
+            "transition hook",
+            "leave suspense",
+            "次のシーン",
+            "次のカット",
+            "siguiente escena",
+            "dejar suspense",
+            "dejar suspenso",
+        ]
+        explicit_effects = [
+            "黑屏",
+            "闪白",
+            "旋转转场",
+            "粒子转场",
+            "故障转场",
+            "变焦爆炸",
+            "甩镜",
+            "淡入",
+            "淡出",
+            "叠化",
+            "black screen",
+            "white flash",
+            "spin transition",
+            "particle transition",
+            "glitch transition",
+            "whip pan",
+            "fade in",
+            "fade out",
+            "dissolve",
+            "ブラックアウト",
+            "ホワイトフラッシュ",
+            "回転トランジション",
+            "フェードイン",
+            "フェードアウト",
+            "pantalla negra",
+            "destello blanco",
+            "transición giratoria",
+            "fundido de entrada",
+            "fundido de salida",
+        ]
+        effect_occurrences: Dict[str, List[Any]] = {
+            effect: [] for effect in explicit_effects
+        }
+
+        for index, scene in enumerate(scenes, start=1):
+            scene_number = scene.get("scene_number", index)
+            description = str(scene.get("description") or "")
+            normalized = description.lower()
+            for marker in meta_markers:
+                if marker in normalized:
+                    issues.append({
+                        "scene": scene_number,
+                        "reason": "meta_transition_language",
+                        "marker": marker,
+                    })
+                    break
+
+            effects_in_scene = [
+                effect for effect in explicit_effects if effect in normalized
+            ]
+            if len(effects_in_scene) > 1:
+                issues.append({
+                    "scene": scene_number,
+                    "reason": "stacked_transition_effects",
+                    "effects": effects_in_scene,
+                })
+            for effect in effects_in_scene:
+                effect_occurrences[effect].append((index, scene_number))
+
+        for effect, occurrences in effect_occurrences.items():
+            indexes = [item[0] for item in occurrences]
+            scene_numbers = [item[1] for item in occurrences]
+            has_three_consecutive = any(
+                indexes[offset + 2] - indexes[offset] == 2
+                for offset in range(max(0, len(indexes) - 2))
+            )
+            overuse_threshold = max(4, (len(scenes) + 2) // 3)
+            if has_three_consecutive or len(occurrences) >= overuse_threshold:
+                issues.append({
+                    "reason": "repeated_transition_effect",
+                    "effect": effect,
+                    "scenes": scene_numbers,
+                })
+        return issues
+
     def _collect_outgoing_transition_issues(self, scenes: List[Dict]) -> List[Dict[str, Any]]:
         if len(scenes) < 2:
             return []
@@ -2781,7 +2911,26 @@ class ScriptAgent:
             return False
 
         transition_keywords = [
-            "镜头",
+            "仍在",
+            "继续",
+            "顺势",
+            "余音",
+            "脚步声",
+            "铃声",
+            "敲门声",
+            "视线",
+            "望向",
+            "看向",
+            "同一动作",
+            "同一方向",
+            "门后",
+            "窗外",
+            "倒影",
+            "前景",
+            "遮住",
+            "掠过",
+            "匹配",
+            "声桥",
             "画面切换",
             "切换至",
             "场景过渡",
@@ -2813,8 +2962,45 @@ class ScriptAgent:
         if not normalized:
             return False
 
-        trailing_window = normalized[-48:] if len(normalized) > 48 else normalized
+        trailing_window = normalized[-120:] if len(normalized) > 120 else normalized
         outgoing_keywords = [
+            "望向",
+            "看向",
+            "视线",
+            "伸向",
+            "握住",
+            "推开",
+            "走向",
+            "冲向",
+            "转身",
+            "脚步",
+            "铃声",
+            "敲门",
+            "风声",
+            "余音",
+            "回声",
+            "倒影",
+            "影子",
+            "前景",
+            "遮住",
+            "掠过",
+            "填满画面",
+            "停在",
+            "定格",
+            "光线",
+            "色彩",
+            "looks toward",
+            "gaze",
+            "reaches",
+            "opens",
+            "footsteps",
+            "ringing",
+            "echo",
+            "shadow",
+            "foreground",
+            "occludes",
+            "fills the frame",
+            "holds on",
             "随后",
             "接着",
             "紧接着",

@@ -31,7 +31,10 @@ class VideoAgent:
         self.default_resolution = config.get('video_generation.default_resolution', '480p')
         self.resolution_options = config.get('video_generation.resolution_options', ['480p', '720p'])
         # 平滑转场提示词
-        self.transition_prompt = config.get('video_generation.transition_prompt', '平滑的转场，自然流畅，无明显跳帧或卡顿')
+        self.transition_prompt = config.get(
+            'video_generation.transition_prompt',
+            '跨分镜衔接服从剧情，保持动作、视线、构图和光线自然连续，不添加抢戏的模板转场特效。',
+        )
         # 并发配置
         self.concurrency_enabled = config.get('generation.concurrency.enabled', True)
         self.max_workers = int(
@@ -679,6 +682,8 @@ class VideoAgent:
         camera = getattr(scene, 'camera_angle', None) or ''
         if camera:
             parts.append(f"镜头角度：{camera}")
+        if total_scenes > 1 and self.transition_prompt:
+            parts.append(f"跨分镜衔接原则：{self.transition_prompt}")
 
         chars_present = getattr(scene, 'characters_present', None) or []
         if isinstance(chars_present, list) and chars_present:

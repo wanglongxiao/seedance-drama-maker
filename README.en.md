@@ -206,7 +206,8 @@ Current rules:
 - Scene limit: `80`
 - Character definition limit: `30`
 - Backdrop definition limit: `30`
-- Adjacent scenes must stay continuous without repeating the same narrative beat
+- Adjacent scenes use motivated action/eyeline/prop/composition matches, sound bridges, natural occlusion, or lighting echoes; continuous scenes extend the performance directly, avoiding template transitions and forced suspense on every shot
+- Narrative hooks must grow from established character choices, consequences, partial reveals, sounds, props, or emotional changes and be paid off by later scenes; video generation must not add unmotivated black screens, white flashes, spins, particles, glitches, repeated whip pans, or frequent fades
 - If script quality validation fails, the script model revises the previous complete JSON using the concrete validation findings, preserving unaffected content instead of generating again from the original request
 - Per-scene special outfits and hairstyle changes are written explicitly to `character_outfits`, while backdrop time/weather state is written explicitly to `scene_state`; both fields appear before the scene description and are persisted for downstream image/video generation
 - Raw LLM responses are written to backend logs
