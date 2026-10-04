@@ -264,6 +264,126 @@ class ImageAgent:
         ])
         return lines
 
+    def _reference_matches_character(self, image: GeneratedImage, character_name: str) -> bool:
+        reference_type = str(getattr(image, "reference_type", "") or "").strip().lower()
+        if reference_type not in {"character", "character_outfit"}:
+            return False
+
+        character_key = self._normalize_lookup_key(character_name)
+        if not character_key:
+            return False
+
+        image_name_key = self._normalize_lookup_key(getattr(image, "name", ""))
+        if reference_type == "character":
+            return image_name_key == character_key
+
+        variant_key = str(getattr(image, "variant_key", "") or "")
+        variant_owner_key = self._normalize_lookup_key(variant_key.split("::", 1)[0])
+        if variant_owner_key:
+            return variant_owner_key == character_key
+        return image_name_key == character_key or image_name_key.startswith(f"{character_key}-")
+
+    def _build_key_action_character_reference_bindings(
+        self,
+        reference_images: List[GeneratedImage],
+        character_names: List[str],
+    ) -> List[str]:
+        if not character_names:
+            return []
+
+        lines = [
+            "[CHARACTER-TO-REFERENCE EXCLUSIVE BINDINGS]",
+            "Treat each binding below as exclusive: an image bound to one named character must never define, "
+            "replace, or create any other character.",
+        ]
+        for character_name in character_names:
+            formatted_name = self._format_character_name(character_name)
+            image_index = next(
+                (
+                    index
+                    for index, image in enumerate(reference_images, start=1)
+                    if self._reference_matches_character(image, character_name)
+                ),
+                None,
+            )
+            if image_index is None:
+                lines.append(
+                    f"- {formatted_name} has no matching character image. Build this character only from "
+                    "[SCENE CHARACTER DEFINITIONS]; never reuse another character's image or appearance."
+                )
+                continue
+            lines.append(
+                f"- {formatted_name} => Image {image_index} exclusively. Image {image_index} defines only "
+                f"{formatted_name}'s identity/appearance and produces exactly one final {formatted_name} instance."
+            )
+        lines.append(
+            "A reference image is a visual definition, not an extra person. Never blend two bound identities, "
+            "swap their faces or bodies, or use one character image for multiple cast roles."
+        )
+        return lines
+
+    def _build_key_action_embodiment_guidance(
+        self,
+        character_names: List[str],
+        script: Script,
+    ) -> List[str]:
+        non_corporeal_keywords = (
+            "非实体", "无实体", "半透明", "透明虚影", "虚影", "残魂", "残念", "魂体",
+            "灵体", "幽灵", "元神", "投影", "幻影", "spirit", "ghost", "spectral",
+            "translucent", "non-corporeal", "noncorporeal", "incorporeal", "apparition",
+            "hologram",
+        )
+        character_map = {
+            self._normalize_lookup_key(getattr(character, "name", "")): character
+            for character in getattr(script, "characters", None) or []
+        }
+        locked_characters: List[tuple[str, List[str]]] = []
+        for character_name in character_names:
+            character = character_map.get(self._normalize_lookup_key(character_name))
+            profile_values = [character_name]
+            if character is not None:
+                profile_values.extend(
+                    str(getattr(character, field, "") or "")
+                    for field in (
+                        "age",
+                        "gender",
+                        "face_features",
+                        "hairstyle",
+                        "body_features",
+                        "skin_tone",
+                        "clothing",
+                        "identity_background",
+                    )
+                )
+            profile_text = " ".join(profile_values).lower()
+            matched_keywords = [
+                keyword
+                for keyword in non_corporeal_keywords
+                if keyword.lower() in profile_text
+            ]
+            if matched_keywords:
+                locked_characters.append((character_name, matched_keywords))
+
+        if not locked_characters:
+            return []
+
+        lines = [
+            "[NON-CORPOREAL CHARACTER EMBODIMENT LOCK]",
+            "A non-corporeal named being still counts as one complete member of the exact cast.",
+        ]
+        for character_name, matched_keywords in locked_characters:
+            formatted_name = self._format_character_name(character_name)
+            cues = ", ".join(dict.fromkeys(matched_keywords))
+            lines.append(
+                f"- {formatted_name} is exactly one non-corporeal character instance (definition cues: {cues}). "
+                "Render that same named being in its described translucent/spiritual form."
+            )
+            lines.append(
+                f"- The apparition itself is the sole {formatted_name} instance. Never add a solid, corporeal, "
+                "younger, alternate, or stand-in body for it, and never replace it with a duplicate of another character."
+            )
+        return lines
+
     def _build_scene_reference_name(self, scene_description: str, index: int) -> str:
         cleaned = re.sub(r"\s+", " ", str(scene_description or "").strip())
         if not cleaned:
@@ -632,7 +752,11 @@ class ImageAgent:
         if not aspect_ratio:
             aspect_ratio = self.default_aspect_ratio
 
-        reference_images = self._sort_key_action_reference_images(reference_images)
+        scene_character_names = self._unique_scene_character_names(scene)
+        reference_images = self._sort_key_action_reference_images(
+            reference_images,
+            scene_character_names,
+        )
         prompt_parts: List[str] = [f"Aspect ratio: {aspect_ratio}"]
         reference_style_info = self._extract_reference_prompt_style(user_style_info)
         self._append_reference_style_guidance(prompt_parts, reference_style_info, script)
@@ -644,7 +768,6 @@ class ImageAgent:
 
         scene_context = self._resolve_scene_definition_context(getattr(scene, "scene_name", ""), script)
         reference_context = self._build_scene_reference_context(reference_images)
-        scene_character_names = self._unique_scene_character_names(scene)
         has_character_reference = self._has_any_reference_type(reference_images, "character", "character_outfit")
         has_scene_reference = self._has_any_reference_type(reference_images, "scene", "scene_state")
         has_scene_state_reference = self._has_any_reference_type(reference_images, "scene_state")
@@ -657,8 +780,19 @@ class ImageAgent:
         if reference_context:
             prompt_parts.extend(reference_context)
             prompt_parts.extend(self._build_key_action_reference_priority_context(reference_images))
-        if not has_character_reference:
-            prompt_parts.extend(self._build_scene_character_context(scene, script))
+        prompt_parts.extend(
+            self._build_key_action_character_reference_bindings(
+                reference_images,
+                scene_character_names,
+            )
+        )
+        prompt_parts.extend(self._build_scene_character_context(scene, script))
+        prompt_parts.extend(
+            self._build_key_action_embodiment_guidance(
+                scene_character_names,
+                script,
+            )
+        )
         if not has_scene_reference and getattr(scene, "scene_name", None):
             prompt_parts.append(f"Scene name: {getattr(scene, 'scene_name', '')}")
         if scene_context["descriptions"] and not has_scene_reference:
@@ -868,29 +1002,71 @@ class ImageAgent:
     def _sort_key_action_reference_images(
         self,
         reference_images: Optional[List[GeneratedImage]],
+        character_names: Optional[List[str]] = None,
     ) -> List[GeneratedImage]:
         if not reference_images:
             return []
-        priority = {
-            "character_outfit": 0,
-            "scene_state": 1,
-            "character": 2,
-            "scene": 3,
-            "key_action": 4,
-        }
-        return sorted(
-            list(reference_images),
-            key=lambda image: (
-                priority.get(str(getattr(image, "reference_type", "") or "").strip().lower(), 99),
-                str(getattr(image, "name", "") or ""),
+
+        images = list(reference_images)
+        ordered: List[GeneratedImage] = []
+        selected_indexes = set()
+        character_names = list(character_names or [])
+
+        for character_name in character_names:
+            matches = [
+                (index, image)
+                for index, image in enumerate(images)
+                if index not in selected_indexes
+                and self._reference_matches_character(image, character_name)
+            ]
+            if not matches:
+                continue
+            selected_index, selected_image = min(
+                matches,
+                key=lambda item: (
+                    0 if str(getattr(item[1], "reference_type", "") or "").lower() == "character_outfit" else 1,
+                    item[0],
+                ),
+            )
+            selected_indexes.add(selected_index)
+            ordered.append(selected_image)
+
+        environment_priority = {"scene_state": 0, "scene": 1}
+        environment_images = [
+            (index, image)
+            for index, image in enumerate(images)
+            if index not in selected_indexes
+            and str(getattr(image, "reference_type", "") or "").strip().lower() in environment_priority
+        ]
+        for index, image in sorted(
+            environment_images,
+            key=lambda item: (
+                environment_priority[str(getattr(item[1], "reference_type", "") or "").strip().lower()],
+                item[0],
             ),
-        )
+        ):
+            selected_indexes.add(index)
+            ordered.append(image)
+
+        for index, image in enumerate(images):
+            if index in selected_indexes:
+                continue
+            reference_type = str(getattr(image, "reference_type", "") or "").strip().lower()
+            if character_names and reference_type in {"character", "character_outfit"}:
+                logger.warning(
+                    "Ignoring unbound key-action character reference %s (%s)",
+                    getattr(image, "name", ""),
+                    reference_type,
+                )
+                continue
+            ordered.append(image)
+        return ordered
 
     def _build_key_action_reference_priority_context(
         self,
         reference_images: Optional[List[GeneratedImage]],
     ) -> List[str]:
-        ordered_images = self._sort_key_action_reference_images(reference_images)
+        ordered_images = list(reference_images or [])
         if not ordered_images:
             return []
 

@@ -1273,14 +1273,12 @@ class MainAgent:
     def _select_key_action_reference_assets_for_scene(self, project: VideoProject, scene) -> List[GeneratedImage]:
         """关键动作参考图专用参考资产选择。
 
-        优先级固定为：
-        1. 角色装扮图
-        2. 布景状态图
-        3. 角色主图（仅在对应装扮图缺失时兜底）
-        4. 布景主图（仅在对应状态图缺失时兜底）
+        顺序与唯一性固定为：
+        1. 按 characters_present 顺序，每个角色只选一张装扮图或角色主图
+        2. 按 scene_name 顺序，每个布景只选一张状态图或布景主图
+        3. 缺失角色资产时依赖文字定义，不得用其他角色图片兜底
         """
-        preferred_assets: List[GeneratedImage] = []
-        fallback_assets: List[GeneratedImage] = []
+        selected_assets: List[GeneratedImage] = []
 
         outfits = getattr(scene, "character_outfits", None) or {}
         outfit_key_by_char = {
@@ -1293,20 +1291,32 @@ class MainAgent:
             for image in (getattr(project, "character_reference_images", []) or [])
             if self._normalize_name_key(getattr(image, "name", ""))
         }
-        present_characters = [
-            self._normalize_name_key(name)
-            for name in (getattr(scene, "characters_present", None) or [])
-            if str(name or "").strip()
-        ]
-        for character_key in present_characters:
+        present_characters: List[tuple[str, str]] = []
+        seen_character_keys = set()
+        for raw_name in getattr(scene, "characters_present", None) or []:
+            character_name = str(raw_name or "").strip()
+            character_key = self._normalize_name_key(character_name)
+            if not character_key or character_key in seen_character_keys:
+                continue
+            seen_character_keys.add(character_key)
+            present_characters.append((character_name, character_key))
+
+        for character_name, character_key in present_characters:
             outfit_desc = outfit_key_by_char.get(character_key, "")
             outfit_image = self._find_outfit_asset_for_scene(project, character_key, outfit_desc) if outfit_desc else None
             if outfit_image is not None:
-                preferred_assets.append(outfit_image)
+                selected_assets.append(outfit_image)
                 continue
             base_character_image = character_ref_map.get(character_key)
             if base_character_image is not None:
-                fallback_assets.append(base_character_image)
+                selected_assets.append(base_character_image)
+                continue
+            logger.warning(
+                "No matching character reference for key-action scene %s character %s; "
+                "using the script character definition instead",
+                getattr(scene, "scene_number", ""),
+                character_name,
+            )
 
         scene_ref_map = {
             self._normalize_name_key(getattr(image, "name", "")): image
@@ -1325,20 +1335,15 @@ class MainAgent:
         for scene_key in scene_name_keys:
             state_image = self._find_scene_state_asset(project, scene_key, scene_state, scene_tod, scene_weather)
             if state_image is not None:
-                preferred_assets.append(state_image)
+                selected_assets.append(state_image)
                 continue
             base_scene_image = scene_ref_map.get(scene_key)
             if base_scene_image is not None:
-                fallback_assets.append(base_scene_image)
-
-        if not preferred_assets and not fallback_assets:
-            fallback_assets.extend((getattr(project, "scene_reference_images", []) or [])[:2])
-        if not preferred_assets and not fallback_assets:
-            fallback_assets.extend((getattr(project, "character_reference_images", []) or [])[:2])
+                selected_assets.append(base_scene_image)
 
         selected: List[GeneratedImage] = []
         seen_keys = set()
-        for image in preferred_assets + fallback_assets:
+        for image in selected_assets:
             unique_key = str(getattr(image, "asset_id", "") or getattr(image, "url", "") or "")
             if not unique_key or unique_key in seen_keys:
                 continue
