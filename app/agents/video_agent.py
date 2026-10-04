@@ -662,6 +662,11 @@ class VideoAgent:
             ]
             if outfit_lines:
                 parts.append(f"本分镜角色装扮（含发型）：{'；'.join(outfit_lines)}")
+                parts.append(
+                    "装扮状态锁：以上 character_outfits 及匹配的角色装扮参考图决定本分镜每一帧的服装与裸露层级，"
+                    "优先级高于角色基础参考图中的默认服装；没有时间轴中明确完成的穿衣动作时，禁止因切镜、"
+                    "遮挡、被单、换机位、转场或亲密行为结束而增加衣物。"
+                )
         parts.append(f"场景描述：{getattr(scene, 'description', '')}")
         parts.append(load_prompt("video_scene_static_rules.md"))
 

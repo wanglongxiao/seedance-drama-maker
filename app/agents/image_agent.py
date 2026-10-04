@@ -424,6 +424,10 @@ class ImageAgent:
         prompt_parts.append("[CRITICAL] Keep the SAME person as the reference image: preserve face, hairstyle, facial features, skin tone and identity exactly.")
         prompt_parts.extend(self._build_character_profile_lines(character))
         prompt_parts.append(f"[OUTFIT REQUIREMENT] Change ONLY the clothing/outfit to: {outfit}")
+        prompt_parts.append(
+            "[WARDROBE STATE LOCK] The OUTFIT REQUIREMENT is authoritative for clothing and nudity level. "
+            "Use the base reference only for identity; never restore its default clothing over the requested outfit."
+        )
         if self._outfit_requires_visible_genitals(outfit):
             prompt_parts.extend(self._build_explicit_nudity_guidance(character))
         prompt_parts.extend(load_prompt("character_outfit_image.md").splitlines())
@@ -566,6 +570,10 @@ class ImageAgent:
             ]
             if outfit_lines:
                 prompt_parts.append(f"Current character outfit and hairstyle state: {'; '.join(outfit_lines)}")
+                prompt_parts.append(
+                    "[WARDROBE STATE LOCK] Apply each current outfit and nudity level exactly. "
+                    "Base character references provide identity only and must not add default clothing."
+                )
         prompt_parts.append(f"Scene description: {getattr(scene, 'description', '')}")
         prompt_parts.append(f"Character action: {getattr(scene, 'character_description', '')}")
         prompt_parts.append(f"Mood: {getattr(scene, 'mood', '')}")
@@ -776,6 +784,10 @@ class ImageAgent:
         if outfit_refs:
             parts.append(
                 f"Prefer {'/'.join(outfit_refs)} for the current character outfit, hairstyle, nudity level, damage, stains, and continuity."
+            )
+            parts.append(
+                "Character outfit references are authoritative for wardrobe and nudity level; "
+                "base character references may supply identity only and must not restore default clothing."
             )
         if state_refs:
             parts.append(

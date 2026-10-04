@@ -692,13 +692,170 @@ class ScriptAgent:
             categories.add("battle")
         return categories
 
+    def _outfit_nudity_level(self, value: Any) -> int:
+        """Return a coarse, ordered exposure level for wardrobe continuity."""
+        text = self._normalize_single_line(value).lower()
+        if not text:
+            return 0
+        if self._text_contains_any_keyword(
+            text,
+            [
+                "半裸", "上身全裸", "上身赤裸", "赤裸上身", "裸露上身",
+                "下身赤裸", "赤裸下身", "裸露下身", "胸部裸露", "衣衫不整",
+            ],
+        ):
+            return 2
+        if self._text_contains_any_keyword(
+            text,
+            [
+                "全身裸体", "全裸", "一丝不挂", "赤身裸体", "全身赤裸",
+                "浑身赤裸", "正面裸体", "完全裸体",
+            ],
+        ):
+            return 3
+        if self._text_contains_any_keyword(
+            text,
+            [
+                "只穿内衣", "只着内衣", "只穿内裤", "内衣裤", "内衣", "内裤",
+                "胸罩", "文胸", "丁字裤",
+            ],
+        ):
+            return 1
+        return 0
+
+    def _scene_nudity_level(self, scene: Optional[Dict[str, Any]]) -> int:
+        if not scene:
+            return 0
+        values = [
+            self._scene_text_blob(scene),
+            " ".join(self._normalize_character_outfits(scene.get("character_outfits")).values()),
+        ]
+        return max(self._outfit_nudity_level(value) for value in values)
+
+    def _text_has_explicit_dressing_completion(self, text: Any) -> bool:
+        normalized = self._normalize_single_line(text)
+        if not normalized:
+            return False
+        garment = (
+            r"衣服|衣物|内衣|内裤|衬衫|上衣|外套|夹克|风衣|西装|"
+            r"T恤|毛衣|针织衫|裙子|连衣裙|长裙|短裙|裤子|长裤|短裤|"
+            r"睡衣|睡袍|浴袍|长袍|礼服|制服"
+        )
+        patterns = (
+            rf"(?:穿|套|披|裹|换)(?:上|回|好).{{0,12}}(?:{garment})",
+            rf"(?:把|将)?.{{0,12}}(?:{garment}).{{0,12}}(?:穿|套|披|裹|换)(?:上|回|好)",
+            r"(?:扣|系|拉)(?:上|好).{0,12}(?:纽扣|扣子|腰带|系带|拉链)",
+            r"(?:系紧|扣紧).{0,12}(?:衣襟|腰带|系带|纽扣|扣子)",
+        )
+        return any(re.search(pattern, normalized) for pattern in patterns)
+
+    def _text_has_character_explicit_dressing_completion(
+        self,
+        text: Any,
+        character_name: str,
+        present_names: List[str],
+    ) -> bool:
+        normalized = self._normalize_single_line(text)
+        if not self._text_has_explicit_dressing_completion(normalized):
+            return False
+        if not character_name or len(present_names) <= 1:
+            return True
+        collective_markers = ("两人", "二人", "双方", "他们", "她们", "众人", "各自")
+        for clause in re.split(r"[。；;！？!?\n]+", normalized):
+            if not self._text_has_explicit_dressing_completion(clause):
+                continue
+            if character_name in clause or f"[{character_name}]" in clause:
+                return True
+            if any(marker in clause for marker in collective_markers):
+                return True
+        return False
+
+    def _scene_has_explicit_dressing_completion(
+        self,
+        scene: Optional[Dict[str, Any]],
+        character_name: str = "",
+    ) -> bool:
+        if not scene:
+            return False
+        text = " ".join(
+            self._normalize_single_line(scene.get(field))
+            for field in ("description", "character_description")
+            if self._normalize_single_line(scene.get(field))
+        )
+        present_names = [
+            self._strip_character_name_markers(name)
+            for name in (scene.get("characters_present") or [])
+            if self._strip_character_name_markers(name)
+        ]
+        return self._text_has_character_explicit_dressing_completion(
+            text,
+            character_name,
+            present_names,
+        )
+
+    def _text_asserts_clothed_state(self, text: Any) -> bool:
+        normalized = self._normalize_single_line(text)
+        if not normalized:
+            return False
+        garment = (
+            r"衣服|衣物|内衣|内裤|衬衫|上衣|外套|夹克|风衣|西装|"
+            r"T恤|毛衣|针织衫|裙子|连衣裙|长裙|短裙|裤子|长裤|短裤|"
+            r"睡衣|睡袍|浴袍|长袍|礼服|制服"
+        )
+        return bool(
+            re.search(
+                rf"(?:穿着|身穿|披着|套着|裹着).{{0,16}}(?:{garment})|"
+                rf"(?:{garment}).{{0,10}}(?:穿在身上|遮住身体)|"
+                r"衣着整齐|穿戴整齐|衣物齐全|恢复(?:了)?完整衣着",
+                normalized,
+            )
+        )
+
+    def _text_asserts_character_clothed_state(
+        self,
+        text: Any,
+        character_name: str,
+        present_names: List[str],
+    ) -> bool:
+        normalized = self._normalize_single_line(text)
+        if not self._text_asserts_clothed_state(normalized):
+            return False
+        if len(present_names) <= 1:
+            return True
+        collective_markers = ("两人", "二人", "双方", "他们", "她们", "众人", "各自")
+        for clause in re.split(r"[。；;！？!?\n]+", normalized):
+            if not self._text_asserts_clothed_state(clause):
+                continue
+            if character_name in clause or f"[{character_name}]" in clause:
+                return True
+            if any(marker in clause for marker in collective_markers):
+                return True
+        return False
+
+    def _scene_continues_nudity_lock(
+        self,
+        scene: Dict[str, Any],
+        previous_scene: Optional[Dict[str, Any]],
+    ) -> bool:
+        current_categories = self._scene_context_categories(scene)
+        previous_categories = self._scene_context_categories(previous_scene or {})
+        if "intimate" in current_categories and (
+            "intimate" in previous_categories or self._scene_nudity_level(previous_scene) > 0
+        ):
+            return True
+        return bool(
+            self._scenes_share_continuity_context(scene, previous_scene)
+            and self._scene_has_continuation_signal(scene)
+        )
+
     def _scene_has_continuation_signal(self, scene: Dict[str, Any]) -> bool:
         return self._text_contains_any_keyword(
             self._scene_text_blob(scene),
             [
                 "继续", "持续", "仍然", "依旧", "依然", "愈发", "越发", "越来越",
                 "没有停", "不停", "节奏", "喘息", "气息", "呼吸", "抱住", "贴着",
-                "缠住", "抓出", "压住", "俯身", "顺着", "起伏", "扭动", "迎合",
+                "缠住", "依偎", "相拥", "抓出", "压住", "俯身", "顺着", "起伏",
+                "扭动", "迎合",
             ],
         )
 
@@ -779,6 +936,7 @@ class ScriptAgent:
             for character in characters or []
             if isinstance(character, dict) and self._normalize_single_line(character.get('name'))
         }
+        active_nudity_outfits: Dict[str, str] = {}
 
         for idx, scene in enumerate(scenes):
             current_outfits = self._normalize_character_outfits(scene.get('character_outfits'))
@@ -813,35 +971,81 @@ class ScriptAgent:
                 )
 
                 if current_outfit:
-                    current_outfits[char_name] = self._ensure_outfit_includes_hairstyle(
+                    current_outfit = self._ensure_outfit_includes_hairstyle(
                         current_outfit,
                         character,
                         previous_outfit=prev_outfit,
                         next_outfit=next_outfit,
                     )
-                    continue
+                    current_outfits[char_name] = current_outfit
 
-                if has_reset_signal:
-                    continue
-
-                prev_categories = self._outfit_categories(prev_outfit)
-                next_categories = self._outfit_categories(next_outfit)
-
-                inherited_outfit = ""
-                if prev_outfit and current_categories & prev_categories:
-                    inherited_outfit = prev_outfit
-                elif prev_outfit and next_outfit and prev_categories and next_categories and prev_categories & next_categories:
-                    inherited_outfit = prev_outfit
-                elif next_outfit and current_categories & next_categories:
-                    inherited_outfit = next_outfit
-
-                if inherited_outfit:
+                locked_outfit = active_nudity_outfits.get(char_name, "")
+                if not locked_outfit and self._outfit_nudity_level(prev_outfit) > 0:
+                    locked_outfit = prev_outfit
+                current_dressing_completion = self._scene_has_explicit_dressing_completion(
+                    scene,
+                    char_name,
+                )
+                continues_nudity = bool(
+                    locked_outfit
+                    and (
+                        self._scene_continues_nudity_lock(scene, prev_scene)
+                        or current_dressing_completion
+                    )
+                    and not self._scene_has_explicit_dressing_completion(prev_scene, char_name)
+                )
+                if continues_nudity and (
+                    not current_outfit
+                    or self._outfit_nudity_level(current_outfit)
+                    < self._outfit_nudity_level(locked_outfit)
+                ):
                     current_outfits[char_name] = self._ensure_outfit_includes_hairstyle(
-                        inherited_outfit,
+                        locked_outfit,
                         character,
                         previous_outfit=prev_outfit,
                         next_outfit=next_outfit,
                     )
+                    current_outfit = current_outfits[char_name]
+                    logger.warning(
+                        "Preserved active nudity outfit continuity in scene %s: %s=%s",
+                        scene.get("scene_number", idx + 1),
+                        char_name,
+                        current_outfit,
+                    )
+
+                if not current_outfit and not has_reset_signal:
+                    prev_categories = self._outfit_categories(prev_outfit)
+                    next_categories = self._outfit_categories(next_outfit)
+
+                    inherited_outfit = ""
+                    if prev_outfit and current_categories & prev_categories:
+                        inherited_outfit = prev_outfit
+                    elif prev_outfit and next_outfit and prev_categories and next_categories and prev_categories & next_categories:
+                        inherited_outfit = prev_outfit
+                    elif next_outfit and current_categories & next_categories:
+                        inherited_outfit = next_outfit
+
+                    if inherited_outfit:
+                        current_outfits[char_name] = self._ensure_outfit_includes_hairstyle(
+                            inherited_outfit,
+                            character,
+                            previous_outfit=prev_outfit,
+                            next_outfit=next_outfit,
+                        )
+                        current_outfit = current_outfits[char_name]
+
+                final_outfit = current_outfits.get(char_name, "")
+                final_nudity_level = self._outfit_nudity_level(final_outfit)
+                if current_dressing_completion:
+                    active_nudity_outfits.pop(char_name, None)
+                elif final_nudity_level > 0 and (
+                    "intimate" in current_categories or self._scene_nudity_level(scene) > 0
+                ):
+                    active_nudity_outfits[char_name] = final_outfit
+                elif locked_outfit and continues_nudity:
+                    active_nudity_outfits[char_name] = locked_outfit
+                elif has_reset_signal or not self._scenes_share_continuity_context(scene, prev_scene):
+                    active_nudity_outfits.pop(char_name, None)
 
             scene['character_outfits'] = self._filter_default_character_outfits(current_outfits, characters)
 
@@ -1721,6 +1925,102 @@ class ScriptAgent:
                     break
         return issues
 
+    def _collect_spatial_topology_issues(
+        self,
+        scenes: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Validate camera-facing geometry and object/body occlusion relationships."""
+        face_to_face_pattern = re.compile(
+            r"面对面|面对彼此|面向对方|彼此正面相对|"
+            r"相对而(?:立|站|坐)|相向而(?:立|站|坐)|转身面对(?:彼此|对方)"
+        )
+        facing_solution_pattern = re.compile(
+            r"背对镜头|背向镜头|后背朝向镜头|三分之(?:二|三)(?:侧|背)|"
+            r"侧背面|侧背构图|侧对镜头|双人侧面|侧面双人|侧面轮廓|"
+            r"过肩(?:镜头|构图)?|肩后机位|正反打|反打镜头|"
+            r"前景(?:肩背|后脑|背影)|镜头.{0,16}(?:两人|二人).{0,12}侧面|"
+            r"(?:一人|其中一人).{0,12}(?:背对|背向|侧对)镜头|"
+            r"profile|over[- ]the[- ]shoulder|shot[- ]reverse[- ]shot",
+            flags=re.IGNORECASE,
+        )
+        penetrating_object = (
+            r"刀|刀刃|匕首|短刀|长刀|剑|剑刃|短剑|长剑|利刃|"
+            r"箭|箭矢|长矛|短矛|矛尖|枪尖"
+        )
+        body_location = (
+            r"胸口|胸膛|胸前|腹部|小腹|肩膀|肩部|后背|背部|"
+            r"腰侧|大腿|手臂|躯干|身体"
+        )
+        penetration_pattern = re.compile(
+            rf"(?:{penetrating_object}).{{0,18}}(?:插|刺|贯)(?:入|进|在|着|中|穿透)"
+            rf".{{0,18}}(?:{body_location})|"
+            rf"(?:{body_location}).{{0,18}}(?:插|刺|贯)(?:着|入|进|有|穿透)"
+            rf".{{0,18}}(?:{penetrating_object})"
+        )
+        embedded_part_pattern = re.compile(
+            r"(?:刀刃|剑刃|刃部|箭头|矛尖|枪尖).{0,20}"
+            r"(?:没入|埋入|进入体内|藏入|隐藏|不可见|看不见|被.{0,10}(?:身体|皮肉|伤口).{0,8}遮挡)|"
+            r"(?:没入|埋入|进入体内|藏入|隐藏|不可见|看不见).{0,20}"
+            r"(?:刀刃|剑刃|刃部|箭头|矛尖|枪尖)"
+        )
+        exposed_part_pattern = re.compile(
+            r"(?:只|仅)(?:能)?(?:露出|剩下|剩|看到|看见|见到)?"
+            r".{0,12}(?:刀柄|剑柄|握柄|护手|箭杆|箭尾|矛杆|枪杆)|"
+            r"(?:刀柄|剑柄|握柄|护手|箭杆|箭尾|矛杆|枪杆).{0,12}"
+            r"(?:外露|露在体外|留在体外|露出|可见)"
+        )
+        pass_through_pattern = re.compile(
+            r"(?:贯穿|穿透).{0,24}(?:从|由).{0,12}"
+            r"(?:后背|背部|另一侧|身体另一面).{0,12}(?:穿出|露出)"
+        )
+
+        issues: List[Dict[str, Any]] = []
+        for index, scene in enumerate(scenes or [], start=1):
+            scene_number = int(scene.get("scene_number") or index)
+            present_names = [
+                self._strip_character_name_markers(name)
+                for name in (scene.get("characters_present") or [])
+                if self._strip_character_name_markers(name)
+            ]
+            camera_text = self._normalize_single_line(scene.get("camera_angle"))
+            description = str(scene.get("description") or "")
+            segments = self._extract_description_timeline_segments(description)
+            segment_items = segments or [{"content": description}]
+
+            if len(present_names) >= 2:
+                for segment_index, segment in enumerate(segment_items, start=1):
+                    content = self._normalize_single_line(segment.get("content"))
+                    if (
+                        face_to_face_pattern.search(content)
+                        and not facing_solution_pattern.search(f"{content} {camera_text}")
+                    ):
+                        issues.append({
+                            "scene": scene_number,
+                            "segment": segment_index,
+                            "reason": "face_to_face_camera_orientation_underspecified",
+                        })
+                        break
+
+            object_text = " ".join(
+                self._normalize_single_line(scene.get(field))
+                for field in ("description", "character_description", "camera_angle")
+                if self._normalize_single_line(scene.get(field))
+            )
+            if (
+                penetration_pattern.search(object_text)
+                and not (
+                    embedded_part_pattern.search(object_text)
+                    and exposed_part_pattern.search(object_text)
+                )
+                and not pass_through_pattern.search(object_text)
+            ):
+                issues.append({
+                    "scene": scene_number,
+                    "reason": "penetrating_object_occlusion_underspecified",
+                })
+
+        return issues
+
     def _collect_duration_variation_issues(
         self,
         scenes: List[Dict[str, Any]],
@@ -1776,6 +2076,92 @@ class ScriptAgent:
                 "scene": soft_occurrences[1],
                 "reason": "repeated_intimacy_motion_across_scenes",
             })
+        return issues
+
+    def _collect_wardrobe_continuity_issues(
+        self,
+        scenes: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Detect clothing that appears after nudity without a visible dressing action."""
+        issues: List[Dict[str, Any]] = []
+        active_nudity_outfits: Dict[str, str] = {}
+
+        for index, scene in enumerate(scenes or [], start=1):
+            scene_number = int(scene.get("scene_number") or index)
+            previous_scene = scenes[index - 2] if index > 1 else None
+            outfits = self._normalize_character_outfits(scene.get("character_outfits"))
+            present_names = [
+                self._strip_character_name_markers(name)
+                for name in (scene.get("characters_present") or [])
+                if self._strip_character_name_markers(name)
+            ]
+            segments = self._extract_description_timeline_segments(scene.get("description"))
+
+            for character_name in present_names:
+                locked_outfit = active_nudity_outfits.get(character_name, "")
+                outfit = outfits.get(character_name, "")
+                outfit_level = self._outfit_nudity_level(outfit)
+                continues_lock = bool(
+                    locked_outfit
+                    and self._scene_continues_nudity_lock(scene, previous_scene)
+                    and not self._scene_has_explicit_dressing_completion(
+                        previous_scene,
+                        character_name,
+                    )
+                )
+                current_level = max(
+                    outfit_level,
+                    self._outfit_nudity_level(locked_outfit) if continues_lock else 0,
+                )
+                dressing_completed = False
+
+                for segment_index, segment in enumerate(segments, start=1):
+                    content = segment.get("content", "")
+                    explicit_dressing = self._text_has_character_explicit_dressing_completion(
+                        content,
+                        character_name,
+                        present_names,
+                    )
+                    if (
+                        current_level > 0
+                        and self._text_asserts_character_clothed_state(
+                            content,
+                            character_name,
+                            present_names,
+                        )
+                        and not explicit_dressing
+                        and not dressing_completed
+                    ):
+                        issues.append({
+                            "scene": scene_number,
+                            "character": character_name,
+                            "segment": segment_index,
+                            "reason": "clothing_appears_without_dressing_action",
+                        })
+                        break
+
+                    if explicit_dressing:
+                        dressing_completed = True
+                        current_level = 0
+                    else:
+                        segment_level = self._outfit_nudity_level(content)
+                        if segment_level > 0:
+                            current_level = segment_level
+
+                if self._scene_has_explicit_dressing_completion(scene, character_name):
+                    active_nudity_outfits.pop(character_name, None)
+                elif current_level > 0 and (
+                    "intimate" in self._scene_context_categories(scene)
+                    or self._scene_nudity_level(scene) > 0
+                ):
+                    active_nudity_outfits[character_name] = (
+                        outfit or locked_outfit
+                    )
+                elif locked_outfit and continues_lock:
+                    active_nudity_outfits[character_name] = locked_outfit
+                elif self._scene_has_outfit_reset_signal(scene):
+                    active_nudity_outfits.pop(character_name, None)
+
         return issues
 
     def _serialize_script_for_revision(self, script_data: Dict[str, Any]) -> str:
@@ -1859,6 +2245,26 @@ class ScriptAgent:
                 f"分镜 {issue.get('scene', '?')} 含不合规或重复的亲密动作："
                 f"{issue.get('reason')}；请改用人物关系、表情、手部、轮廓和环境反馈推进。"
             )
+        for issue in self._collect_wardrobe_continuity_issues(scenes)[:10]:
+            feedback.append(
+                f"分镜 {issue.get('scene', '?')} 的第 {issue.get('segment', '?')} 个秒段中，"
+                f"角色 [{issue.get('character', '?')}] 在裸露状态后没有可见穿衣动作却恢复了衣着；"
+                "请保持上一秒段及上一分镜的裸露层级，或先完整写出拿起衣物并穿好/扣好/系好的连续动作，"
+                "再在后续秒段或下一分镜切换为穿衣造型。"
+            )
+        for issue in self._collect_spatial_topology_issues(scenes)[:10]:
+            if issue.get("reason") == "face_to_face_camera_orientation_underspecified":
+                feedback.append(
+                    f"分镜 {issue.get('scene', '?')} 的第 {issue.get('segment', '?')} 个秒段中，"
+                    "多人面对面站位没有说明相机可见朝向；请明确采用“一人正面、另一人背面/侧背面”、"
+                    "双人侧面构图、过肩镜头或正反打，并逐一写清各角色朝向，禁止同框所有人都正面朝向镜头。"
+                )
+            else:
+                feedback.append(
+                    f"分镜 {issue.get('scene', '?')} 的刺入物体缺少正确遮挡关系；"
+                    "请写清刺入方向、深度和入口位置。刀剑刺入胸腹后，进入身体的刃部必须被身体遮挡且不可见，"
+                    "体外只露出刀柄/剑柄和护手；若为贯穿伤，则必须明确入口、出口及从另一侧穿出的部分。"
+                )
         for issue in self._collect_duplicate_scene_issues(scenes)[:10]:
             feedback.append(
                 f"分镜 {issue.get('scene_a')} 与 {issue.get('scene_b')} 的 "
@@ -2021,6 +2427,27 @@ class ScriptAgent:
             for issue in intimacy_action_issues[:5]:
                 logger.warning(
                     "Script quality check failed: scene %s intimacy action issue (%s)",
+                    issue["scene"],
+                    issue["reason"],
+                )
+            return False
+
+        wardrobe_continuity_issues = self._collect_wardrobe_continuity_issues(scenes)
+        if wardrobe_continuity_issues:
+            for issue in wardrobe_continuity_issues[:5]:
+                logger.warning(
+                    "Script quality check failed: scene %s character %s wardrobe continuity issue (%s)",
+                    issue["scene"],
+                    issue["character"],
+                    issue["reason"],
+                )
+            return False
+
+        spatial_topology_issues = self._collect_spatial_topology_issues(scenes)
+        if spatial_topology_issues:
+            for issue in spatial_topology_issues[:5]:
+                logger.warning(
+                    "Script quality check failed: scene %s spatial topology issue (%s)",
                     issue["scene"],
                     issue["reason"],
                 )
