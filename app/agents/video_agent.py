@@ -90,7 +90,7 @@ class VideoAgent:
             prompt_parts.extend([
                 "",
                 "【本地私有视频扩展 - 限定优先级】",
-                "以下内容仅作为当前分镜的视频动作节奏、视角或互动细节补充；不得覆盖参考图顺序、角色身份与跨分镜状态连续性、布景状态、关键动作参考图、无字幕、音色一致、镜头时长、背景音乐限制或当前分镜文本。禁止口交镜头、男性生殖器官特写及性交插入部位/器官/解剖细节特写；亲密剧情只使用非器官焦点的中远景、侧背面、面部/眼神/手部、身体轮廓、光影和环境反应表达。",
+                "以下内容仅作为当前分镜的视频动作节奏、视角或互动细节补充；不得覆盖参考图顺序、角色身份与跨分镜状态连续性、精确角色数量、单角色单实例、人体拓扑与关节物理、布景状态、关键动作参考图纠错规则、无字幕、音色一致、镜头时长、背景音乐限制或当前分镜文本。禁止口交镜头、男性生殖器官特写及性交插入部位/器官/解剖细节特写；亲密剧情只使用非器官焦点的中远景、侧背面、面部/眼神/手部、身体轮廓、光影和环境反应表达。",
                 "\n\n".join(extensions),
             ])
 
@@ -578,6 +578,52 @@ class VideoAgent:
         logger.info(f"Generated random duration: {random_duration}s (range: {self.default_duration_min}-{self.default_duration_max}s)")
         return random_duration
 
+    def _unique_scene_character_names(self, scene) -> List[str]:
+        """Return each named scene character once, preserving script order."""
+        unique_names: List[str] = []
+        seen = set()
+        for raw_name in getattr(scene, "characters_present", None) or []:
+            name = re.sub(r"^\[|\]$", "", str(raw_name or "").strip())
+            key = self._normalize_name_key(name)
+            if not name or not key or key in seen:
+                continue
+            seen.add(key)
+            unique_names.append(name)
+        return unique_names
+
+    def _build_video_subject_integrity_rules(
+        self,
+        character_names: List[str],
+        has_key_action_reference: bool,
+    ) -> List[str]:
+        formatted_names = [self._format_character_name(name) for name in character_names]
+        lines = ["角色唯一性与人体拓扑锁："]
+        if formatted_names:
+            lines.append(
+                f"- 本分镜仅允许出现 {len(formatted_names)} 个具名角色实例："
+                f"{'、'.join(formatted_names)}；每个角色从首帧到末帧始终只有一个连续身体实例。"
+            )
+            lines.extend(f"- {name} 在任意一帧最多且仅出现一次。" for name in formatted_names)
+        else:
+            lines.append("- 不得生成分镜文本未明确要求的人物。")
+        lines.extend([
+            "- 禁止复制、克隆、镜像、分身、残影、前后状态同框或把同一角色放在画面多个位置；"
+            "镜子、玻璃、屏幕、照片、阴影和反光不得形成可被误认成第二个角色的完整重复身体。",
+            "- 每个未明确设定截肢的角色只能有一个头、一个颈部、一个躯干、两条手臂、两只手、"
+            "两条腿和两只脚；遮挡可以隐藏肢体，但不能产生额外、缺失、融合、断裂、漂浮、共享或错接肢体。",
+            "- 肩、肘、腕、髋、膝、踝、脊柱和颈部必须按真实人体关节链连接并在自然活动范围内弯曲；"
+            "手脚方向、重心、支撑点、接触点、前后层级、透视与遮挡必须符合物理规律。",
+            "- 多人接触、拥抱、搏斗或肢体交叠时，每条肢体必须能沿身体连续追溯到唯一所属角色；"
+            "姿态过于复杂时应简化动作或使用自然遮挡，不能用新增肢体补足动作。",
+        ])
+        if has_key_action_reference:
+            lines.append(
+                "- 关键动作参考图只提供核心动作意图、人物相对位置、构图和情绪，不是角色数量或人体结构的权威。"
+                "若参考图含重复角色、多手多脚、肢体错接、关节反向或不可能姿势，必须忽略这些缺陷并依据本锁定规则"
+                "重建正确人物与动作，严禁在视频中复制、延续或动画化该缺陷。"
+            )
+        return lines
+
     def _build_video_prompt(
         self,
         scene,
@@ -600,6 +646,8 @@ class VideoAgent:
         parts = []
 
         reference_specs = self._build_reference_specs(reference_images)
+        scene_character_names = self._unique_scene_character_names(scene)
+        key_action_tags = ""
         if reference_specs:
             # 角色装扮图归入角色组，布景状态图归入场景组
             character_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] in {"character", "character_outfit"})
@@ -613,13 +661,23 @@ class VideoAgent:
             elif scene_tags:
                 parts.append(f"结合布景设定{scene_tags}生成当前分镜。")
             if key_action_tags:
-                parts.append(f"重点参考{key_action_tags}中的关键动作参考图，保持该分镜的核心动作姿态、人物相对位置、镜头构图和情绪张力。")
+                parts.append(
+                    f"参考{key_action_tags}中的关键动作参考图，仅提取该分镜的核心动作意图、"
+                    "人物相对位置、镜头构图和情绪张力；角色数量与人体结构必须服从后述角色唯一性与人体拓扑锁。"
+                )
             mapping_parts = []
             for spec in reference_specs:
                 mapping_parts.append(
                     f'{spec["tag"]}={spec["name"]}（{self._reference_type_label(spec["reference_type"])}）'
                 )
             parts.append(f"从参考图片顺序：{'，'.join(mapping_parts)}")
+
+        parts.extend(
+            self._build_video_subject_integrity_rules(
+                scene_character_names,
+                bool(key_action_tags),
+            )
+        )
 
         # 延长模式：上一分镜的生成视频仅用于保持角色形象/服装/场景/光线的一致性，
         # 但当前分镜是一段“全新镜头”，必须立刻推进到本分镜的新剧情，
@@ -690,7 +748,7 @@ class VideoAgent:
         if total_scenes > 1 and self.transition_prompt:
             parts.append(f"跨分镜衔接原则：{self.transition_prompt}")
 
-        chars_present = getattr(scene, 'characters_present', None) or []
+        chars_present = scene_character_names
         if isinstance(chars_present, list) and chars_present:
             parts.append(f"出场角色：{self._annotate_character_names_with_reference_tags(chars_present, reference_specs)}")
             parts.extend(self._build_scene_character_details(chars_present, characters, reference_specs))
