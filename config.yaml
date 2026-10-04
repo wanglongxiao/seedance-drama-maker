@@ -110,10 +110,10 @@ tos:
 
 # 视频生成配置
 video_generation:
-  # 视频总时长（秒）- 默认值 60，最大值 1200
+  # 视频总时长（秒）- 默认值 60，最大值 2400
   total_duration: 60
   total_duration_min: 30
-  total_duration_max: 1200
+  total_duration_max: 2400
   # 每个分镜时长范围（秒）- 最短 5，最长 30（适配 seedance-2.5）
   scene_duration:
     min: 5
@@ -165,7 +165,7 @@ video_review:
 script_generation:
   max_characters: 30         # 剧本中的主要人物/角色最多 30 人
   max_setting_definitions: 30  # 剧本中的布景设定最多 30 个
-  max_storyboard_scenes: 80  # 剧本分镜数量上限
+  max_storyboard_scenes: 150  # 剧本分镜数量上限
 
 # 生成策略配置
 generation:

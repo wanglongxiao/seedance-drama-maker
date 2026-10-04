@@ -136,8 +136,8 @@ const UI_LANGUAGE_ALIASES = {
 let languageRequestSerial = 0;
 let frontendConfig = {
     auto_run_countdown_seconds: 10,
-    total_duration_max: 1200,
-    max_storyboard_scenes: 80,
+    total_duration_max: 2400,
+    max_storyboard_scenes: 150,
     reference_image_max_count: 30,
     character_reference_max_count: 10,
     scene_reference_max_count: 20,

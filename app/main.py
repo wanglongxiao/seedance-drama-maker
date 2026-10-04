@@ -655,8 +655,8 @@ async def get_frontend_config():
         "success": True,
         "config": {
             "auto_run_countdown_seconds": max(0, int(auto_run_countdown_seconds)),
-            "total_duration_max": max(1, int(config.get("video_generation.total_duration_max", 1200))),
-            "max_storyboard_scenes": max(1, int(config.get("script_generation.max_storyboard_scenes", 80))),
+            "total_duration_max": max(1, int(config.get("video_generation.total_duration_max", 2400))),
+            "max_storyboard_scenes": max(1, int(config.get("script_generation.max_storyboard_scenes", 150))),
             "reference_image_max_count": max(1, int(reference_config.get("upload_max_count", 40))),
             "character_reference_max_count": max(1, int(reference_config.get("upload_character_max_count", 20))),
             "scene_reference_max_count": max(1, int(reference_config.get("upload_scene_max_count", 20))),

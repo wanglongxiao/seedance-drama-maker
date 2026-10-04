@@ -40,7 +40,7 @@ class ScriptAgent:
         # 从 yaml 配置读取视频时长设置
         self.default_total_duration = config.get('video_generation.total_duration', 60)  # 默认 60 秒
         self.total_duration_min = config.get('video_generation.total_duration_min', 30)  # 最小 30 秒
-        self.total_duration_max = config.get('video_generation.total_duration_max', 1200)  # 最大时长由 yaml 配置控制
+        self.total_duration_max = config.get('video_generation.total_duration_max', 2400)  # 最大时长由 yaml 配置控制
         # 从 yaml 配置读取分镜时长范围
         self.scene_duration_min = config.get('video_generation.scene_duration.min', 5)
         self.scene_duration_max = config.get('video_generation.scene_duration.max', 30)
@@ -49,7 +49,7 @@ class ScriptAgent:
             config.get('script_generation.max_setting_definitions',
                        config.get('script_generation.max_scene_definitions', 40))
         )
-        self.max_storyboard_scenes = int(config.get('script_generation.max_storyboard_scenes', 80))
+        self.max_storyboard_scenes = int(config.get('script_generation.max_storyboard_scenes', 150))
         self.temperature = config.get('models.script.temperature', 0.8)
         self.max_tokens = int(config.get('models.script.max_tokens', 120000))
 
@@ -1667,6 +1667,7 @@ class ScriptAgent:
         prompt_parts.append("- 时长分配：先按动作节点、出场人数、信息量、空间调度和情绪转折评估内容丰富度；不同丰富度的分镜不得同长，可行时最长与最短至少相差2秒。")
         prompt_parts.append("- 细节密度：5-9秒至少2个连续秒段，10-18秒至少3段，19-30秒至少4段；每段必须有环境空间、人物动作与细微表演、镜头、光影及明确结果。")
         prompt_parts.append(f"- 建议分镜数量：约{estimated_scene_count}个；角色最多{self.max_characters}个，布景最多{self.max_setting_definitions}个，分镜最多{self.max_storyboard_scenes}个。")
+        prompt_parts.append("- 长篇完整性：必须按建议分镜数量持续推进并完整覆盖目标总时长，不得因输出较长而提前收尾、跳过中段或用剧情梗概代替逐镜 JSON；接近分镜上限时应合并功能重复镜头，但仍须保留完整因果链和逐镜细节。")
         prompt_parts.append("- 详细结构、字段顺序、角色/布景/对白/装扮/布景状态/去重/转场规则以 system prompt 为准，不在此重复。")
         self._append_script_private_extensions(prompt_parts, user_input, audio_text)
 
@@ -2188,7 +2189,9 @@ class ScriptAgent:
             "对白和镜头内容。\n"
             "2. 修正一处时必须同步维护 duration、description 秒段边界、总时长及相邻分镜承接，"
             "不得引入新的矛盾。\n"
-            "3. 最终仍需返回修正后的完整剧本 JSON，而不是补丁、局部片段、解释或重新创作说明。"
+            "3. 长篇剧本不得通过删除后半段、跳过中段、提前结局或改写成剧情梗概来通过校验；"
+            "必须保留完整因果链并让总时长继续贴近目标值。\n"
+            "4. 最终仍需返回修正后的完整剧本 JSON，而不是补丁、局部片段、解释或重新创作说明。"
         )
 
     def _collect_script_quality_feedback(
