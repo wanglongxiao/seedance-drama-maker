@@ -114,9 +114,9 @@ video_generation:
   total_duration: 60
   total_duration_min: 30
   total_duration_max: 1200
-  # 每个分镜时长范围（秒）- 最短 10，最长 30（适配 seedance-2.5）
+  # 每个分镜时长范围（秒）- 最短 5，最长 30（适配 seedance-2.5）
   scene_duration:
-    min: 10
+    min: 5
     max: 30
   # 视频输出格式（seedance-2.5 支持 mov / mp4），统一使用 mov
   output_format: "mov"

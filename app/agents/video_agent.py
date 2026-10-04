@@ -25,7 +25,7 @@ class VideoAgent:
         # 视频生成最大等待时间：读取配置，默认 900 秒（15分钟）
         self.max_wait_time = int(config.get('limits.video_max_wait_time', 900))
         # 从 yaml 配置读取分镜时长范围（当无法从剧本解析时使用）
-        self.default_duration_min = config.get('video_generation.scene_duration.min', 10)
+        self.default_duration_min = config.get('video_generation.scene_duration.min', 5)
         self.default_duration_max = config.get('video_generation.scene_duration.max', 30)
         # 视频分辨率 (480p, 720p)，默认使用 480p
         self.default_resolution = config.get('video_generation.default_resolution', '480p')
@@ -555,7 +555,7 @@ class VideoAgent:
 
         优先从剧本分镜的duration字段获取（由ScriptAgent根据yaml配置生成），
         如果解析不到或无效，则根据yaml配置的分镜时长范围随机生成
-        有效范围：由配置决定，当前默认 10-30 秒
+        有效范围：由配置决定，当前默认 5-30 秒
         """
         try:
             if hasattr(scene, 'duration') and scene.duration is not None:

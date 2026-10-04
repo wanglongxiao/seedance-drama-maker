@@ -151,7 +151,7 @@ class Config:
     
     @property
     def scene_duration_min(self) -> int:
-        return self.get('video_generation.scene_duration.min', 10)
+        return self.get('video_generation.scene_duration.min', 5)
     
     @property
     def scene_duration_max(self) -> int:

@@ -42,7 +42,7 @@ class ScriptAgent:
         self.total_duration_min = config.get('video_generation.total_duration_min', 30)  # 最小 30 秒
         self.total_duration_max = config.get('video_generation.total_duration_max', 1200)  # 最大时长由 yaml 配置控制
         # 从 yaml 配置读取分镜时长范围
-        self.scene_duration_min = config.get('video_generation.scene_duration.min', 10)
+        self.scene_duration_min = config.get('video_generation.scene_duration.min', 5)
         self.scene_duration_max = config.get('video_generation.scene_duration.max', 30)
         self.max_characters = int(config.get('script_generation.max_characters', 30))
         self.max_setting_definitions = int(
@@ -127,14 +127,22 @@ class ScriptAgent:
         # 先确保每个分镜落在合法区间内，再按内容复杂度重分配。
         # 模型经常把所有分镜都输出成同一个时长；只做轮流 +1/-1
         # 会保留这个问题，因此这里用脚本内容重新计算权重。
+        original_durations: List[int] = []
         for scene in scenes:
             try:
                 dur = int(scene.get('duration') or lo)
             except (TypeError, ValueError):
                 dur = lo
+            original_durations.append(dur)
             scene['duration'] = max(lo, min(hi, dur))
 
         self._allocate_scene_durations_by_complexity(scenes, target)
+        for scene, original_duration in zip(scenes, original_durations):
+            self._retime_scene_description(
+                scene,
+                original_duration=original_duration,
+                new_duration=int(scene["duration"]),
+            )
 
     def _estimate_scene_complexity(self, scene: Dict[str, Any], index: int, count: int) -> float:
         """Estimate how much screen time a scene needs from its structured content."""
@@ -152,15 +160,22 @@ class ScriptAgent:
         if isinstance(characters, str):
             characters = [part for part in re.split(r"[、,，\s]+", characters) if part]
         score += min(2.0, max(0, len(characters) - 1) * 0.45)
-        score += min(1.4, len(self._normalize_single_line(scene.get("dialogue"))) / 90.0)
+        raw_dialogue = str(scene.get("dialogue") or "")
+        dialogue = self._normalize_single_line(raw_dialogue)
+        score += min(1.4, len(dialogue) / 90.0)
+        score += min(1.2, max(0, len([line for line in raw_dialogue.splitlines() if line.strip()]) - 1) * 0.3)
 
         scene_text = self._normalize_single_line(" ".join(str(value or "") for value in text_fields))
         complexity_keywords = (
             "追逐", "战斗", "打斗", "搏斗", "爆炸", "逃跑", "冲突", "反转",
-            "发现", "调查", "切换", "多人", "同时", "连续", "镜头",
+            "发现", "调查", "切换", "多人", "同时", "连续", "镜头", "揭示",
+            "对峙", "争夺", "穿越", "闪回", "转场", "群像", "调度",
             "性爱", "高潮", "亲吻", "拥抱", "抚摸",
         )
         score += min(2.0, sum(scene_text.count(keyword) for keyword in complexity_keywords) * 0.18)
+        score += min(1.5, max(0, len(self._extract_description_timeline_segments(
+            scene.get("description")
+        )) - 2) * 0.35)
 
         # 开头用于建立信息、结尾用于收束；中段通常承载更多动作和因果。
         if count > 1 and index == 0:
@@ -177,10 +192,11 @@ class ScriptAgent:
         """Allocate the reachable total across scenes using content-based weights."""
         if not scenes:
             return
-        lo, hi = self.scene_duration_min, self.scene_duration_max
+        lo = self.scene_duration_min
         n = len(scenes)
+        duration_caps = [self._scene_duration_cap(scene) for scene in scenes]
         bounded_total = self._bounded_total_duration(target_total_duration)
-        target = max(n * lo, min(n * hi, bounded_total))
+        target = max(n * lo, min(sum(duration_caps), bounded_total))
         extra = target - n * lo
         if extra <= 0:
             for scene in scenes:
@@ -192,9 +208,12 @@ class ScriptAgent:
             for index, scene in enumerate(scenes)
         ]
         total_weight = sum(weights) or float(n)
-        capacity = hi - lo
+        capacities = [duration_cap - lo for duration_cap in duration_caps]
         raw_extras = [extra * weight / total_weight for weight in weights]
-        extras = [min(capacity, int(value)) for value in raw_extras]
+        extras = [
+            min(capacity, int(value))
+            for capacity, value in zip(capacities, raw_extras)
+        ]
         remainder = extra - sum(extras)
 
         # Largest remainder allocation keeps the exact total while preserving
@@ -209,7 +228,7 @@ class ScriptAgent:
             for idx in order:
                 if remainder <= 0:
                     break
-                if extras[idx] < capacity:
+                if extras[idx] < capacities[idx]:
                     extras[idx] += 1
                     remainder -= 1
                     progressed = True
@@ -223,23 +242,20 @@ class ScriptAgent:
             return sum(int(s.get('duration', lo)) for s in scenes)
 
         diff = target - current_total()
-        if diff == 0:
-            return
-
         if diff > 0:
             # 需要增时长：轮流给仍有余量 (<max) 的分镜每次 +1，直至补齐或全部到顶。
             while diff > 0:
                 progressed = False
-                for scene in scenes:
+                for index, scene in enumerate(scenes):
                     if diff <= 0:
                         break
-                    if int(scene['duration']) < hi:
+                    if int(scene['duration']) < duration_caps[index]:
                         scene['duration'] = int(scene['duration']) + 1
                         diff -= 1
                         progressed = True
                 if not progressed:
                     break
-        else:
+        elif diff < 0:
             # 需要减时长：轮流从冗余 (>min) 的分镜每次 -1，直至削够或全部触底。
             deficit = -diff
             while deficit > 0:
@@ -253,6 +269,134 @@ class ScriptAgent:
                         progressed = True
                 if not progressed:
                     break
+
+        self._ensure_scene_duration_variation(scenes, weights, duration_caps)
+
+    def _scene_duration_cap(self, scene: Dict[str, Any]) -> int:
+        """Limit duration to the amount of executable timeline detail supplied."""
+        segment_count = len(self._extract_description_timeline_segments(
+            scene.get("description")
+        ))
+        if segment_count == 0:
+            return self.scene_duration_max
+        if segment_count < 3:
+            return min(self.scene_duration_max, 9)
+        if segment_count < 4:
+            return min(self.scene_duration_max, 18)
+        return self.scene_duration_max
+
+    def _ensure_scene_duration_variation(
+        self,
+        scenes: List[Dict[str, Any]],
+        complexity_weights: List[float],
+        duration_caps: List[int],
+    ) -> None:
+        """Create a visible duration spread while preserving the exact total."""
+        if len(scenes) < 2 or self.scene_duration_max - self.scene_duration_min < 2:
+            return
+
+        durations = [int(scene["duration"]) for scene in scenes]
+        total = sum(durations)
+        minimum_total = len(scenes) * self.scene_duration_min
+        maximum_total = sum(duration_caps)
+        lower_slack = total - minimum_total
+        upper_slack = maximum_total - total
+        if lower_slack < 2 or upper_slack < 2:
+            return
+
+        desired_distinct = 3 if len(scenes) >= 4 and lower_slack >= 3 and upper_slack >= 3 else 2
+
+        def variation_metric(values: List[int]) -> tuple:
+            return (
+                min(desired_distinct, len(set(values))),
+                min(2, max(values) - min(values)),
+            )
+
+        while variation_metric(durations) < (desired_distinct, 2):
+            current_metric = variation_metric(durations)
+            best_candidate = None
+            best_metric = current_metric
+            best_weight_gap = float("-inf")
+            for receiver in range(len(durations)):
+                if durations[receiver] >= duration_caps[receiver]:
+                    continue
+                for donor in range(len(durations)):
+                    if (
+                        donor == receiver
+                        or durations[donor] <= self.scene_duration_min
+                        or complexity_weights[receiver] < complexity_weights[donor]
+                    ):
+                        continue
+                    candidate = durations.copy()
+                    candidate[receiver] += 1
+                    candidate[donor] -= 1
+                    metric = variation_metric(candidate)
+                    weight_gap = complexity_weights[receiver] - complexity_weights[donor]
+                    if metric > best_metric or (
+                        metric == best_metric
+                        and metric > current_metric
+                        and weight_gap > best_weight_gap
+                    ):
+                        best_candidate = candidate
+                        best_metric = metric
+                        best_weight_gap = weight_gap
+            if best_candidate is None:
+                break
+            durations = best_candidate
+
+        for scene, duration in zip(scenes, durations):
+            scene["duration"] = duration
+
+    def _retime_scene_description(
+        self,
+        scene: Dict[str, Any],
+        original_duration: int,
+        new_duration: int,
+    ) -> None:
+        """Scale timeline labels when duration allocation changes a scene."""
+        description = str(scene.get("description") or "")
+        matches = list(re.finditer(
+            r"(?P<start>\d+(?:\.\d+)?)\s*(?:-|–|—|~|～|至|到)\s*"
+            r"(?P<end>\d+(?:\.\d+)?)\s*(?:秒|seconds?|secs?|s|segundos?)\s*[:：]",
+            description,
+            flags=re.IGNORECASE,
+        ))
+        if not matches:
+            return
+
+        timeline_duration = float(matches[-1].group("end")) or float(original_duration)
+        if timeline_duration <= 0 or abs(timeline_duration - new_duration) < 0.01:
+            return
+
+        segment_count = len(matches)
+        boundaries: List[float] = [0.0]
+        for index in range(1, segment_count):
+            ratio = float(matches[index].group("start")) / timeline_duration
+            raw_boundary = ratio * new_duration
+            if new_duration >= segment_count:
+                lower = boundaries[-1] + 1
+                upper = new_duration - (segment_count - index)
+                boundary = float(max(lower, min(upper, round(raw_boundary))))
+            else:
+                lower = boundaries[-1] + 0.1
+                upper = new_duration - (segment_count - index) * 0.1
+                boundary = max(lower, min(upper, round(raw_boundary, 1)))
+            boundaries.append(boundary)
+        boundaries.append(float(new_duration))
+
+        def format_second(value: float) -> str:
+            return str(int(value)) if float(value).is_integer() else f"{value:.1f}".rstrip("0").rstrip(".")
+
+        rebuilt: List[str] = []
+        cursor = 0
+        for index, match in enumerate(matches):
+            rebuilt.append(description[cursor:match.start()])
+            rebuilt.append(
+                f"{format_second(boundaries[index])}-{format_second(boundaries[index + 1])}秒："
+            )
+            cursor = match.end()
+        rebuilt.append(description[cursor:])
+        scene["description"] = "".join(rebuilt)
 
     def _normalize_single_line(self, value: Any) -> str:
         return re.sub(r"\s+", " ", str(value or "").strip())
@@ -975,21 +1119,27 @@ class ScriptAgent:
             self._log_raw_model_response("generate_script", attempt, content)
             script_data = self._parse_script(content)
             names_ok = self._validate_uploaded_reference_name_usage(script_data, uploaded_reference_images)
-            if self._is_script_quality_acceptable(script_data, user_input) and names_ok:
+            quality_ok = self._is_script_quality_acceptable(script_data, user_input)
+            if quality_ok and names_ok:
                 break
 
             if attempt < max_attempts:
                 logger.warning(
-                    f"Script quality check failed on attempt {attempt}/{max_attempts}; retrying"
+                    f"Script quality check failed on attempt {attempt}/{max_attempts}; requesting targeted revision"
                 )
-                messages[0]["content"] = (
-                    self._get_system_prompt(output_language, target_total_duration, user_input)
-                    + "\n\n【重试修正】上一轮输出未通过程序校验。请依据 system prompt 修复字段缺失、时长越界、description 秒段时间轴缺失/不连续/过短、人物动作/表演/镜头/光影细节不足、相邻秒段没有从上一段结束状态继续、成人剧情反复描写抽插等机械性交动作、跨分镜风格/色调/镜头语言不连续、角色固定身份特征漂移、性格动机或知识边界不一致、位置/动作/道具等状态断裂、把血污/湿透/伤口/局部破损误建为新 character_outfits、角色/布景引用缺失、对白缺失、相邻分镜缺少“上一镜结果 -> 下一镜反应 -> 新结果”的因果承接或分镜重复等问题，并重新输出完整 JSON。"
-                )
-                messages[1]["content"] = (
-                    prompt
-                    + "\n\n【重试输出要求】只输出修正后的完整 JSON；若有上传参考图锁定名称，仍必须原样保留并用于对应角色/布景字段。"
-                )
+                feedback = self._collect_script_quality_feedback(script_data, user_input)
+                if not names_ok:
+                    feedback.append("用户上传参考图的锁定角色名或布景名未被完整保留和引用。")
+                messages.extend([
+                    {
+                        "role": "assistant",
+                        "content": self._serialize_script_for_revision(script_data),
+                    },
+                    {
+                        "role": "user",
+                        "content": self._build_quality_revision_request(feedback),
+                    },
+                ])
 
         logger.info(f"Script generated with {len(script_data['scenes'])} scenes")
         logger.info(f"Script style: {script_data.get('style', 'Not specified')}")
@@ -1100,18 +1250,27 @@ class ScriptAgent:
             self._log_raw_model_response("rewrite_script", attempt, content)
             script_data = self._parse_script(content)
             names_ok = self._validate_uploaded_reference_name_usage(script_data, uploaded_reference_images)
-            if self._is_script_quality_acceptable(script_data, quality_input) and names_ok:
+            quality_ok = self._is_script_quality_acceptable(script_data, quality_input)
+            if quality_ok and names_ok:
                 break
 
             if attempt < max_attempts:
                 logger.warning(
-                    f"Script rewrite quality check failed on attempt {attempt}/{max_attempts}; retrying"
+                    f"Script rewrite quality check failed on attempt {attempt}/{max_attempts}; requesting targeted revision"
                 )
-                messages[0]["content"] = (
-                    self._get_system_prompt(output_language, total_duration, edit_request, audio_text)
-                    + "\n\n【改稿规则】请严格基于上一版剧本和修改要求输出一份完整 JSON。"
-                    + "\n【重试修正】上一轮改稿未通过程序校验。请修复分镜数量、字段完整性、时长范围、description 秒段连续动作链及人物表演/镜头/光影细节、相邻秒段状态承接、成人剧情反复描写抽插等机械性交动作、跨分镜风格/色调/镜头语言连续性、角色固定身份/性格动机/知识边界一致性、位置/动作/道具等状态承接、把伤污湿润误建为新 character_outfits、因果承接、转场、重复内容和上传参考图锁定名称等问题，并重新输出完整 JSON。"
-                )
+                feedback = self._collect_script_quality_feedback(script_data, quality_input)
+                if not names_ok:
+                    feedback.append("用户上传参考图的锁定角色名或布景名未被完整保留和引用。")
+                messages.extend([
+                    {
+                        "role": "assistant",
+                        "content": self._serialize_script_for_revision(script_data),
+                    },
+                    {
+                        "role": "user",
+                        "content": self._build_quality_revision_request(feedback),
+                    },
+                ])
 
         logger.info(f"Script rewritten with {len(script_data['scenes'])} scenes")
 
@@ -1301,6 +1460,8 @@ class ScriptAgent:
         prompt_parts.append("\n【动态执行参数】")
         prompt_parts.append(f"- 目标总时长：约{effective_total_duration}秒；分镜总时长要尽量贴近该值，且不得超过{self.total_duration_max}秒。")
         prompt_parts.append(f"- 分镜时长：每个 duration 必须是 {self.scene_duration_min}-{self.scene_duration_max} 秒之间的整数，禁止输出 {self._disallowed_duration_examples()} 或更大值。")
+        prompt_parts.append("- 时长分配：先按动作节点、出场人数、信息量、空间调度和情绪转折评估内容丰富度；不同丰富度的分镜不得同长，可行时最长与最短至少相差2秒。")
+        prompt_parts.append("- 细节密度：5-9秒至少2个连续秒段，10-18秒至少3段，19-30秒至少4段；每段必须有环境空间、人物动作与细微表演、镜头、光影及明确结果。")
         prompt_parts.append(f"- 建议分镜数量：约{estimated_scene_count}个；角色最多{self.max_characters}个，布景最多{self.max_setting_definitions}个，分镜最多{self.max_storyboard_scenes}个。")
         prompt_parts.append("- 详细结构、字段顺序、角色/布景/对白/装扮/布景状态/去重/转场规则以 system prompt 为准，不在此重复。")
         self._append_script_private_extensions(prompt_parts, user_input, audio_text)
@@ -1515,7 +1676,8 @@ class ScriptAgent:
             except (TypeError, ValueError):
                 duration = 0
 
-            if len(segments) < 2:
+            minimum_segments = 2 if duration <= 9 else 3 if duration <= 18 else 4
+            if len(segments) < minimum_segments:
                 issues.append({"scene": scene_number, "reason": "missing_or_sparse_timeline"})
                 continue
 
@@ -1533,7 +1695,7 @@ class ScriptAgent:
 
                 content = self._normalize_single_line(segment["content"])
                 sentence_count = len([part for part in re.split(r"[。；;.!?！？]+", content) if part.strip()])
-                if len(content) < 32 or sentence_count < 2:
+                if len(content) < 48 or sentence_count < 2:
                     issues.append({
                         "scene": scene_number,
                         "reason": f"segment_{segment_index + 1}_too_brief",
@@ -1558,6 +1720,33 @@ class ScriptAgent:
                     })
                     break
         return issues
+
+    def _collect_duration_variation_issues(
+        self,
+        scenes: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Reject flat duration plans when the same total permits a visible spread."""
+        if len(scenes) < 2:
+            return []
+        try:
+            durations = [int(scene.get("duration")) for scene in scenes]
+        except (TypeError, ValueError):
+            return [{"reason": "invalid_duration_value"}]
+
+        total = sum(durations)
+        minimum_total = len(durations) * self.scene_duration_min
+        maximum_total = len(durations) * self.scene_duration_max
+        lower_slack = total - minimum_total
+        upper_slack = maximum_total - total
+        if lower_slack < 2 or upper_slack < 2:
+            return []
+
+        if max(durations) - min(durations) < 2:
+            return [{"reason": "insufficient_duration_variation"}]
+        if len(durations) >= 4 and lower_slack >= 3 and upper_slack >= 3:
+            if len(set(durations)) < 3:
+                return [{"reason": "insufficient_duration_tiers"}]
+        return []
 
     def _collect_repetitive_intimacy_action_issues(
         self,
@@ -1588,6 +1777,165 @@ class ScriptAgent:
                 "reason": "repeated_intimacy_motion_across_scenes",
             })
         return issues
+
+    def _serialize_script_for_revision(self, script_data: Dict[str, Any]) -> str:
+        """Serialize the normalized prior result without parser-only metadata."""
+        public_data = {
+            key: value
+            for key, value in script_data.items()
+            if not str(key).startswith("_")
+        }
+        return json.dumps(public_data, ensure_ascii=False, indent=2, default=str)
+
+    def _build_quality_revision_request(self, feedback: List[str]) -> str:
+        """Build an edit request grounded in concrete validation findings."""
+        findings = feedback or ["程序质量校验未通过，请逐项复核所有硬性规则。"]
+        numbered_findings = "\n".join(
+            f"{index}. {item}" for index, item in enumerate(findings[:30], start=1)
+        )
+        return (
+            "上一条 assistant 消息是需要修正的现有完整剧本 JSON。"
+            "不要从原始需求重新构思或另起一版；必须以该版本为基础做定向修正。\n\n"
+            f"【程序校验结果与修正建议】\n{numbered_findings}\n\n"
+            "【修正规则】\n"
+            "1. 优先修正上述失败项，保留未涉及问题的剧情结构、角色、布景、风格、"
+            "对白和镜头内容。\n"
+            "2. 修正一处时必须同步维护 duration、description 秒段边界、总时长及相邻分镜承接，"
+            "不得引入新的矛盾。\n"
+            "3. 最终仍需返回修正后的完整剧本 JSON，而不是补丁、局部片段、解释或重新创作说明。"
+        )
+
+    def _collect_script_quality_feedback(
+        self,
+        script_data: Dict[str, Any],
+        user_input: str,
+    ) -> List[str]:
+        """Return actionable findings for a targeted model revision."""
+        feedback: List[str] = []
+        scenes = script_data.get("scenes") or []
+        if not scenes:
+            return ["scenes 为空；请在现有故事设定下补齐完整分镜数组。"]
+        if len(scenes) > self.max_storyboard_scenes:
+            feedback.append(
+                f"分镜数量为 {len(scenes)}，超过上限 {self.max_storyboard_scenes}；"
+                "请合并功能重复的分镜。"
+            )
+
+        normalized_input = (user_input or "").lower()
+        allows_empty_dialogue = any(
+            phrase in normalized_input
+            for phrase in ["不生成对话", "不要对话", "只生成旁白", "no dialogue", "narration only"]
+        )
+        if not allows_empty_dialogue and not any(
+            str(scene.get("dialogue") or "").strip() for scene in scenes
+        ):
+            feedback.append("全部分镜 dialogue 为空；请在关键冲突、转折或信息推进处补充简短对白。")
+
+        duration_adjustments = script_data.get("_duration_adjustments") or []
+        for item in duration_adjustments[:10]:
+            feedback.append(
+                f"分镜 {item.get('scene_number', '?')} 的 duration={item.get('original_duration')} "
+                f"超出 {self.scene_duration_min}-{self.scene_duration_max} 秒；"
+                f"请改为 {item.get('normalized_duration')} 秒并同步修正 description 时间轴。"
+            )
+
+        for issue in self._collect_duration_variation_issues(scenes):
+            reason = issue.get("reason")
+            if reason == "insufficient_duration_tiers":
+                feedback.append("分镜时长档位不足；4 个及以上分镜在可行时至少使用 3 个不同 duration。")
+            elif reason == "insufficient_duration_variation":
+                feedback.append("分镜时长过于一致；请按内容丰富度分配，最长与最短至少相差 2 秒。")
+            else:
+                feedback.append("存在无法解析的 duration；请全部改为合法整数秒数。")
+
+        for issue in self._collect_timeline_detail_issues(scenes)[:10]:
+            feedback.append(
+                f"分镜 {issue.get('scene', '?')} 的 description 时间轴问题："
+                f"{issue.get('reason')}；请按该分镜 duration 补齐连续秒段、动作、表演、"
+                "镜头、光影和明确结果。"
+            )
+        for issue in self._collect_repetitive_intimacy_action_issues(scenes)[:10]:
+            feedback.append(
+                f"分镜 {issue.get('scene', '?')} 含不合规或重复的亲密动作："
+                f"{issue.get('reason')}；请改用人物关系、表情、手部、轮廓和环境反馈推进。"
+            )
+        for issue in self._collect_duplicate_scene_issues(scenes)[:10]:
+            feedback.append(
+                f"分镜 {issue.get('scene_a')} 与 {issue.get('scene_b')} 的 "
+                f"{issue.get('field')} 高度重复；保留承接关系并改出新的剧情结果。"
+            )
+        for issue in self._collect_adjacent_redundancy_issues(scenes)[:10]:
+            feedback.append(
+                f"相邻分镜 {issue.get('scene_a')} -> {issue.get('scene_b')} 重复前镜内容；"
+                "下一镜应先响应前镜结果，再推进新动作或信息。"
+            )
+
+        characters = script_data.get("characters") or []
+        character_keys = {
+            self._normalize_character_name_key(item.get("name"))
+            for item in characters
+            if self._normalize_character_name_key(item.get("name"))
+        }
+        scene_character_names = self._collect_scene_character_names(scenes, mutate_scenes=False)
+        if len(scene_character_names) > self.max_characters:
+            feedback.append(
+                f"分镜出场角色共 {len(scene_character_names)} 个，超过上限 {self.max_characters} 个。"
+            )
+        missing_characters = [
+            name for name in scene_character_names
+            if self._normalize_character_name_key(name) not in character_keys
+        ]
+        if missing_characters:
+            feedback.append(
+                "以下出场角色缺少 characters 定义：" + "、".join(missing_characters[:10]) + "。"
+            )
+
+        scene_definitions = script_data.get("scene_definitions") or []
+        incomplete_definitions = [
+            str(item.get("name") or f"#{index}")
+            for index, item in enumerate(scene_definitions, start=1)
+            if not self._normalize_single_line(item.get("time_of_day"))
+            or not self._normalize_single_line(item.get("weather"))
+            or not self._normalize_scene_feature_list(item.get("scene_features"))
+        ]
+        if incomplete_definitions:
+            feedback.append(
+                "以下布景定义缺少 time_of_day、weather 或 scene_features："
+                + "、".join(incomplete_definitions[:10]) + "。"
+            )
+        incomplete_conditions = [
+            str(scene.get("scene_number") or index)
+            for index, scene in enumerate(scenes, start=1)
+            if not self._normalize_single_line(scene.get("time_of_day"))
+            or not self._normalize_single_line(scene.get("weather"))
+        ]
+        if incomplete_conditions:
+            feedback.append(
+                "以下分镜缺少 time_of_day 或 weather："
+                + "、".join(incomplete_conditions[:10]) + "。"
+            )
+
+        definition_keys = {
+            self._normalize_scene_name_key(item.get("name"))
+            for item in scene_definitions
+            if self._normalize_scene_name_key(item.get("name"))
+        }
+        used_scene_names = self._collect_used_scene_names(scenes)
+        if len(used_scene_names) > self.max_setting_definitions:
+            feedback.append(
+                f"实际使用布景共 {len(used_scene_names)} 个，超过上限 "
+                f"{self.max_setting_definitions} 个。"
+            )
+        missing_scene_definitions = [
+            name for name in used_scene_names
+            if self._normalize_scene_name_key(name) not in definition_keys
+        ]
+        if missing_scene_definitions:
+            feedback.append(
+                "以下 scene_name 缺少对应 scene_definitions 定义："
+                + "、".join(missing_scene_definitions[:10]) + "。"
+            )
+        return feedback
 
     def _is_script_quality_acceptable(self, script_data: Dict[str, Any], user_input: str) -> bool:
         """校验剧本质量，避免把明显残缺的脚本直接送入后续流程。"""
@@ -1631,6 +1979,13 @@ class ScriptAgent:
                 len(duration_adjustments),
                 self.scene_duration_min,
                 self.scene_duration_max,
+            )
+            return False
+
+        duration_variation_issues = self._collect_duration_variation_issues(scenes)
+        if duration_variation_issues:
+            logger.warning(
+                "Script quality check failed: scene durations do not reflect content complexity"
             )
             return False
 

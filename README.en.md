@@ -12,7 +12,7 @@ English documentation. Simplified Chinese version: `README.md`
 
 Powered by the **SeeDance 2.5** video model — turn one sentence into a cinematic AI short drama:
 
-- 🎬 **Up to 30-second shots**: each scene can run up to 30 seconds (6–30s adjustable) for more continuous long-take storytelling, with a final cut up to `1200` seconds.
+- 🎬 **Up to 30-second shots**: each scene can run up to 30 seconds (5–30s adjustable) for more continuous long-take storytelling, with a final cut up to `1200` seconds.
 - 🖼️ **Up to 50 reference inputs**: a single task can fuse up to 50 character / backdrop reference images for highly consistent characters and scenes across shots.
 - 🌍 **14 languages natively supported**: native multilingual dialogue and narration across Chinese, English, Japanese, Spanish, and 14 languages total.
 - 🎞️ **Cinematic audiovisual quality**: native audio-video sync, adaptive aspect ratio, and the final cut is remuxed to high-fidelity `MP4` (H.264/AAC, `+faststart`) that streams progressively in the browser.
@@ -82,7 +82,7 @@ The system focuses on:
 - `SeeDream-5.0-flash`
   Generates and regenerates character and backdrop reference images.
 - `SeeDance-2.5`
-  Generates scene videos with 6–30s per shot, up to 50 reference inputs, and native dialogue in 14 languages with native audio-video sync.
+  Generates scene videos with 5–30s per shot, up to 50 reference inputs, and native dialogue in 14 languages with native audio-video sync.
 
 All of the above are available through [byteplus.com](https://www.byteplus.com/).
 
@@ -200,11 +200,14 @@ The speech-to-text path preserves the browser's actual recording format. Chrome 
 Current rules:
 
 - Total video duration limit: `1200` seconds
-- Per-scene duration range: `6`–`30` seconds (tuned for `SeeDance-2.5`)
+- Per-scene duration range: `5`–`30` seconds (tuned for `SeeDance-2.5`)
+- Scene duration is allocated dynamically from action beats, cast size, information density, spatial blocking, and emotional turns; simple shots stay short, complex scenes receive more time, with at least a `2`-second spread and multiple duration tiers whenever the total allows it
+- Each `description` uses continuous executable time segments: at least 2 segments for `5`–`9` seconds, 3 for `10`–`18` seconds, and 4 for `19`–`30` seconds, covering environment, blocking, actions, subtle performance, camera work, lighting, and narrative results
 - Scene limit: `80`
 - Character definition limit: `30`
 - Backdrop definition limit: `30`
 - Adjacent scenes must stay continuous without repeating the same narrative beat
+- If script quality validation fails, the script model revises the previous complete JSON using the concrete validation findings, preserving unaffected content instead of generating again from the original request
 - Per-scene special outfits and hairstyle changes are written explicitly to `character_outfits`, while backdrop time/weather state is written explicitly to `scene_state`; both fields appear before the scene description and are persisted for downstream image/video generation
 - Raw LLM responses are written to backend logs
 
