@@ -196,12 +196,107 @@ class ImageAgent:
             })
         return beats
 
-    def _select_key_action_beat(self, scene, character_names: List[str]) -> str:
+    def _find_unauthorized_key_action_subjects(
+        self,
+        text: Any,
+        character_names: List[str],
+        script: Optional[Script] = None,
+    ) -> List[str]:
+        """Find people mentioned in scene prose but excluded from characters_present."""
+        source = str(text or "")
+        if not source:
+            return []
+
+        allowed_keys = {
+            self._normalize_lookup_key(name)
+            for name in character_names
+            if self._normalize_lookup_key(name)
+        }
+        remaining = source
+        for name in character_names:
+            clean_name = re.sub(r"^\[|\]$", "", str(name or "").strip())
+            if clean_name:
+                remaining = remaining.replace(f"[{clean_name}]", "")
+                remaining = remaining.replace(clean_name, "")
+
+        found: List[str] = []
+        seen = set()
+
+        def add(label: str) -> None:
+            normalized = self._normalize_lookup_key(label)
+            if not normalized or normalized in allowed_keys or normalized in seen:
+                return
+            seen.add(normalized)
+            found.append(str(label).strip())
+
+        for character in getattr(script, "characters", None) or []:
+            name = str(getattr(character, "name", "") or "").strip()
+            if (
+                name
+                and self._normalize_lookup_key(name) not in allowed_keys
+                and (name in remaining or f"[{name}]" in source)
+            ):
+                add(name)
+
+        for bracketed in re.findall(r"\[([^\[\]\r\n]{1,40})\]", remaining):
+            add(bracketed)
+
+        unnamed_subject_patterns = (
+            r"老太太", r"老妇人", r"老妪", r"老头(?:子)?", r"老翁",
+            r"陌生人", r"陌生男子", r"陌生女人", r"路人", r"行人",
+            r"人群", r"人流", r"群众", r"围观者", r"旁观者", r"游客",
+            r"村民", r"居民", r"客人", r"宾客", r"侍卫", r"士兵",
+            r"仆人", r"女仆", r"店员", r"摊贩",
+            r"\bcrowd\b", r"\bpedestrian(?:s)?\b", r"\bbystander(?:s)?\b",
+            r"\bstranger(?:s)?\b", r"\bpasser(?:s)?-by\b",
+        )
+        for pattern in unnamed_subject_patterns:
+            for match in re.finditer(pattern, remaining, flags=re.IGNORECASE):
+                add(match.group(0))
+        return found
+
+    def _sanitize_key_action_cast_context(
+        self,
+        text: Any,
+        character_names: List[str],
+        script: Optional[Script] = None,
+    ) -> str:
+        """Remove clauses that would visually introduce a person outside the cast."""
+        source = str(text or "").strip()
+        if not source:
+            return ""
+        clauses = [
+            part.strip()
+            for part in re.split(r"(?<=[，,；;。.!?！？])", source)
+            if part.strip()
+        ]
+        safe_clauses = [
+            clause
+            for clause in clauses
+            if not self._find_unauthorized_key_action_subjects(
+                clause,
+                character_names,
+                script,
+            )
+        ]
+        return "".join(safe_clauses).strip()
+
+    def _select_key_action_beat(
+        self,
+        scene,
+        character_names: List[str],
+        script: Optional[Script] = None,
+    ) -> str:
         """Choose one timeline instant so a static image does not montage one actor across time."""
         description = str(getattr(scene, "description", "") or "").strip()
         beats = self._extract_key_action_timeline_beats(description)
         if not beats:
-            return description
+            sanitized = self._sanitize_key_action_cast_context(
+                description,
+                character_names,
+                script,
+            )
+            return sanitized or self._build_key_action_cast_only_fallback(character_names)
 
         action_keywords = (
             "抓", "握", "推", "拉", "抱", "压", "挡", "刺", "击", "踢", "扑", "倒",
@@ -212,15 +307,53 @@ class ImageAgent:
 
         def beat_score(beat: Dict[str, Any]) -> tuple:
             content = str(beat.get("content") or "")
+            unauthorized_count = len(
+                self._find_unauthorized_key_action_subjects(
+                    content,
+                    character_names,
+                    script,
+                )
+            )
             character_hits = sum(
                 1
                 for name in character_names
                 if name and (self._format_character_name(name) in content or name in content)
             )
             action_hits = sum(1 for keyword in action_keywords if keyword in content.lower())
-            return character_hits, action_hits, min(len(content), 600), float(beat.get("start") or 0)
+            return (
+                1 if unauthorized_count == 0 else 0,
+                character_hits,
+                -unauthorized_count,
+                action_hits,
+                min(len(content), 600),
+                float(beat.get("start") or 0),
+            )
 
-        return max(beats, key=beat_score)["text"]
+        selected = max(beats, key=beat_score)
+        sanitized_content = self._sanitize_key_action_cast_context(
+            selected.get("content"),
+            character_names,
+            script,
+        )
+        if not sanitized_content:
+            return self._build_key_action_cast_only_fallback(character_names)
+        start = selected.get("start", 0)
+        end = selected.get("end", start)
+        return f"{start:g}-{end:g}秒：{sanitized_content}"
+
+    def _build_key_action_cast_only_fallback(self, character_names: List[str]) -> str:
+        formatted_names = [
+            self._format_character_name(name)
+            for name in character_names
+            if self._format_character_name(name)
+        ]
+        if not formatted_names:
+            return "A single empty-environment instant with no visible person."
+        return (
+            "Show one frozen action instant centered only on "
+            + ", ".join(formatted_names)
+            + ". Preserve their scene-authorized pose and emotion without showing any other person."
+        )
 
     def _build_key_action_subject_integrity_guidance(
         self,
@@ -231,36 +364,38 @@ class ImageAgent:
         lines = ["[EXACT CAST, SINGLE-INSTANCE, AND BODY-TOPOLOGY LOCK]"]
         if formatted_names:
             lines.append(
-                f"The final frame must contain exactly {len(formatted_names)} named character instance(s): "
+                f"Final visible human-like body count = exactly {len(formatted_names)}: "
                 f"{', '.join(formatted_names)}."
             )
             lines.extend(
-                f"- {name} appears exactly once in the entire frame as one continuous body."
+                f"- Allocate exactly one continuous body to {name}."
                 for name in formatted_names
             )
+            if len(formatted_names) == 1:
+                lines.append(
+                    "Use a single-subject composition centered on that one body, with architecture, props, "
+                    "landscape, light, and atmosphere filling both sides of the frame."
+                )
+            else:
+                lines.append(
+                    "Use one clearly separated spatial position per listed identity, with the full group count "
+                    "equal to the exact cast count above."
+                )
         else:
-            lines.append("Do not invent any visible person who is not explicitly required by the selected action beat.")
+            lines.append("Render an environment-only frame with zero visible human-like bodies.")
         if has_character_references:
             lines.append(
-                "Every character or outfit input image is an identity/wardrobe source for the matching named "
-                "character, not an additional person and not another moment of that character."
+                "Each character or outfit input image supplies identity and wardrobe to its exclusively matching "
+                "listed body; the final body count remains the exact cast count above."
             )
         lines.extend([
-            "Never duplicate, clone, mirror, repeat, split, or show the same character at multiple timeline "
-            "positions. Do not create montage, before/after, flashback, inset, portrait, screen image, shadow "
-            "double, or mirror/window reflection that repeats a character. Angle or occlude reflective surfaces "
-            "so they cannot create a second visible body.",
-            "Do not add unnamed foreground or background people. A naturally occluded body part may be hidden, "
-            "but it must not reappear elsewhere as a separate limb or body.",
-            "Each visible non-amputee person has exactly one head, one neck, one torso, two shoulders, two arms, "
-            "two hands, two legs, and two feet. Every limb connects to the correct shoulder or hip and belongs "
-            "to exactly one body; no extra, missing, fused, detached, shared, floating, or intersecting limbs.",
-            "Hands have one palm and five fingers when clearly visible. Elbows and knees bend only within natural "
-            "human joint ranges; wrists, ankles, shoulders, hips, spine, and neck keep physically possible "
-            "orientation, balance, weight support, contact, perspective, and occlusion.",
-            "For touching, holding, embracing, fighting, or intertwined poses, keep each person's limb ownership "
-            "visually traceable from torso to extremity. Simplify the pose or use natural occlusion when anatomy "
-            "would otherwise become ambiguous.",
+            "All remaining foreground, background, and reflective regions contain environment only.",
+            "Each normally limbed body has one head, one neck, one torso, two shoulders, two connected arms and "
+            "hands, and two connected legs and feet.",
+            "Hands, elbows, wrists, shoulders, hips, knees, ankles, spine, and neck follow natural human ranges, "
+            "balance, weight support, perspective, and occlusion.",
+            "For physical contact, keep every limb continuously traceable from its owner torso to its extremity; "
+            "use clear poses and natural occlusion.",
         ])
         return lines
 
@@ -293,8 +428,7 @@ class ImageAgent:
 
         lines = [
             "[CHARACTER-TO-REFERENCE EXCLUSIVE BINDINGS]",
-            "Treat each binding below as exclusive: an image bound to one named character must never define, "
-            "replace, or create any other character.",
+            "Apply each image binding exclusively to its one named cast body.",
         ]
         for character_name in character_names:
             formatted_name = self._format_character_name(character_name)
@@ -308,17 +442,16 @@ class ImageAgent:
             )
             if image_index is None:
                 lines.append(
-                    f"- {formatted_name} has no matching character image. Build this character only from "
-                    "[SCENE CHARACTER DEFINITIONS]; never reuse another character's image or appearance."
+                    f"- {formatted_name} has no matching character image. Build this identity from "
+                    "[SCENE CHARACTER DEFINITIONS]."
                 )
                 continue
             lines.append(
-                f"- {formatted_name} => Image {image_index} exclusively. Image {image_index} defines only "
-                f"{formatted_name}'s identity/appearance and produces exactly one final {formatted_name} instance."
+                f"- {formatted_name} => Image {image_index} exclusively; transfer that image's identity and "
+                f"appearance to the one final {formatted_name} body."
             )
         lines.append(
-            "A reference image is a visual definition, not an extra person. Never blend two bound identities, "
-            "swap their faces or bodies, or use one character image for multiple cast roles."
+            "Keep every bound face, body, and wardrobe visually distinct according to its named identity."
         )
         return lines
 
@@ -747,6 +880,7 @@ class ImageAgent:
         reference_images: Optional[List[GeneratedImage]] = None,
         user_style_info: str = None,
         aspect_ratio: str = None,
+        correction_feedback: str = None,
     ) -> GeneratedImage:
         """Generate a scene-level key action reference image for private adult-content enhancement."""
         if not aspect_ratio:
@@ -816,19 +950,34 @@ class ImageAgent:
             if outfit_lines:
                 prompt_parts.append(f"Current character outfit and hairstyle state: {'; '.join(outfit_lines)}")
                 prompt_parts.append(
-                    "[WARDROBE STATE LOCK] Apply each current outfit and nudity level exactly. "
-                    "Base character references provide identity only and must not add default clothing."
+                    "[WARDROBE STATE LOCK] Apply each current outfit and exact body-coverage state. "
+                    "Base character references provide identity only and must not alter the prescribed wardrobe."
                 )
-        selected_action_beat = self._select_key_action_beat(scene, scene_character_names)
+        selected_action_beat = self._select_key_action_beat(
+            scene,
+            scene_character_names,
+            script,
+        )
         prompt_parts.append("[SELECTED SINGLE ACTION BEAT - DEPICT ONLY THIS INSTANT]")
         prompt_parts.append(selected_action_beat)
         prompt_parts.append(
             "[TEMPORAL COMPOSITION LOCK] This is one frozen instant from one timeline beat. "
-            "Do not combine earlier or later actions, poses, locations, or camera stages into the same frame."
+            "Use one action, one pose, one location, and one camera stage."
         )
+        performance_context = self._sanitize_key_action_cast_context(
+            getattr(scene, "character_description", ""),
+            scene_character_names,
+            script,
+        )
+        if performance_context:
+            prompt_parts.append(
+                "Character performance context (resolve within the same selected instant; never add another "
+                f"time phase): {performance_context}"
+            )
         prompt_parts.append(
-            "Character performance context (resolve within the same selected instant; never add another time phase): "
-            f"{getattr(scene, 'character_description', '')}"
+            "[OFF-SCREEN NARRATIVE SUBJECT LOCK] Only Characters present may be visible. Keep the entire "
+            "foreground and background outside those exact cast bodies filled only with environment, architecture, "
+            "landscape, props, light, and atmosphere. Treat every other narrative subject as audio context."
         )
         prompt_parts.append(f"Mood: {getattr(scene, 'mood', '')}")
         if getattr(scene, "camera_angle", None):
@@ -838,14 +987,18 @@ class ImageAgent:
                 "Characters present: "
                 + ", ".join(self._format_character_name(name) for name in scene_character_names)
             )
+        if correction_feedback:
+            prompt_parts.extend([
+                "[MANDATORY CORRECTION FROM FAILED VISUAL REVIEW]",
+                str(correction_feedback).strip(),
+                "Start a completely new composition that satisfies every positive constraint above: exact cast, "
+                "one body per identity, prescribed wardrobe coverage, valid anatomy, and one frozen instant.",
+            ])
         self._append_image_private_extensions(
             prompt_parts,
             ["key_action_reference_image.md"],
-            user_style_info,
-            getattr(script, "tone", ""),
-            getattr(script, "background", ""),
-            getattr(scene, "description", ""),
-            getattr(scene, "character_description", ""),
+            selected_action_beat,
+            performance_context,
             getattr(scene, "dialogue", ""),
             scene_outfits,
         )
@@ -1079,11 +1232,11 @@ class ImageAgent:
         parts: List[str] = ["[KEY ACTION REFERENCE PRIORITY]"]
         if outfit_refs:
             parts.append(
-                f"Prefer {'/'.join(outfit_refs)} for the current character outfit, hairstyle, nudity level, damage, stains, and continuity."
+                f"Prefer {'/'.join(outfit_refs)} for the current character outfit, hairstyle, body coverage, damage, stains, and continuity."
             )
             parts.append(
-                "Character outfit references are authoritative for wardrobe and nudity level; "
-                "base character references may supply identity only and must not restore default clothing."
+                "Character outfit references are authoritative for wardrobe and body coverage; "
+                "base character references may supply identity only and must not alter the current wardrobe."
             )
         if state_refs:
             parts.append(
@@ -1098,7 +1251,7 @@ class ImageAgent:
                 f"Use {'/'.join(scene_refs)} only as fallback environment references when a matching backdrop state reference is unavailable."
             )
         parts.append(
-            "Combine the scene script, the current outfit/state references above, and the NSFW key-action prompt rules to stage one decisive action frame."
+            "Combine the scene script, the current outfit/state references above, and the applicable key-action rules to stage one decisive action frame."
         )
         return parts
 

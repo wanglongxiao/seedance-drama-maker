@@ -161,6 +161,16 @@ video_review:
     physical-laws: 0.30                # 物理世界规律
     script_semantic_consistency: 0.30  # 与分镜脚本意义上一致
 
+# 关键动作参考图审核：每张图片入库前执行硬性视觉验收
+key_action_review:
+  enabled: true
+  # 首次生成不通过后，最多再生成 2 次；仍不通过则阻止错误图片入库
+  max_regenerations: 2
+  request_retry_count: 2
+  request_retry_delay_seconds: 2
+  temperature: 0.1
+  max_tokens: 4000
+
 # 剧本生成约束
 script_generation:
   max_characters: 30         # 剧本中的主要人物/角色最多 30 人

@@ -23,6 +23,7 @@ from app.utils.thread_pools import run_generation, run_interactive
 from app.models.schemas import VideoProject, Script, GeneratedImage, GeneratedVideo, VideoSceneState, UploadedReferenceImage
 from app.agents.script_agent import ScriptAgent
 from app.agents.image_agent import ImageAgent
+from app.agents.key_action_review_agent import KeyActionReviewAgent
 from app.agents.video_agent import VideoAgent
 from app.agents.video_review_agent import VideoReviewAgent
 from app.agents.merge_agent import MergeAgent
@@ -184,6 +185,7 @@ class MainAgent:
         self.max_tokens = int(config.get('models.main_agent.max_tokens', 120000))
         self.script_agent = ScriptAgent()
         self.image_agent = ImageAgent()
+        self.key_action_review_agent = KeyActionReviewAgent()
         self.video_agent = VideoAgent()
         self.video_review_agent = VideoReviewAgent()
         self.merge_agent = MergeAgent()
@@ -891,7 +893,42 @@ class MainAgent:
         completed_scene_images = [image for image in scene_images if image is not None]
         completed_outfit_images = [image for image in (outfit_images or []) if image is not None]
         completed_scene_state_images = [image for image in (scene_state_images or []) if image is not None]
-        completed_key_action_images = [image for image in (key_action_images or []) if image is not None]
+        completed_key_action_images: List[GeneratedImage] = []
+        key_action_plan = list(
+            self._plan_scene_variant_assets(project).get("key_actions", [])
+            if getattr(project, "script", None)
+            else []
+        )
+        for index, image in enumerate(key_action_images or []):
+            if image is None:
+                continue
+            if index >= len(key_action_plan):
+                logger.warning(
+                    "Dropping key-action asset outside the current plan: index=%s name=%s",
+                    index,
+                    getattr(image, "name", ""),
+                )
+                continue
+            task = key_action_plan[index]
+            expected_scene_number = int(task.get("scene_number") or 0)
+            expected_variant_key = str(task.get("dedup_key") or "")
+            if not self._key_action_asset_matches_scene(
+                image,
+                expected_scene_number,
+                allow_legacy_without_variant=False,
+            ):
+                logger.warning(
+                    "Dropping mismatched key-action slot: index=%s name=%s scene_number=%s "
+                    "variant_key=%s expected_scene=%s expected_variant_key=%s",
+                    index,
+                    getattr(image, "name", ""),
+                    getattr(image, "scene_number", ""),
+                    getattr(image, "variant_key", ""),
+                    expected_scene_number,
+                    expected_variant_key,
+                )
+                continue
+            completed_key_action_images.append(image)
         project.character_reference_images = completed_character_images
         project.scene_reference_images = completed_scene_images
         project.character_outfit_images = completed_outfit_images
@@ -942,6 +979,42 @@ class MainAgent:
         self._hydrate_reference_generation_slots(project, slots)
         return slots
 
+    @staticmethod
+    def _key_action_scene_number_from_name(image: GeneratedImage) -> Optional[int]:
+        match = re.match(
+            r"^\s*Scene\s+0*(\d+)\s+Key\s+Action(?:\s+-|\s*$)",
+            str(getattr(image, "name", "") or ""),
+            flags=re.IGNORECASE,
+        )
+        return int(match.group(1)) if match else None
+
+    def _key_action_asset_matches_scene(
+        self,
+        image: GeneratedImage,
+        scene_number: int,
+        *,
+        allow_legacy_without_variant: bool = True,
+    ) -> bool:
+        """Require all available scene identity fields to agree."""
+        expected_scene_number = max(1, int(scene_number or 1))
+        expected_key = f"scene_{expected_scene_number:03d}::key_action"
+        variant_key = str(getattr(image, "variant_key", "") or "").strip()
+        image_scene_number = int(getattr(image, "scene_number", 0) or 0)
+        name_scene_number = self._key_action_scene_number_from_name(image)
+
+        if variant_key:
+            return (
+                variant_key == expected_key
+                and image_scene_number == expected_scene_number
+                and name_scene_number == expected_scene_number
+            )
+        if not allow_legacy_without_variant:
+            return False
+        return (
+            image_scene_number == expected_scene_number
+            and name_scene_number == expected_scene_number
+        )
+
     def _hydrate_reference_generation_slots(
         self,
         project: VideoProject,
@@ -989,9 +1062,56 @@ class MainAgent:
             variant_key = str(getattr(image, "variant_key", "") or "")
             put("scene_states", scene_state_index_by_key.get(variant_key, index), image)
 
-        for index, image in enumerate(getattr(project, "key_action_reference_images", []) or []):
+        key_action_plan = list(variant_plan.get("key_actions", []) or [])
+        key_action_index_by_scene = {
+            int(task.get("scene_number") or 0): index
+            for index, task in enumerate(key_action_plan)
+        }
+        for image in getattr(project, "key_action_reference_images", []) or []:
             variant_key = str(getattr(image, "variant_key", "") or "")
-            put("key_actions", key_action_index_by_key.get(variant_key, index), image)
+            slot_index = key_action_index_by_key.get(variant_key)
+            if slot_index is None and not variant_key:
+                image_scene_number = int(getattr(image, "scene_number", 0) or 0)
+                candidate_index = key_action_index_by_scene.get(image_scene_number)
+                if (
+                    candidate_index is not None
+                    and self._key_action_asset_matches_scene(
+                        image,
+                        image_scene_number,
+                        allow_legacy_without_variant=True,
+                    )
+                ):
+                    slot_index = candidate_index
+                    image.variant_key = str(
+                        key_action_plan[candidate_index].get("dedup_key") or ""
+                    )
+            if slot_index is None:
+                logger.warning(
+                    "Ignoring unbound persisted key-action asset during hydration: "
+                    "name=%s scene_number=%s variant_key=%s",
+                    getattr(image, "name", ""),
+                    getattr(image, "scene_number", ""),
+                    variant_key,
+                )
+                continue
+            expected_scene_number = int(
+                key_action_plan[slot_index].get("scene_number") or 0
+            )
+            if not self._key_action_asset_matches_scene(
+                image,
+                expected_scene_number,
+                allow_legacy_without_variant=False,
+            ):
+                logger.warning(
+                    "Ignoring inconsistent persisted key-action asset during hydration: "
+                    "name=%s scene_number=%s variant_key=%s expected_scene=%s",
+                    getattr(image, "name", ""),
+                    getattr(image, "scene_number", ""),
+                    getattr(image, "variant_key", ""),
+                    expected_scene_number,
+                )
+                continue
+            put("key_actions", slot_index, image)
 
     def _get_reference_generation_session(
         self,
@@ -1351,6 +1471,158 @@ class MainAgent:
             selected.append(image)
         return selected
 
+    def _build_key_action_retry_guidance(
+        self,
+        project: VideoProject,
+        scene,
+        details: Dict[str, Any],
+    ) -> str:
+        """Convert review findings into positive constraints without echoing bad visuals."""
+        character_names: List[str] = []
+        seen_names = set()
+        for raw_name in getattr(scene, "characters_present", None) or []:
+            name = re.sub(r"^\[|\]$", "", str(raw_name or "").strip())
+            key = self._normalize_name_key(name)
+            if not name or not key or key in seen_names:
+                continue
+            seen_names.add(key)
+            character_names.append(name)
+
+        formatted_names = [f"[{name}]" for name in character_names]
+        lines = [
+            "[RETRY COMPOSITION RESET]",
+            "Create a completely new composition instead of editing or extending the previous candidate.",
+            f"Render exactly {len(formatted_names)} visible cast body/bodies: "
+            + (", ".join(formatted_names) if formatted_names else "an empty environment"),
+            "Render each listed identity exactly once, visibly distinct, and as one continuous body.",
+            "Fill every remaining foreground and background region only with architecture, landscape, props, "
+            "light, and atmosphere; keep those regions free of human-shaped forms.",
+        ]
+
+        character_map = {
+            self._normalize_name_key(getattr(character, "name", "")): character
+            for character in getattr(getattr(project, "script", None), "characters", None) or []
+        }
+        scene_outfits = {
+            self._normalize_name_key(name): str(outfit or "").strip()
+            for name, outfit in (getattr(scene, "character_outfits", None) or {}).items()
+        }
+        wardrobe_lines = []
+        for name in character_names:
+            key = self._normalize_name_key(name)
+            character = character_map.get(key)
+            outfit = scene_outfits.get(
+                key,
+                str(getattr(character, "clothing", "") or "").strip() if character else "",
+            )
+            if outfit:
+                wardrobe_lines.append(f"[{name}] wears exactly: {outfit}")
+        if wardrobe_lines:
+            lines.append("Preserve these complete wardrobe coverage requirements: " + "; ".join(wardrobe_lines))
+
+        if details.get("anatomy_valid") is not True:
+            lines.append(
+                "Give every visible cast member one naturally connected head, torso, two arms, two hands, "
+                "two legs, and two feet with physically valid joints."
+            )
+        if details.get("single_static_instant") is not True:
+            lines.append("Depict one frozen instant with one spatial position per cast member.")
+        if details.get("scene_semantics_consistent") is not True:
+            lines.append("Follow the selected action beat, prop, location, and camera framing literally.")
+        return "\n".join(lines)
+
+    async def _generate_reviewed_key_action_image(
+        self,
+        project: VideoProject,
+        scene,
+        reference_images: List[GeneratedImage],
+        user_style_info: Optional[str],
+        aspect_ratio: Optional[str],
+        initial_feedback: Optional[str] = None,
+    ) -> GeneratedImage:
+        """Generate until the visual hard gate passes; never return a rejected image."""
+        review_enabled = bool(config.get("key_action_review.enabled", True))
+        max_regenerations = max(
+            0,
+            int(config.get("key_action_review.max_regenerations", 2)),
+        )
+        correction_feedback = str(initial_feedback or "").strip()
+        generation_reference_images = list(reference_images or [])
+        expected_cast_count = len({
+            self._normalize_name_key(name)
+            for name in (getattr(scene, "characters_present", None) or [])
+            if self._normalize_name_key(name)
+        })
+
+        for attempt in range(max_regenerations + 1):
+            self._raise_if_project_ended(project)
+            generated = await run_generation(
+                self.image_agent.generate_key_action_reference_image,
+                scene=scene,
+                script=project.script,
+                reference_images=generation_reference_images,
+                user_style_info=user_style_info,
+                aspect_ratio=aspect_ratio,
+                correction_feedback=correction_feedback or None,
+            )
+            if not review_enabled:
+                return generated
+
+            approved, feedback, details = await run_generation(
+                self.key_action_review_agent.review_image,
+                scene=scene,
+                script=project.script,
+                candidate_url=generated.url,
+                reference_images=reference_images,
+            )
+            if approved:
+                logger.info(
+                    "[KEY_ACTION_REVIEW] Scene %s passed on generation %s/%s",
+                    getattr(scene, "scene_number", ""),
+                    attempt + 1,
+                    max_regenerations + 1,
+                )
+                return generated
+
+            logger.warning(
+                "[KEY_ACTION_REVIEW] Scene %s rejected on generation %s/%s: feedback=%s details=%s",
+                getattr(scene, "scene_number", ""),
+                attempt + 1,
+                max_regenerations + 1,
+                feedback,
+                details,
+            )
+            if isinstance(details, dict):
+                visible_count = details.get("visible_subject_count")
+                unexpected_subjects = details.get("unexpected_subjects")
+                if visible_count != expected_cast_count or (
+                    isinstance(unexpected_subjects, list) and unexpected_subjects
+                ):
+                    cast_only_references = [
+                        image
+                        for image in reference_images
+                        if str(getattr(image, "reference_type", "") or "").strip().lower()
+                        in {"character", "character_outfit"}
+                    ]
+                    if cast_only_references:
+                        generation_reference_images = cast_only_references
+                        logger.info(
+                            "[KEY_ACTION_REVIEW] Scene %s retry will use %s cast-only reference image(s)",
+                            getattr(scene, "scene_number", ""),
+                            len(cast_only_references),
+                        )
+            correction_feedback = self._build_key_action_retry_guidance(
+                project,
+                scene,
+                details if isinstance(details, dict) else {},
+            )
+
+        raise RuntimeError(
+            f"Key-action image for scene {getattr(scene, 'scene_number', '')} "
+            f"failed visual review after {max_regenerations + 1} generation attempts: "
+            f"{correction_feedback}"
+        )
+
     def _select_base_reference_assets_for_scene(self, project: VideoProject, scene) -> List[GeneratedImage]:
         selected: List[GeneratedImage] = []
         outfits = getattr(scene, "character_outfits", None) or {}
@@ -1406,11 +1678,12 @@ class MainAgent:
         project: VideoProject,
         scene_number: int,
     ) -> Optional[GeneratedImage]:
-        dedup_key = f"scene_{max(1, int(scene_number or 1)):03d}::key_action"
         for image in getattr(project, "key_action_reference_images", []) or []:
-            if getattr(image, "variant_key", None) == dedup_key:
-                return image
-            if int(getattr(image, "scene_number", 0) or 0) == scene_number:
+            if self._key_action_asset_matches_scene(
+                image,
+                scene_number,
+                allow_legacy_without_variant=True,
+            ):
                 return image
         return None
 
@@ -2953,10 +3226,9 @@ class MainAgent:
             scene = task["scene"]
             reference_images = self._select_key_action_reference_assets_for_scene(project, scene)
             async with semaphore:
-                generated = await run_generation(
-                    self.image_agent.generate_key_action_reference_image,
+                generated = await self._generate_reviewed_key_action_image(
+                    project=project,
                     scene=scene,
-                    script=project.script,
                     reference_images=reference_images,
                     user_style_info=user_style_info,
                     aspect_ratio=aspect_ratio,
@@ -3507,13 +3779,13 @@ class MainAgent:
                     )
                 scene = task["scene"]
                 reference_images = self._select_key_action_reference_assets_for_scene(project, scene)
-                generated = await run_generation(
-                    self.image_agent.generate_key_action_reference_image,
+                generated = await self._generate_reviewed_key_action_image(
+                    project=project,
                     scene=scene,
-                    script=project.script,
                     reference_images=reference_images,
                     user_style_info=user_style_info,
                     aspect_ratio=aspect_ratio,
+                    initial_feedback=feedback,
                 )
                 generated.variant_key = variant_key
                 stored = await self._store_reference_asset_async(
