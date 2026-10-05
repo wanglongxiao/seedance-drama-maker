@@ -16,6 +16,7 @@
 - Improved auto-review fallback flow: when the retry limit is reached, the workflow can accept the highest-scoring result and continue merging, marking the scene as accepted over retry.
 - Improved thread-pool isolation by separating interactive requests from generation tasks, reducing upload and state-restore starvation during multi-window concurrent generation.
 - Improved outfit/backdrop variant deduplication and explicit scene binding. Ongoing adult scenes can inherit the previous scene's outfit state, while character-consistency review prefers the current scene's outfit references.
+- Improved service logging by moving heartbeats, asset polling, and complete model request bodies to `DEBUG`; `INFO` now keeps compact request summaries to prevent rapid log growth during long jobs.
 
 ### Fixed
 
@@ -25,6 +26,8 @@
 - Fixed frontend crashes when project cleanup receives a non-JSON 504 response from upstream infrastructure.
 - Fixed tofu-box text corruption in cloud-generated comic PDFs for Chinese, Japanese, Korean, and emoji text. PDF generation now requires a CJK-capable font, and the runtime image must include `fonts-noto-cjk`, `fonts-noto-color-emoji`, `fontconfig`, and `ffmpeg` / `ffprobe`.
 - Fixed scene-number drift and races when failed parallel scenes are removed. Generation now binds a content fingerprint to each scene video; merge rejects duplicate, missing, extra, or mismatched scenes and follows storyboard order exactly.
+- Fixed outfit-image lookup repeatedly rebuilding the complete variant plan; lookup now resolves directly through `scene_numbers`, `variant_key`, and visual-equivalence fallback.
+- Fixed review-service network failures being treated as video-quality failures and triggering costly regeneration; project termination is also rechecked before archive, review, and retry work.
 
 ### Removed
 

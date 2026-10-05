@@ -1497,9 +1497,11 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             # 接收消息 - 设置较长的超时时间
             data = await websocket.receive_json()
-            logger.info(f"WebSocket received from {client_id}: {data}")
-            
             message_type = data.get("type")
+            if message_type == "ping":
+                logger.debug("WebSocket heartbeat received from %s", client_id)
+            else:
+                logger.info("WebSocket received from %s: type=%s", client_id, message_type)
             
             if message_type == "chat":
                 # 处理聊天消息

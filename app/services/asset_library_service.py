@@ -118,7 +118,7 @@ class AssetLibraryService:
 
     def _call(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         client = self._ensure_client()
-        logger.info("[ASSET_LIBRARY] action=%s payload=%s", action, json.dumps(payload, ensure_ascii=False))
+        logger.debug("[ASSET_LIBRARY] action=%s payload=%s", action, json.dumps(payload, ensure_ascii=False))
         try:
             raw = client.json(action, {}, payload)
             parsed = json.loads(raw)
@@ -132,7 +132,7 @@ class AssetLibraryService:
             raise AssetLibraryError(f"{action} failed: {message}") from exc
 
         result = parsed.get("Result", {})
-        logger.info("[ASSET_LIBRARY] action=%s result=%s", action, json.dumps(result, ensure_ascii=False))
+        logger.debug("[ASSET_LIBRARY] action=%s result=%s", action, json.dumps(result, ensure_ascii=False))
         return result
 
     def build_asset_uri(self, asset_id: str) -> str:

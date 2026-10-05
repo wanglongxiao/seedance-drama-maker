@@ -25,7 +25,7 @@ from app.models.schemas import VideoProject, Script, GeneratedImage, GeneratedVi
 from app.agents.script_agent import ScriptAgent
 from app.agents.image_agent import ImageAgent
 from app.agents.video_agent import VideoAgent
-from app.agents.video_review_agent import VideoReviewAgent
+from app.agents.video_review_agent import VideoReviewAgent, VideoReviewUnavailableError
 from app.agents.merge_agent import MergeAgent
 from app.services.asset_library_service import asset_library_service, AssetLibraryError
 from app.services.tos_service import tos_service
@@ -360,7 +360,7 @@ class MainAgent:
 
         logger.log_agent_call("MainAgent", "create_project", {
             "project_id": project_id,
-            "user_input": user_input,
+            "input_chars": len(user_input or ""),
             "has_images": bool(reference_images),
             "uploaded_reference_images": len(uploaded_assets),
             "has_audio": bool(audio_url),
@@ -1201,7 +1201,7 @@ class MainAgent:
                     None,
                 )
                 if equivalent_task is not None:
-                    logger.info(
+                    logger.debug(
                         "Reusing visually equivalent outfit variant: character=%s, outfit=%s, canonical=%s",
                         character_name,
                         outfit_desc,
@@ -1283,26 +1283,31 @@ class MainAgent:
         scene_number: Optional[int] = None,
     ) -> Optional[GeneratedImage]:
         character_key = self._normalize_name_key(character_key)
-        matching_task = next(
-            (
-                task
-                for task in self._plan_scene_variant_assets(project).get("outfits", [])
-                if task["character_key"] == character_key
-                and are_outfits_visually_equivalent(task["outfit"], outfit_desc)
-            ),
-            None,
-        )
-        dedup_key = (
-            matching_task["dedup_key"]
-            if matching_task is not None
-            else f"{character_key}::{self._normalize_name_key(outfit_desc)}"
-        )
-        for image in getattr(project, "character_outfit_images", []) or []:
-            if scene_number is not None and scene_number in (getattr(image, "scene_numbers", None) or []):
-                if getattr(image, "variant_key", None) == dedup_key:
+        images = [
+            image
+            for image in (getattr(project, "character_outfit_images", []) or [])
+            if str(getattr(image, "variant_key", "") or "").startswith(f"{character_key}::")
+        ]
+
+        # scene_numbers is the strongest persisted relationship. It also keeps
+        # older snapshots working when their non-canonical outfit text differs.
+        if scene_number is not None:
+            for image in images:
+                if scene_number in (getattr(image, "scene_numbers", None) or []):
                     return image
-        for image in getattr(project, "character_outfit_images", []) or []:
+
+        stable_outfit = stable_outfit_description(outfit_desc)
+        dedup_key = f"{character_key}::{self._normalize_name_key(stable_outfit)}"
+        for image in images:
             if getattr(image, "variant_key", None) == dedup_key:
+                return image
+
+        # Compatibility fallback for snapshots created before canonical outfit
+        # descriptions were written back into every scene.
+        for image in images:
+            variant_key = str(getattr(image, "variant_key", "") or "")
+            image_outfit = variant_key.split("::", 1)[1] if "::" in variant_key else ""
+            if image_outfit and are_outfits_visually_equivalent(image_outfit, stable_outfit):
                 return image
         return None
 
@@ -2025,6 +2030,7 @@ class MainAgent:
                     pass_threshold=pass_threshold,
                     max_total_generations=max_total_generations,
                 )
+                self._raise_if_project_ended(project)
                 project.next_scene_index = len(project.script.scenes)
                 scene_index = len(project.script.scenes)
 
@@ -2146,6 +2152,9 @@ class MainAgent:
             # 视频流程结束后持久化，保证合成步骤在任意实例都能恢复项目。
             self.save_project_state(project_id)
 
+        except ProjectEndedError:
+            logger.info("[FLOW] Video generation stopped because project %s ended", project_id)
+            return project
         except Exception as e:
             logger.error(f"[FLOW] Video generation failed: {str(e)}")
             project.status = "failed"
@@ -2208,12 +2217,12 @@ class MainAgent:
         deferred_skips: List[Dict[str, Any]] = []
 
         async def generate_one(scene_index: int) -> None:
-            self._raise_if_project_ended(project)
             scene = project.script.scenes[scene_index]
             scene_number = int(scene.scene_number)
             progress_base = 50 + (scene_index / max(1, num_scenes)) * 40
             async with semaphore:
                 try:
+                    self._raise_if_project_ended(project)
                     video, final_approved, _, final_score = await self._generate_and_review_video_with_retries(
                         project=project,
                         scene=scene,
@@ -2227,6 +2236,12 @@ class MainAgent:
                         max_total_generations=max_total_generations,
                         defer_scene_removal=True,
                     )
+                except ProjectEndedError:
+                    logger.debug(
+                        "[FLOW] Parallel mode: scene %s stopped because project ended",
+                        scene_number,
+                    )
+                    return
                 except SceneSkippedError as exc:
                     async with results_lock:
                         deferred_skips.append({
@@ -2274,6 +2289,7 @@ class MainAgent:
         tasks = [asyncio.create_task(generate_one(index)) for index in pending_indexes]
         if tasks:
             await asyncio.gather(*tasks)
+        self._raise_if_project_ended(project)
         for skip in sorted(deferred_skips, key=lambda item: item["scene_number"], reverse=True):
             await self._notify_scene_skipped(
                 project=project,
@@ -2413,13 +2429,17 @@ class MainAgent:
                     asset_group_id=project.asset_group_id,
                     asset_project_name=project.asset_project_name,
                 )
+                self._raise_if_project_ended(project)
                 current_video = await self.archive_scene_video_async(
                     project,
                     current_video,
                     generation_count=self._next_scene_archive_attempt(scene_state),
                 )
+                self._raise_if_project_ended(project)
                 scene_state.last_video = current_video
                 scene_state.generation_failure_count = 0
+            except ProjectEndedError:
+                raise
             except Exception as e:
                 logger.warning(
                     f"[FLOW] Scene {scene_number} generation failed on auto retry {scene_state.auto_retry_count}/{max_retries}: {str(e)}"
@@ -2636,13 +2656,53 @@ class MainAgent:
                 )
             )
 
-            is_approved, feedback, score = await run_generation(
-                self.video_review_agent.review_video,
-                script_scene_description=scene.description,
-                video_url=current_video.url,
-                reference_image_urls=self._select_video_review_reference_urls(project, scene),
-                output_language=project_language,
-            )
+            self._raise_if_project_ended(project)
+            try:
+                is_approved, feedback, score = await run_generation(
+                    self.video_review_agent.review_video,
+                    script_scene_description=scene.description,
+                    video_url=current_video.url,
+                    reference_image_urls=self._select_video_review_reference_urls(project, scene),
+                    output_language=project_language,
+                )
+            except VideoReviewUnavailableError as exc:
+                self._raise_if_project_ended(project)
+                feedback = self._t(
+                    project,
+                    "message.video.review_unavailable_keep_current",
+                    scene=scene_number,
+                    error=str(exc),
+                )
+                accepted = not is_manual_mode
+                scene_state.last_score = 0
+                scene_state.last_feedback = feedback
+                scene_state.best_video = current_video
+                scene_state.best_feedback = feedback
+                scene_state.best_score = 0
+                scene_state.completed = True
+                scene_state.approved = accepted
+                scene_state.accepted_over_retry = accepted
+                logger.warning(
+                    "[REVIEW] Scene %s review service unavailable; keeping current video without regeneration",
+                    scene_number,
+                )
+                await self._send_agent_output(websocket, "video_review_agent", {
+                    "scene_number": scene_number,
+                    "approved": accepted,
+                    "accepted_over_retry": accepted,
+                    "review_unavailable": True,
+                    "score": 0,
+                    "retry_count": scene_state.auto_retry_count,
+                    "max_retries": max_retries,
+                    "generation_count": scene_state.total_generation_count,
+                    "max_generation_count": max_total_generations,
+                    "manual_continue_allowed": is_manual_mode,
+                    "review_mode": review_mode,
+                    "feedback": feedback,
+                    "message": feedback,
+                })
+                return current_video, accepted, feedback, 0
+            self._raise_if_project_ended(project)
 
             scene_state.last_score = score
             scene_state.last_feedback = feedback
@@ -2770,6 +2830,7 @@ class MainAgent:
                     )
                 )
 
+            self._raise_if_project_ended(project)
             scene_state.auto_retry_count += 1
             logger.info(f"[REVIEW] Scene {scene_number} - Retrying generation ({scene_state.auto_retry_count}/{max_retries})")
 
@@ -2792,7 +2853,7 @@ class MainAgent:
         if project.combined_input:
             user_input = project.combined_input
             logger.info(f"Using combined_input for script generation ({len(user_input)} chars)")
-            logger.info(f"combined_input content: {user_input}")
+            logger.debug("combined_input content: %s", user_input)
         else:
             user_input = project.user_input
             logger.info(f"Using user_input for script generation (no combined_input found)")

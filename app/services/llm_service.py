@@ -31,39 +31,39 @@ class LLMService:
         script_endpoint = config.get('models.script.endpoint')
         script_api_key = config.get('models.script.api_key')
         if model_endpoint == script_endpoint and script_api_key:
-            logger.info(f"[API_KEY] Using script model api_key for endpoint: {model_endpoint}")
+            logger.debug("Using script model API key for endpoint: %s", model_endpoint)
             return script_api_key
 
         # 检查 main_agent 模型
         main_agent_endpoint = config.get('models.main_agent.endpoint')
         main_agent_api_key = config.get('models.main_agent.api_key')
         if model_endpoint == main_agent_endpoint and main_agent_api_key:
-            logger.info(f"[API_KEY] Using main_agent model api_key for endpoint: {model_endpoint}")
+            logger.debug("Using main-agent model API key for endpoint: %s", model_endpoint)
             return main_agent_api_key
 
         # 检查 video 模型
         video_endpoint = config.get('models.video.endpoint')
         video_api_key = config.get('models.video.api_key')
         if model_endpoint == video_endpoint and video_api_key:
-            logger.info(f"[API_KEY] Using video model api_key for endpoint: {model_endpoint}")
+            logger.debug("Using video model API key for endpoint: %s", model_endpoint)
             return video_api_key
 
         # 检查 image 模型
         image_endpoint = config.get('models.image.endpoint')
         image_api_key = config.get('models.image.api_key')
         if model_endpoint == image_endpoint and image_api_key:
-            logger.info(f"[API_KEY] Using image model api_key for endpoint: {model_endpoint}")
+            logger.debug("Using image model API key for endpoint: %s", model_endpoint)
             return image_api_key
 
         # 检查 video_review 模型 (视频审核Agent)
         video_review_endpoint = config.get('models.video_review.endpoint')
         video_review_api_key = config.get('models.video_review.api_key')
         if model_endpoint == video_review_endpoint and video_review_api_key:
-            logger.info(f"[API_KEY] Using video_review model api_key for endpoint: {model_endpoint}")
+            logger.debug("Using video-review model API key for endpoint: %s", model_endpoint)
             return video_review_api_key
 
         # 默认使用全局api_key
-        logger.info(f"[API_KEY] Using global api_key for endpoint: {model_endpoint}")
+        logger.debug("Using global API key for endpoint: %s", model_endpoint)
         return self.api_key
 
     def _get_headers(self, model_endpoint: str) -> Dict[str, str]:
@@ -152,10 +152,15 @@ class LLMService:
             **kwargs
         }
 
+        payload_json = json.dumps(payload, ensure_ascii=False)
         logger.log_llm_input(model, json.dumps(messages, ensure_ascii=False))
-        logger.info(f"[LLM_REQUEST][CHAT] url={url}")
-        logger.info(f"[LLM_REQUEST][CHAT] payload={json.dumps(payload, ensure_ascii=False)}")
-
+        logger.info(
+            "[LLM_REQUEST][CHAT] model=%s messages=%s payload_chars=%s",
+            model,
+            len(messages),
+            len(payload_json),
+        )
+        logger.debug("[LLM_REQUEST][CHAT] url=%s payload=%s", url, payload_json)
         try:
             # 剧本生成 timeout，由 config.yaml limits.script_llm_timeout 控制（默认 600 秒）
             response = requests.post(
@@ -175,9 +180,9 @@ class LLMService:
 
         except requests.exceptions.HTTPError as e:
             logger.error(f"LLM call failed: {str(e)}")
-            logger.error(f"LLM request payload: {json.dumps(payload, ensure_ascii=False)}")
+            logger.debug("LLM request payload: %s", payload_json)
             if e.response is not None and e.response.text:
-                logger.error(f"LLM response text: {e.response.text}")
+                logger.error("LLM response text: %s", e.response.text[:1000])
             raise
         except Exception as e:
             logger.error(f"LLM call failed: {str(e)}")
@@ -233,9 +238,16 @@ class LLMService:
         if image_urls:
             payload["image"] = image_urls
 
+        payload_json = json.dumps(payload, ensure_ascii=False)
         logger.log_llm_input(model, prompt)
-        logger.info(f"[LLM_REQUEST][IMAGE] url={url}")
-        logger.info(f"[LLM_REQUEST][IMAGE] payload={json.dumps(payload, ensure_ascii=False)}")
+        logger.info(
+            "[LLM_REQUEST][IMAGE] model=%s prompt_chars=%s reference_images=%s payload_chars=%s",
+            model,
+            len(prompt),
+            len(image_urls or []),
+            len(payload_json),
+        )
+        logger.debug("[LLM_REQUEST][IMAGE] url=%s payload=%s", url, payload_json)
         
         try:
             # 图片生成 timeout: 900秒
@@ -253,9 +265,9 @@ class LLMService:
             
         except requests.exceptions.HTTPError as e:
             logger.error(f"Image generation failed: {str(e)}")
-            logger.error(f"Image request payload: {json.dumps(payload, ensure_ascii=False)}")
+            logger.debug("Image request payload: %s", payload_json)
             if e.response is not None and e.response.text:
-                logger.error(f"Image response text: {e.response.text}")
+                logger.error("Image response text: %s", e.response.text[:1000])
             raise
         except Exception as e:
             logger.error(f"Image generation failed: {str(e)}")
@@ -354,10 +366,16 @@ class LLMService:
         if camera_fixed:
             payload["camera_fixed"] = camera_fixed
 
+        payload_json = json.dumps(payload, ensure_ascii=False)
         logger.log_llm_input(model, prompt)
         logger.info(f"Video task payload: model={model}, duration={duration}, ratio={ratio}")
-        logger.info(f"[LLM_REQUEST][VIDEO_CREATE] url={url}")
-        logger.info(f"[LLM_REQUEST][VIDEO_CREATE] payload={json.dumps(payload, ensure_ascii=False)}")
+        logger.info(
+            "[LLM_REQUEST][VIDEO_CREATE] model=%s prompt_chars=%s payload_chars=%s",
+            model,
+            len(prompt),
+            len(payload_json),
+        )
+        logger.debug("[LLM_REQUEST][VIDEO_CREATE] url=%s payload=%s", url, payload_json)
 
         try:
             # 视频生成 timeout: 1000秒
@@ -376,9 +394,9 @@ class LLMService:
 
         except requests.exceptions.HTTPError as e:
             logger.error(f"Video task creation failed: {str(e)}")
-            logger.error(f"Request payload: {json.dumps(payload, ensure_ascii=False)}")
+            logger.debug("Video task request payload: %s", payload_json)
             if response.text:
-                logger.error(f"Response text: {response.text}")
+                logger.error("Video task response text: %s", response.text[:1000])
             raise
         except Exception as e:
             logger.error(f"Video task creation failed: {str(e)}")
@@ -448,12 +466,18 @@ class LLMService:
         if camera_fixed:
             payload["camera_fixed"] = camera_fixed
 
+        payload_json = json.dumps(payload, ensure_ascii=False)
         logger.info(
             f"Video task created: model={model}, duration={duration}, ratio={ratio}, "
             f"resolution={normalized_resolution or 'default'}, content={len(content)} items"
         )
-        logger.info(f"[LLM_REQUEST][VIDEO_CREATE_WITH_CONTENT] url={url}")
-        logger.info(f"[LLM_REQUEST][VIDEO_CREATE_WITH_CONTENT] payload={json.dumps(payload, ensure_ascii=False)}")
+        logger.info(
+            "[LLM_REQUEST][VIDEO_CREATE_WITH_CONTENT] model=%s content_items=%s payload_chars=%s",
+            model,
+            len(content),
+            len(payload_json),
+        )
+        logger.debug("[LLM_REQUEST][VIDEO_CREATE_WITH_CONTENT] url=%s payload=%s", url, payload_json)
 
         try:
             # 视频生成 timeout: 1000秒
@@ -472,9 +496,9 @@ class LLMService:
 
         except requests.exceptions.HTTPError as e:
             logger.error(f"Video task creation failed: {str(e)}")
-            logger.error(f"Request payload: {json.dumps(payload, ensure_ascii=False)}")
+            logger.debug("Video task request payload: %s", payload_json)
             if response.text:
-                logger.error(f"Response text: {response.text}")
+                logger.error("Video task response text: %s", response.text[:1000])
             raise
         except Exception as e:
             logger.error(f"Video task creation failed: {str(e)}")

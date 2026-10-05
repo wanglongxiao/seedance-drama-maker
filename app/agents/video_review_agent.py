@@ -20,6 +20,10 @@ from app.utils.logger import get_logger
 logger = get_logger("video_review_agent")
 
 
+class VideoReviewUnavailableError(RuntimeError):
+    """Raised when the review service cannot evaluate a generated video."""
+
+
 class VideoReviewAgent:
     """视频审核Agent - 使用视频理解审核生成结果"""
 
@@ -181,7 +185,7 @@ class VideoReviewAgent:
                     break
                 except requests.exceptions.HTTPError as e:
                     status_code = e.response.status_code if e.response is not None else None
-                    should_retry = attempt < self.request_retry_count and status_code in {400, 408, 429, 500, 502, 503, 504}
+                    should_retry = attempt < self.request_retry_count and status_code in {408, 429, 500, 502, 503, 504}
                     logger.warning(
                         f"[REVIEW] Video review HTTP error on attempt {attempt + 1}/{self.request_retry_count + 1}: "
                         f"status={status_code}, retry={should_retry}"
@@ -231,6 +235,9 @@ class VideoReviewAgent:
                 # 如果解析失败，保守起见认为不通过
                 return False, translate(output_language, "error.generation_failed", error="review result parse failed"), 0
 
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[REVIEW] Video review failed: {str(e)}")
+            raise VideoReviewUnavailableError(str(e)) from e
         except Exception as e:
             logger.error(f"[REVIEW] Video review failed: {str(e)}")
             return False, translate(output_language, "error.generation_failed", error=str(e)), 0

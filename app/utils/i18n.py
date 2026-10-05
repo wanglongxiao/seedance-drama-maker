@@ -303,6 +303,13 @@ BACKEND_TRANSLATIONS = {
         "ja": "シーン{scene}はレビュー不合格のまま最大リトライ回数（{max_retries}回）に達しました。最終スコア: {score}。理由: {feedback}",
         "es": "La escena {scene} no aprobó la revisión y alcanzó el máximo de reintentos ({max_retries}). Puntuación final: {score}. Motivo: {feedback}",
     },
+    "message.video.review_unavailable_keep_current": {
+        "zh-CN": "分镜 {scene} 的审核服务暂时不可用，已保留当前视频且不会因此重新生成。原因：{error}",
+        "zh-TW": "分鏡 {scene} 的審核服務暫時無法使用，已保留目前影片且不會因此重新生成。原因：{error}",
+        "en": "The review service is temporarily unavailable for scene {scene}. The current video was kept and will not be regenerated for this reason. Error: {error}",
+        "ja": "シーン{scene}のレビューサービスは一時的に利用できません。現在の動画を保持し、この理由による再生成は行いません。理由: {error}",
+        "es": "El servicio de revisión no está disponible temporalmente para la escena {scene}. Se conservó el video actual y no se regenerará por este motivo. Error: {error}",
+    },
     "message.video.auto_mode_select_best": {
         "zh-CN": "分镜 {scene} 在自动模式下已达到最大重试次数({max_retries}次)，未达到目标分数。系统已自动选择评分最高的视频继续流程，最高分为 {score} 分。参考反馈：{feedback}",
         "zh-TW": "分鏡 {scene} 在自動模式下已達到最大重試次數({max_retries}次)，仍未達到目標分數。系統已自動選擇評分最高的影片繼續流程，最高分為 {score} 分。參考回饋：{feedback}",

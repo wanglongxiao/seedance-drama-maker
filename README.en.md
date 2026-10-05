@@ -215,7 +215,7 @@ Current rules:
 - Narrative hooks must grow from established character choices, consequences, partial reveals, sounds, props, or emotional changes and be paid off by later scenes; video generation must not add unmotivated black screens, white flashes, spins, particles, glitches, repeated whip pans, or frequent fades
 - If script quality validation fails, the script model revises the previous complete JSON using the concrete validation findings, preserving unaffected content instead of generating again from the original request
 - Per-scene special outfits and hairstyle changes are written explicitly to `character_outfits`, while backdrop time/weather state is written explicitly to `scene_state`; both fields appear before the scene description and are persisted for downstream image/video generation
-- Raw LLM responses are written to backend logs
+- Backend `INFO` logs contain only compact metadata such as model, message count, and prompt/payload length; full prompts, request bodies, asset polling results, and heartbeats are limited to `DEBUG` to prevent oversized long-running logs
 
 ### 3. Reference Library Generation
 
@@ -266,6 +266,7 @@ After all character main images and scene main images are generated, the system 
 - Variants across scenes are generated in parallel, bounded by the image concurrency setting (`video_generation.reference_images.max_concurrency`)
 - Character outfits are deduplicated by stable visual traits such as clothing, nudity level, hairstyle, and injuries; backdrop states are normalized by time and weather so minor wording differences do not trigger duplicate generation
 - Each variant is bound to one or more scenes through `scene_numbers`, and scene videos prefer variants explicitly matched to the current scene number
+- Scene-video reference selection resolves outfit images directly by `scene_numbers`, exact `variant_key`, then visual equivalence, without rebuilding and rescanning the complete scene-variant plan for every character
 
 ### 3.3 Scene Video Generation
 
@@ -343,10 +344,12 @@ Flow rules:
 
 - Auto mode: failed reviews regenerate automatically; after the retry limit, the highest-scoring candidate is selected to continue the workflow
 - Manual mode: review still runs, but regeneration is not automatic; the user may continue manually
+- Review network or transport failures are not treated as video-quality failures: the current video is retained instead of regenerated, and HTTP `400` parameter errors are not retried
 - The workflow never moves forward while there are unfinished automatic or manual regeneration jobs
 - Cloud long-running tasks route messages through the stable `client_id` to the latest WebSocket connection, so generation and review results still reach the active frontend after gateway or browser reconnects
 - In auto mode, every scene is persisted as soon as it finishes. Failed scenes are removed in descending order only after all parallel jobs settle, then all remaining artifacts are renumbered together to prevent script/video mismatches
 - When auto mode reaches the retry cap and selects the highest-scoring candidate, the scene is marked as accepted-over-retry and does not block the final merge
+- After a project ends, queued parallel scenes stop quietly. In-flight remote generation results recheck the termination state before archive, review, or retry and do not continue unnecessary processing
 
 ### 5. Merge
 
