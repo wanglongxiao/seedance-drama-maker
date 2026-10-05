@@ -8,9 +8,10 @@ import re
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.config import config
-from app.prompt_skill import load_optional_nsfw_prompt, load_prompt, nsfw_content_requested
+from app.prompt_skill import is_explicitly_adult, load_prompt, nsfw_content_requested, nsfw_enabled
 from app.services.llm_service import llm_service
 from app.utils.logger import get_logger
+from app.utils.scene_identity import scene_content_fingerprint
 from app.models.schemas import Script, GeneratedImage, GeneratedVideo
 
 logger = get_logger("video_agent")
@@ -46,53 +47,66 @@ class VideoAgent:
         # 参考图URL（用于人物一致性）
         self.reference_image_url = None
 
-    def _sanitize_video_private_prompt(self, text: str) -> str:
-        """Remove private prompt metadata and example timelines that can conflict with the current scene."""
-        if not text:
-            return ""
-        kept_lines: List[str] = []
-        skipping_example = False
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line:
-                if not skipping_example:
-                    kept_lines.append(raw_line)
-                continue
-            if re.search(r"^示例[:：]?$|^#+\s*示例|^\d+\s*-\s*\d+\s*秒", line):
-                skipping_example = True
-                continue
-            if skipping_example:
-                continue
-            if re.search(r"本地私有扩展|NSFW\\?_?ENABLED|公开仓库|关闭.*跳过|该文件|仅用于.*本地私有", line):
-                continue
-            if "图片：" in line or "图片：" in raw_line or "图片：" in line.replace(" ", ""):
-                continue
-            if "图片" in line and ("增加" in line or "尝试" in line):
-                continue
-            kept_lines.append(raw_line)
-        return "\n".join(kept_lines).strip()
+    def _validated_scene_number(self, scene, scene_index: int) -> int:
+        expected_number = scene_index + 1
+        try:
+            scene_number = int(getattr(scene, "scene_number", expected_number) or expected_number)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Scene at index {scene_index} has an invalid scene_number") from exc
+        if scene_number != expected_number:
+            raise ValueError(
+                f"Script scene numbering mismatch: index {scene_index} expects "
+                f"scene_number={expected_number}, got {scene_number}"
+            )
+        return scene_number
 
-    def _append_video_private_extensions(
+    def _validate_script_scene_sequence(self, script: Script) -> None:
+        for scene_index, scene in enumerate(getattr(script, "scenes", None) or []):
+            self._validated_scene_number(scene, scene_index)
+
+    def _scene_characters(self, scene, characters) -> List:
+        character_map = {
+            self._normalize_name_key(getattr(character, "name", "")): character
+            for character in characters or []
+        }
+        present_keys = list(dict.fromkeys(
+            self._normalize_name_key(name)
+            for name in (getattr(scene, "characters_present", None) or [])
+            if self._normalize_name_key(name)
+        ))
+        if not present_keys or any(key not in character_map for key in present_keys):
+            return []
+        return [character_map[key] for key in present_keys]
+
+    def _append_nsfw_video_policy(
         self,
         prompt_parts: List[str],
-        names: List[str],
+        scene,
+        characters,
         *trigger_texts,
-    ) -> None:
-        """Append bounded private video extensions only when enabled and adult content is requested."""
-        if not nsfw_content_requested(*trigger_texts):
-            return
-        extensions: List[str] = []
-        for name in names:
-            text = self._sanitize_video_private_prompt(load_optional_nsfw_prompt(name))
-            if text:
-                extensions.append(text)
-        if extensions:
+    ) -> bool:
+        requested = nsfw_content_requested(*trigger_texts)
+        if not nsfw_enabled() and not requested:
+            return False
+
+        scene_characters = self._scene_characters(scene, characters)
+        all_adults = bool(scene_characters) and all(
+            is_explicitly_adult(getattr(character, "age", "")) for character in scene_characters
+        )
+        allowed = nsfw_enabled() and all_adults
+        if allowed:
             prompt_parts.extend([
-                "",
-                "【本地私有视频扩展 - 限定优先级】",
-                "以下内容仅作为当前分镜的视频动作节奏、视角或互动细节补充；不得覆盖参考图顺序、角色身份与跨分镜状态连续性、精确角色数量、单角色单实例、人体拓扑与关节物理、布景状态、关键动作参考图纠错规则、无字幕、音色一致、镜头时长、背景音乐限制或当前分镜文本。禁止口交镜头、男性生殖器官特写及性交插入部位/器官/解剖细节特写；亲密剧情只使用非器官焦点的中远景、侧背面、面部/眼神/手部、身体轮廓、光影和环境反应表达。",
-                "\n\n".join(extensions),
+                "【NSFW 运行策略：已开启】",
+                "本分镜所有出场角色均明确年满18岁；允许严格按照分镜文本与角色装扮参考图生成半裸体或全裸体，不得自动补衣、打码、模糊或用新增遮挡物改变既定裸露层级。",
+                "禁止口交镜头、男性生殖器官特写、性交插入部位/器官接触处/解剖细节特写；使用非器官焦点的中远景、侧背面、表情、手部、姿态、轮廓、光影和环境反应表达。",
             ])
+        else:
+            reason = "NSFW_ENABLED=off" if not nsfw_enabled() else "存在未明确年满18岁的出场角色"
+            prompt_parts.extend([
+                "【NSFW 运行策略：未开启】",
+                f"由于{reason}，忽略裸体、半裸体、下身裸露及可见生殖器要求，所有角色保持非露骨穿衣状态。",
+            ])
+        return allowed
 
     def _parse_resolution(self, user_input: str) -> str:
         """
@@ -228,6 +242,7 @@ class VideoAgent:
         })
 
         num_scenes = len(script.scenes)
+        self._validate_script_scene_sequence(script)
 
         logger.info(f"Generating {num_scenes} videos using reference image for character consistency")
         logger.info(f"Reference library image: {self.reference_image_url}")
@@ -235,6 +250,7 @@ class VideoAgent:
         # 准备所有生成任务
         generation_tasks = []
         for i, scene in enumerate(script.scenes):
+            scene_number = self._validated_scene_number(scene, i)
             # 获取分镜时长（12-15秒）
             duration = self._get_scene_duration(scene)
 
@@ -250,7 +266,7 @@ class VideoAgent:
             )
 
             generation_tasks.append({
-                'scene_number': i + 1,
+                'scene_number': scene_number,
                 'scene': scene,
                 'duration': duration,
                 'prompt': prompt,
@@ -258,7 +274,7 @@ class VideoAgent:
                 'reference_image_url': self.reference_image_url,
             })
 
-            logger.info(f"Scene {i+1}: duration={duration}s, using reference image for character consistency")
+            logger.info(f"Scene {scene_number}: duration={duration}s, using reference image for character consistency")
 
         logger.info(f"Generating {len(generation_tasks)} videos with concurrency={self.concurrency_enabled}")
 
@@ -311,7 +327,7 @@ class VideoAgent:
 
         return videos
 
-    def generate_video_with_previous(
+    def generate_scene_video(
         self,
         scene,
         scene_index: int,
@@ -319,23 +335,16 @@ class VideoAgent:
         project_id: str,
         reference_image: GeneratedImage,
         reference_images: Optional[List[GeneratedImage]] = None,
-        previous_video_url: str = None,
         user_style_info: str = None,
         user_requirement_text: str = None,
         resolution: str = None,
         aspect_ratio: str = None,
-        previous_scene=None,
         characters=None,
         scene_definitions=None,
         asset_group_id: Optional[str] = None,
         asset_project_name: Optional[str] = None,
     ) -> GeneratedVideo:
-        """
-        基于前一个视频生成延伸视频
-
-        新流程：
-        - 首分镜：使用参考图生成
-        - 后续分镜：使用前一个视频 + 参考图 + 剧本生成延伸视频
+        """根据参考图和分镜脚本生成单个分镜视频。
 
         Args:
             scene: 当前分镜
@@ -343,14 +352,13 @@ class VideoAgent:
             total_scenes: 总分镜数
             project_id: 项目ID
             reference_image: 参考图
-            previous_video_url: 前一个分镜视频URL
             user_style_info: 用户风格信息
             resolution: 分辨率
 
         Returns:
             生成的视频
         """
-        scene_number = scene_index + 1
+        scene_number = self._validated_scene_number(scene, scene_index)
         prepared_reference_images = self._prepare_reference_images_for_generation(
             reference_images=reference_images,
             fallback_reference_image=reference_image,
@@ -380,13 +388,9 @@ class VideoAgent:
             duration=duration,
             scene_index=scene_index,
             total_scenes=total_scenes,
-            previous_video_url=previous_video_url,
         )
 
-        logger.info(
-            f"Scene {scene_number}: Generating video with reference images"
-            f"{' + previous-scene video (extend mode)' if previous_video_url else ''}"
-        )
+        logger.info(f"Scene {scene_number}: Generating video with reference images")
 
         task_id = self._create_video_task_with_references(
             prompt=prompt,
@@ -394,7 +398,6 @@ class VideoAgent:
             duration=duration,
             resolution=resolution,
             aspect_ratio=aspect_ratio,
-            previous_video_url=previous_video_url,
         )
 
         logger.info(f"Scene {scene_number}: Created video task, task_id={task_id}")
@@ -403,6 +406,7 @@ class VideoAgent:
 
         return GeneratedVideo(
             scene_number=scene_number,
+            scene_content_hash=scene_content_fingerprint(scene),
             url=video_result["video_url"],
             first_frame_url=reference_image_url,
             last_frame_url=None,
@@ -454,7 +458,6 @@ class VideoAgent:
         duration: int,
         resolution: str,
         aspect_ratio: str,
-        previous_video_url: str = None,
     ) -> str:
         content = [{"type": "text", "text": prompt}]
         for url in reference_image_urls:
@@ -464,13 +467,6 @@ class VideoAgent:
                 "type": "image_url",
                 "role": "reference_image",
                 "image_url": {"url": url},
-            })
-        # 延长模式：附加前一分镜的生成视频作为 reference_video，保证画面连续过渡。
-        if previous_video_url:
-            content.append({
-                "type": "video_url",
-                "role": "reference_video",
-                "video_url": {"url": previous_video_url},
             })
         return llm_service.create_video_task_with_content(
             model=self.model,
@@ -544,6 +540,7 @@ class VideoAgent:
 
         return GeneratedVideo(
             scene_number=scene_number,
+            scene_content_hash=scene_content_fingerprint(task["scene"]),
             url=video_result["video_url"],
             first_frame_url=reference_image_url,  # 记录参考图URL
             last_frame_url=None,
@@ -578,52 +575,6 @@ class VideoAgent:
         logger.info(f"Generated random duration: {random_duration}s (range: {self.default_duration_min}-{self.default_duration_max}s)")
         return random_duration
 
-    def _unique_scene_character_names(self, scene) -> List[str]:
-        """Return each named scene character once, preserving script order."""
-        unique_names: List[str] = []
-        seen = set()
-        for raw_name in getattr(scene, "characters_present", None) or []:
-            name = re.sub(r"^\[|\]$", "", str(raw_name or "").strip())
-            key = self._normalize_name_key(name)
-            if not name or not key or key in seen:
-                continue
-            seen.add(key)
-            unique_names.append(name)
-        return unique_names
-
-    def _build_video_subject_integrity_rules(
-        self,
-        character_names: List[str],
-        has_key_action_reference: bool,
-    ) -> List[str]:
-        formatted_names = [self._format_character_name(name) for name in character_names]
-        lines = ["角色唯一性与人体拓扑锁："]
-        if formatted_names:
-            lines.append(
-                f"- 本分镜仅允许出现 {len(formatted_names)} 个具名角色实例："
-                f"{'、'.join(formatted_names)}；每个角色从首帧到末帧始终只有一个连续身体实例。"
-            )
-            lines.extend(f"- {name} 在任意一帧最多且仅出现一次。" for name in formatted_names)
-        else:
-            lines.append("- 不得生成分镜文本未明确要求的人物。")
-        lines.extend([
-            "- 禁止复制、克隆、镜像、分身、残影、前后状态同框或把同一角色放在画面多个位置；"
-            "镜子、玻璃、屏幕、照片、阴影和反光不得形成可被误认成第二个角色的完整重复身体。",
-            "- 每个未明确设定截肢的角色只能有一个头、一个颈部、一个躯干、两条手臂、两只手、"
-            "两条腿和两只脚；遮挡可以隐藏肢体，但不能产生额外、缺失、融合、断裂、漂浮、共享或错接肢体。",
-            "- 肩、肘、腕、髋、膝、踝、脊柱和颈部必须按真实人体关节链连接并在自然活动范围内弯曲；"
-            "手脚方向、重心、支撑点、接触点、前后层级、透视与遮挡必须符合物理规律。",
-            "- 多人接触、拥抱、搏斗或肢体交叠时，每条肢体必须能沿身体连续追溯到唯一所属角色；"
-            "姿态过于复杂时应简化动作或使用自然遮挡，不能用新增肢体补足动作。",
-        ])
-        if has_key_action_reference:
-            lines.append(
-                "- 关键动作参考图只提供核心动作意图、人物相对位置、构图和情绪，不是角色数量或人体结构的权威。"
-                "若参考图含重复角色、多手多脚、肢体错接、关节反向或不可能姿势，必须忽略这些缺陷并依据本锁定规则"
-                "重建正确人物与动作，严禁在视频中复制、延续或动画化该缺陷。"
-            )
-        return lines
-
     def _build_video_prompt(
         self,
         scene,
@@ -635,7 +586,6 @@ class VideoAgent:
         duration: int = 12,
         scene_index: int = 0,
         total_scenes: int = 1,
-        previous_video_url: str = None,
     ) -> str:
         """
         构建视频生成提示词 - 整合完整的分镜信息
@@ -646,13 +596,10 @@ class VideoAgent:
         parts = []
 
         reference_specs = self._build_reference_specs(reference_images)
-        scene_character_names = self._unique_scene_character_names(scene)
-        key_action_tags = ""
         if reference_specs:
             # 角色装扮图归入角色组，布景状态图归入场景组
             character_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] in {"character", "character_outfit"})
             scene_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] in {"scene", "scene_state"})
-            key_action_tags = ''.join(spec["tag"] for spec in reference_specs if spec["reference_type"] == "key_action")
 
             if character_tags and scene_tags:
                 parts.append(f"结合{character_tags}人物/角色参考图中的出场角色形象与布景设定{scene_tags}生成当前分镜。")
@@ -660,30 +607,12 @@ class VideoAgent:
                 parts.append(f"结合{character_tags}人物/角色参考图中的出场角色形象生成当前分镜。")
             elif scene_tags:
                 parts.append(f"结合布景设定{scene_tags}生成当前分镜。")
-            if key_action_tags:
-                parts.append(
-                    f"参考{key_action_tags}中的关键动作参考图，仅提取该分镜的核心动作意图、"
-                    "人物相对位置、镜头构图和情绪张力；角色数量与人体结构必须服从后述角色唯一性与人体拓扑锁。"
-                )
             mapping_parts = []
             for spec in reference_specs:
                 mapping_parts.append(
                     f'{spec["tag"]}={spec["name"]}（{self._reference_type_label(spec["reference_type"])}）'
                 )
             parts.append(f"从参考图片顺序：{'，'.join(mapping_parts)}")
-
-        parts.extend(
-            self._build_video_subject_integrity_rules(
-                scene_character_names,
-                bool(key_action_tags),
-            )
-        )
-
-        # 延长模式：上一分镜的生成视频仅用于保持角色形象/服装/场景/光线的一致性，
-        # 但当前分镜是一段“全新镜头”，必须立刻推进到本分镜的新剧情，
-        # 严禁把上一分镜结尾的画面、构图、动作原样回放/复制到开头（这会导致首帧与前半段雷同）。
-        if previous_video_url:
-            parts.append(load_prompt("video_extend_continuity.md"))
 
         visual_style = self._extract_video_visual_style(user_style_info)
         if visual_style:
@@ -748,22 +677,25 @@ class VideoAgent:
         if total_scenes > 1 and self.transition_prompt:
             parts.append(f"跨分镜衔接原则：{self.transition_prompt}")
 
-        chars_present = scene_character_names
+        chars_present = getattr(scene, 'characters_present', None) or []
         if isinstance(chars_present, list) and chars_present:
             parts.append(f"出场角色：{self._annotate_character_names_with_reference_tags(chars_present, reference_specs)}")
             parts.extend(self._build_scene_character_details(chars_present, characters, reference_specs))
 
-        parts.append(f"镜头时长：{duration}秒。当前分镜序号：{scene_index + 1}/{total_scenes}。")
+        scene_number = self._validated_scene_number(scene, scene_index)
+        parts.append(f"镜头时长：{duration}秒。当前分镜序号：{scene_number}/{total_scenes}。")
 
-        self._append_video_private_extensions(
+        self._append_nsfw_video_policy(
             parts,
-            ["video_action_closeup.md", "video_enhancement.md"],
+            scene,
+            characters,
             user_requirement_text,
             user_style_info,
             getattr(scene, "description", ""),
             getattr(scene, "character_description", ""),
             getattr(scene, "dialogue", ""),
             getattr(scene, "mood", ""),
+            scene_outfits,
         )
 
         parts.append(self._extract_background_music_instruction(user_requirement_text))
@@ -797,8 +729,6 @@ class VideoAgent:
             return "场景"
         if reference_type == "scene_state":
             return "布景状态"
-        if reference_type == "key_action":
-            return "关键动作参考图"
         return "参考"
 
     def _character_has_visual_reference(
@@ -999,7 +929,6 @@ class VideoAgent:
         reference_image: GeneratedImage,
         feedback: str,
         reference_images: Optional[List[GeneratedImage]] = None,
-        previous_video_url: str = None,
         user_style_info: str = None,
         user_requirement_text: str = None,
         resolution: str = None,
@@ -1017,7 +946,6 @@ class VideoAgent:
             script: 剧本对象
             project_id: 项目ID
             reference_image: 参考图库角色图 - 角色形象参考
-            previous_video_url: 前一个分镜视频URL（非首分镜重生成时必需）
             feedback: 修改意见
             user_style_info: 用户补充的风格和场景描述信息
 
@@ -1028,11 +956,16 @@ class VideoAgent:
             "scene_number": scene_number,
             "feedback": feedback,
             "has_user_style_info": bool(user_style_info),
-            "has_previous_video_url": bool(previous_video_url),
         })
 
         num_scenes = len(script.scenes)
-        scene = script.scenes[scene_number - 1]
+        self._validate_script_scene_sequence(script)
+        scene_index = scene_number - 1
+        if scene_index < 0 or scene_index >= num_scenes:
+            raise ValueError(f"Scene {scene_number} not found")
+        scene = script.scenes[scene_index]
+        if int(getattr(scene, "scene_number", 0) or 0) != scene_number:
+            raise ValueError(f"Scene {scene_number} does not match the script scene at index {scene_index}")
 
         logger.info(f"Regenerating video for scene {scene_number}/{num_scenes}")
         logger.info(f"Using reference image: {reference_image.url if reference_image else 'None'}")
@@ -1054,9 +987,8 @@ class VideoAgent:
             user_style_info=user_style_info,
             user_requirement_text=user_requirement_text,
             duration=duration,
-            scene_index=scene_number - 1,
+            scene_index=scene_index,
             total_scenes=num_scenes,
-            previous_video_url=previous_video_url,
         )
         prompt += f"。修改意见: {feedback}"
 
@@ -1074,13 +1006,13 @@ class VideoAgent:
             duration=duration,
             resolution=resolution,
             aspect_ratio=aspect_ratio,
-            previous_video_url=previous_video_url,
         )
 
         video_result = self._wait_for_video(task_id)
 
         return GeneratedVideo(
             scene_number=scene_number,
+            scene_content_hash=scene_content_fingerprint(scene),
             url=video_result["video_url"],
             first_frame_url=reference_image_url,
             last_frame_url=None,

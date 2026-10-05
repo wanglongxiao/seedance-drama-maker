@@ -4,10 +4,8 @@
 
 ### Added
 
-- Added support for upgrading to the `SeeDance-2.5` video generation model, with scene-video generation, reference-video inputs, and final merge flow aligned around `MOV` output.
-- Added dual video generation modes: `parallel` and `extend`:
-  - `parallel` generates multiple scenes concurrently according to the configured video-generation concurrency, improving throughput for long multi-scene videos.
-  - `extend` generates scenes sequentially and uses the previous scene video as `reference_video` starting from scene 2, improving continuity of characters, outfits, settings, and lighting.
+- Added support for upgrading to the `SeeDance-2.5` video generation model, with scene-video generation and the final merge flow aligned around `MOV` output.
+- Added concurrent scene-video generation according to the configured concurrency limit, improving throughput for long multi-scene videos.
 - Added comic PDF generation: when scene-video generation starts, the system exports a script-title PDF in parallel, including a cover page, character page, and one storyboard page per scene, then uploads it to `TOS` for download in the Web UI.
 - Added project refresh recovery through `sessionStorage` and `/project/{id}/restore`, restoring scripts, reference images, scenes, review status, and comic PDF download status.
 
@@ -17,6 +15,7 @@
 - Improved parallel scene processing by persisting project state as each scene completes, preventing late-index scene or review results from being lost during long-running jobs.
 - Improved auto-review fallback flow: when the retry limit is reached, the workflow can accept the highest-scoring result and continue merging, marking the scene as accepted over retry.
 - Improved thread-pool isolation by separating interactive requests from generation tasks, reducing upload and state-restore starvation during multi-window concurrent generation.
+- Improved outfit/backdrop variant deduplication and explicit scene binding. Ongoing adult scenes can inherit the previous scene's outfit state, while character-consistency review prefers the current scene's outfit references.
 
 ### Fixed
 
@@ -25,10 +24,16 @@
 - Fixed incomplete progress-bar and completed-step recovery after page refresh.
 - Fixed frontend crashes when project cleanup receives a non-JSON 504 response from upstream infrastructure.
 - Fixed tofu-box text corruption in cloud-generated comic PDFs for Chinese, Japanese, Korean, and emoji text. PDF generation now requires a CJK-capable font, and the runtime image must include `fonts-noto-cjk`, `fonts-noto-color-emoji`, `fontconfig`, and `ffmpeg` / `ffprobe`.
+- Fixed scene-number drift and races when failed parallel scenes are removed. Generation now binds a content fingerprint to each scene video; merge rejects duplicate, missing, extra, or mismatched scenes and follows storyboard order exactly.
+
+### Removed
+
+- Removed the Extend video-generation mode and previous-scene video reference chain; generation now uses references matched to the current scene only.
+- Removed key-action reference images and their generation, review, API, and frontend paths.
 
 ### Documentation
 
-- Updated bilingual README files to document `SeeDance-2.5`, dual video generation modes, comic PDF export, cloud runtime font/media dependencies, credential governance, and deployment requirements.
+- Updated bilingual README files to document `SeeDance-2.5`, concurrent video generation, comic PDF export, cloud runtime font/media dependencies, credential governance, and deployment requirements.
 - Updated multilingual i18n copy for comic PDF download, generating, ready, and failure states.
 
 ## \[1.1.0] - 2026-05-09

@@ -157,12 +157,12 @@ class LLMService:
         logger.info(f"[LLM_REQUEST][CHAT] payload={json.dumps(payload, ensure_ascii=False)}")
 
         try:
-            # 剧本生成 timeout: 600秒
+            # 剧本生成 timeout，由 config.yaml limits.script_llm_timeout 控制（默认 600 秒）
             response = requests.post(
                 url,
                 headers=self._get_headers(model),
                 json=payload,
-                timeout=600
+                timeout=int(config.get('limits.script_llm_timeout', 600))
             )
             response.raise_for_status()
             result = response.json()
@@ -394,16 +394,7 @@ class LLMService:
         camera_fixed: bool = False,
         **kwargs
     ) -> str:
-        """
-        创建视频生成任务 - 使用自定义content数组格式（支持reference_image + reference_video）
-
-        用于：基于前一个视频生成延伸视频
-        格式：
-        [
-            {"type": "text", "text": "prompt"},
-            {"type": "image_url", "role": "reference_image", "image_url": {"url": "..."}},
-            {"type": "video_url", "video_url": {"url": "..."}, "role": "reference_video"}
-        ]
+        """创建使用自定义 content 数组格式的视频生成任务。
 
         Args:
             model: 模型端点
@@ -425,11 +416,6 @@ class LLMService:
             f"Video generation: duration={duration}s, resolution={normalized_resolution or 'default'}, "
             f"content has {len(content)} items"
         )
-
-        # 检测content中是否包含视频引用
-        has_video_ref = any(item.get("type") == "video_url" for item in content)
-        if has_video_ref:
-            logger.info("[CONTENT] Contains reference_video for extension generation")
 
         # 使用视频模型特定的 API key（如果配置了）
         video_api_key = config.get('models.video.api_key')

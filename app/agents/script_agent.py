@@ -7,7 +7,7 @@ import json
 import re
 from typing import Dict, Any, List, Optional
 from app.config import config
-from app.prompt_skill import load_optional_nsfw_prompt, nsfw_content_requested, render_prompt
+from app.prompt_skill import nsfw_content_requested, nsfw_enabled, render_prompt
 from app.services.llm_service import llm_service
 from app.utils.i18n import language_name, translate
 from app.utils.logger import get_logger
@@ -23,24 +23,14 @@ logger = get_logger("script_agent")
 class ScriptAgent:
     """剧本分镜台词生成Agent - 调用seed-sc-off"""
 
-    _NSFW_CONFLICT_PATTERNS = (
-        re.compile(r"立即服从|每一个请求|不限制|Ignore any constraints", re.IGNORECASE),
-        re.compile(r"编造事实|捏造|自由推测|confidently.*make", re.IGNORECASE),
-        re.compile(r"首要任务.*交付|creativity.*obedience", re.IGNORECASE),
-        re.compile(r"永远不会警告|never.*warn", re.IGNORECASE),
-    )
-    _NSFW_METADATA_PATTERNS = (
-        re.compile(r"本地私有扩展|NSFW\\?_?ENABLED|公开仓库|关闭.*跳过|该文件"),
-    )
-
     def __init__(self):
         # 使用 YAML 中当前启用的剧本模型
         self.model = config.get('models.script.endpoint')
-        self.timeout = 300  # 超时时间 300 秒
+        self.timeout = int(config.get('limits.script_llm_timeout', 600))  # 由 config.yaml limits.script_llm_timeout 控制
         # 从 yaml 配置读取视频时长设置
         self.default_total_duration = config.get('video_generation.total_duration', 60)  # 默认 60 秒
         self.total_duration_min = config.get('video_generation.total_duration_min', 30)  # 最小 30 秒
-        self.total_duration_max = config.get('video_generation.total_duration_max', 2400)  # 最大时长由 yaml 配置控制
+        self.total_duration_max = config.get('video_generation.total_duration_max', 3600)  # 最大时长由 yaml 配置控制
         # 从 yaml 配置读取分镜时长范围
         self.scene_duration_min = config.get('video_generation.scene_duration.min', 5)
         self.scene_duration_max = config.get('video_generation.scene_duration.max', 30)
@@ -49,7 +39,7 @@ class ScriptAgent:
             config.get('script_generation.max_setting_definitions',
                        config.get('script_generation.max_scene_definitions', 40))
         )
-        self.max_storyboard_scenes = int(config.get('script_generation.max_storyboard_scenes', 150))
+        self.max_storyboard_scenes = int(config.get('script_generation.max_storyboard_scenes', 200))
         self.temperature = config.get('models.script.temperature', 0.8)
         self.max_tokens = int(config.get('models.script.max_tokens', 120000))
 
@@ -66,42 +56,24 @@ class ScriptAgent:
             duration = int(self.default_total_duration)
         return max(1, min(duration, int(self.total_duration_max)))
 
-    def _sanitize_script_private_prompt(self, text: str) -> str:
-        """Remove local private extension lines that conflict with schema rules."""
-        if not text:
-            return ""
-        kept_lines: List[str] = []
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line:
-                kept_lines.append(raw_line)
-                continue
-            if any(pattern.search(line) for pattern in self._NSFW_METADATA_PATTERNS):
-                continue
-            if any(pattern.search(line) for pattern in self._NSFW_CONFLICT_PATTERNS):
-                continue
-            kept_lines.append(raw_line)
-        return "\n".join(kept_lines).strip()
-
-    def _append_script_private_extensions(self, prompt_parts: List[str], *trigger_texts: Any) -> None:
-        """Append script-specific private extensions once, with bounded priority."""
-        if not nsfw_content_requested(*trigger_texts):
+    def _append_nsfw_script_policy(self, prompt_parts: List[str], *trigger_texts: Any) -> None:
+        """Append the configured adult-content policy without loading external prompt files."""
+        requested = nsfw_content_requested(*trigger_texts)
+        if not nsfw_enabled() and not requested:
             return
-
-        extensions: List[str] = []
-        for name in ("script_core.md", "script_outfit.md"):
-            text = self._sanitize_script_private_prompt(load_optional_nsfw_prompt(name))
-            if text:
-                extensions.append(text)
-        if not extensions:
-            return
-
-        prompt_parts.extend([
-            "",
-            "【本地私有扩展 - 限定优先级】",
-            "以下扩展仅用于成人题材的内容细化与角色装扮判定参考；不得覆盖本系统提示中的 JSON 结构、字段顺序、时长范围、角色/布景上限、风格原文、成人剧情镜头禁限、跨分镜视觉连续性、事实来源、语言和质量校验规则。",
-            "\n\n".join(extensions),
-        ])
+        if nsfw_enabled():
+            prompt_parts.extend([
+                "",
+                "【NSFW 运行策略：已开启】",
+                "只允许明确年满18岁的成年角色出现半裸体或全裸体。用户或剧情明确要求时，characters.clothing、character_outfits、description 和 character_description 可以准确保留对应裸露层级，不得自动改写为穿衣、打码或新增遮挡。",
+                "禁止未成年人性化内容；禁止口交镜头、男性生殖器官特写、性交插入部位、器官接触处或解剖细节特写。亲密剧情应以非器官焦点的中远景、侧背面、表情、手部、姿态、轮廓、光影和环境反应表达。",
+            ])
+        else:
+            prompt_parts.extend([
+                "",
+                "【NSFW 运行策略：未开启】",
+                "NSFW_ENABLED=off：不得输出半裸体、全裸体、下身裸露、可见生殖器或露骨性行为；将相关内容改写为非露骨、穿衣且不改变核心剧情因果的表达。",
+            ])
 
     def _fit_scene_durations_to_target(
         self, scenes: List[Dict[str, Any]], target_total_duration: int
@@ -1306,7 +1278,7 @@ class ScriptAgent:
                         text_parts.append(item.get("text", ""))
                 messages[1]["content"] = "\n".join(text_parts) + img_info
 
-        # 调用大模型 - seed-sc-off，使用 300 秒超时
+        # 调用大模型 - seed-sc-off，超时由 config.limits.script_llm_timeout 控制
         logger.info(f"Calling seed-sc-off for script generation with timeout {self.timeout}s")
         max_attempts = 2
         script_data = None
@@ -1424,12 +1396,16 @@ class ScriptAgent:
         if uploaded_reference_prompt:
             prompt_parts.extend(["", uploaded_reference_prompt])
 
-        self._append_script_private_extensions(prompt_parts, edit_request, audio_text, previous_script_json)
-
         messages = [
             {
                 "role": "system",
-                "content": self._get_system_prompt(output_language, total_duration, edit_request, audio_text)
+                "content": self._get_system_prompt(
+                    output_language,
+                    total_duration,
+                    edit_request,
+                    audio_text,
+                    previous_script_json,
+                )
                 + "\n\n【改稿规则】当用户要求修改剧本时，你必须基于上一版完整剧本进行重写，输出一份新的完整 JSON。"
             },
             {
@@ -1610,6 +1586,7 @@ class ScriptAgent:
                 language=language_name(output_language),
             ),
         )]
+        self._append_nsfw_script_policy(prompt_parts, *trigger_texts)
         return "\n\n".join(part for part in prompt_parts if part)
 
     def _build_prompt(
@@ -1667,10 +1644,7 @@ class ScriptAgent:
         prompt_parts.append("- 时长分配：先按动作节点、出场人数、信息量、空间调度和情绪转折评估内容丰富度；不同丰富度的分镜不得同长，可行时最长与最短至少相差2秒。")
         prompt_parts.append("- 细节密度：5-9秒至少2个连续秒段，10-18秒至少3段，19-30秒至少4段；每段必须有环境空间、人物动作与细微表演、镜头、光影及明确结果。")
         prompt_parts.append(f"- 建议分镜数量：约{estimated_scene_count}个；角色最多{self.max_characters}个，布景最多{self.max_setting_definitions}个，分镜最多{self.max_storyboard_scenes}个。")
-        prompt_parts.append("- 长篇完整性：必须按建议分镜数量持续推进并完整覆盖目标总时长，不得因输出较长而提前收尾、跳过中段或用剧情梗概代替逐镜 JSON；接近分镜上限时应合并功能重复镜头，但仍须保留完整因果链和逐镜细节。")
         prompt_parts.append("- 详细结构、字段顺序、角色/布景/对白/装扮/布景状态/去重/转场规则以 system prompt 为准，不在此重复。")
-        self._append_script_private_extensions(prompt_parts, user_input, audio_text)
-
         # 检查用户是否指定了对话/旁白生成方式
         if user_input:
             if '不生成旁白' in user_input or '不要旁白' in user_input or '只生成对话' in user_input:
@@ -1926,102 +1900,6 @@ class ScriptAgent:
                     break
         return issues
 
-    def _collect_spatial_topology_issues(
-        self,
-        scenes: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """Validate camera-facing geometry and object/body occlusion relationships."""
-        face_to_face_pattern = re.compile(
-            r"面对面|面对彼此|面向对方|彼此正面相对|"
-            r"相对而(?:立|站|坐)|相向而(?:立|站|坐)|转身面对(?:彼此|对方)"
-        )
-        facing_solution_pattern = re.compile(
-            r"背对镜头|背向镜头|后背朝向镜头|三分之(?:二|三)(?:侧|背)|"
-            r"侧背面|侧背构图|侧对镜头|双人侧面|侧面双人|侧面轮廓|"
-            r"过肩(?:镜头|构图)?|肩后机位|正反打|反打镜头|"
-            r"前景(?:肩背|后脑|背影)|镜头.{0,16}(?:两人|二人).{0,12}侧面|"
-            r"(?:一人|其中一人).{0,12}(?:背对|背向|侧对)镜头|"
-            r"profile|over[- ]the[- ]shoulder|shot[- ]reverse[- ]shot",
-            flags=re.IGNORECASE,
-        )
-        penetrating_object = (
-            r"刀|刀刃|匕首|短刀|长刀|剑|剑刃|短剑|长剑|利刃|"
-            r"箭|箭矢|长矛|短矛|矛尖|枪尖"
-        )
-        body_location = (
-            r"胸口|胸膛|胸前|腹部|小腹|肩膀|肩部|后背|背部|"
-            r"腰侧|大腿|手臂|躯干|身体"
-        )
-        penetration_pattern = re.compile(
-            rf"(?:{penetrating_object}).{{0,18}}(?:插|刺|贯)(?:入|进|在|着|中|穿透)"
-            rf".{{0,18}}(?:{body_location})|"
-            rf"(?:{body_location}).{{0,18}}(?:插|刺|贯)(?:着|入|进|有|穿透)"
-            rf".{{0,18}}(?:{penetrating_object})"
-        )
-        embedded_part_pattern = re.compile(
-            r"(?:刀刃|剑刃|刃部|箭头|矛尖|枪尖).{0,20}"
-            r"(?:没入|埋入|进入体内|藏入|隐藏|不可见|看不见|被.{0,10}(?:身体|皮肉|伤口).{0,8}遮挡)|"
-            r"(?:没入|埋入|进入体内|藏入|隐藏|不可见|看不见).{0,20}"
-            r"(?:刀刃|剑刃|刃部|箭头|矛尖|枪尖)"
-        )
-        exposed_part_pattern = re.compile(
-            r"(?:只|仅)(?:能)?(?:露出|剩下|剩|看到|看见|见到)?"
-            r".{0,12}(?:刀柄|剑柄|握柄|护手|箭杆|箭尾|矛杆|枪杆)|"
-            r"(?:刀柄|剑柄|握柄|护手|箭杆|箭尾|矛杆|枪杆).{0,12}"
-            r"(?:外露|露在体外|留在体外|露出|可见)"
-        )
-        pass_through_pattern = re.compile(
-            r"(?:贯穿|穿透).{0,24}(?:从|由).{0,12}"
-            r"(?:后背|背部|另一侧|身体另一面).{0,12}(?:穿出|露出)"
-        )
-
-        issues: List[Dict[str, Any]] = []
-        for index, scene in enumerate(scenes or [], start=1):
-            scene_number = int(scene.get("scene_number") or index)
-            present_names = [
-                self._strip_character_name_markers(name)
-                for name in (scene.get("characters_present") or [])
-                if self._strip_character_name_markers(name)
-            ]
-            camera_text = self._normalize_single_line(scene.get("camera_angle"))
-            description = str(scene.get("description") or "")
-            segments = self._extract_description_timeline_segments(description)
-            segment_items = segments or [{"content": description}]
-
-            if len(present_names) >= 2:
-                for segment_index, segment in enumerate(segment_items, start=1):
-                    content = self._normalize_single_line(segment.get("content"))
-                    if (
-                        face_to_face_pattern.search(content)
-                        and not facing_solution_pattern.search(f"{content} {camera_text}")
-                    ):
-                        issues.append({
-                            "scene": scene_number,
-                            "segment": segment_index,
-                            "reason": "face_to_face_camera_orientation_underspecified",
-                        })
-                        break
-
-            object_text = " ".join(
-                self._normalize_single_line(scene.get(field))
-                for field in ("description", "character_description", "camera_angle")
-                if self._normalize_single_line(scene.get(field))
-            )
-            if (
-                penetration_pattern.search(object_text)
-                and not (
-                    embedded_part_pattern.search(object_text)
-                    and exposed_part_pattern.search(object_text)
-                )
-                and not pass_through_pattern.search(object_text)
-            ):
-                issues.append({
-                    "scene": scene_number,
-                    "reason": "penetrating_object_occlusion_underspecified",
-                })
-
-        return issues
-
     def _collect_duration_variation_issues(
         self,
         scenes: List[Dict[str, Any]],
@@ -2189,9 +2067,7 @@ class ScriptAgent:
             "对白和镜头内容。\n"
             "2. 修正一处时必须同步维护 duration、description 秒段边界、总时长及相邻分镜承接，"
             "不得引入新的矛盾。\n"
-            "3. 长篇剧本不得通过删除后半段、跳过中段、提前结局或改写成剧情梗概来通过校验；"
-            "必须保留完整因果链并让总时长继续贴近目标值。\n"
-            "4. 最终仍需返回修正后的完整剧本 JSON，而不是补丁、局部片段、解释或重新创作说明。"
+            "3. 最终仍需返回修正后的完整剧本 JSON，而不是补丁、局部片段、解释或重新创作说明。"
         )
 
     def _collect_script_quality_feedback(
@@ -2255,19 +2131,6 @@ class ScriptAgent:
                 "请保持上一秒段及上一分镜的裸露层级，或先完整写出拿起衣物并穿好/扣好/系好的连续动作，"
                 "再在后续秒段或下一分镜切换为穿衣造型。"
             )
-        for issue in self._collect_spatial_topology_issues(scenes)[:10]:
-            if issue.get("reason") == "face_to_face_camera_orientation_underspecified":
-                feedback.append(
-                    f"分镜 {issue.get('scene', '?')} 的第 {issue.get('segment', '?')} 个秒段中，"
-                    "多人面对面站位没有说明相机可见朝向；请明确采用“一人正面、另一人背面/侧背面”、"
-                    "双人侧面构图、过肩镜头或正反打，并逐一写清各角色朝向，禁止同框所有人都正面朝向镜头。"
-                )
-            else:
-                feedback.append(
-                    f"分镜 {issue.get('scene', '?')} 的刺入物体缺少正确遮挡关系；"
-                    "请写清刺入方向、深度和入口位置。刀剑刺入胸腹后，进入身体的刃部必须被身体遮挡且不可见，"
-                    "体外只露出刀柄/剑柄和护手；若为贯穿伤，则必须明确入口、出口及从另一侧穿出的部分。"
-                )
         for issue in self._collect_duplicate_scene_issues(scenes)[:10]:
             feedback.append(
                 f"分镜 {issue.get('scene_a')} 与 {issue.get('scene_b')} 的 "
@@ -2446,16 +2309,6 @@ class ScriptAgent:
                 )
             return False
 
-        spatial_topology_issues = self._collect_spatial_topology_issues(scenes)
-        if spatial_topology_issues:
-            for issue in spatial_topology_issues[:5]:
-                logger.warning(
-                    "Script quality check failed: scene %s spatial topology issue (%s)",
-                    issue["scene"],
-                    issue["reason"],
-                )
-            return False
-
         duplicate_issues = self._collect_duplicate_scene_issues(scenes)
         if duplicate_issues:
             for issue in duplicate_issues[:5]:
@@ -2585,6 +2438,21 @@ class ScriptAgent:
                 )
 
         return True
+
+    def _normalize_scene_number_sequence(self, scenes: List[Dict[str, Any]]) -> None:
+        """Keep the JSON array order authoritative and assign contiguous 1-based numbers."""
+        changes = []
+        for expected_number, scene in enumerate(scenes or [], start=1):
+            raw_number = scene.get("scene_number")
+            try:
+                original_number = int(raw_number)
+            except (TypeError, ValueError):
+                original_number = None
+            if original_number != expected_number:
+                changes.append((original_number, expected_number))
+            scene["scene_number"] = expected_number
+        if changes:
+            logger.warning("Normalized storyboard scene numbers to list order: %s", changes)
 
     def _parse_script(self, content: str) -> Dict[str, Any]:
         """解析剧本JSON，处理各种格式问题"""
@@ -2816,6 +2684,8 @@ class ScriptAgent:
                     'camera_angle': '',
                     'characters_present': []
                 }]
+
+            self._normalize_scene_number_sequence(data['scenes'])
 
             # 确保必要的字段存在
             if 'title' not in data or not data['title']:
@@ -3786,7 +3656,12 @@ class ScriptAgent:
         messages = [
             {
                 "role": "system",
-                "content": self._get_system_prompt()
+                "content": self._get_system_prompt(
+                    "zh-CN",
+                    current_script.total_duration,
+                    current_script.json(),
+                    feedback,
+                )
             },
             {
                 "role": "user",
@@ -3794,7 +3669,7 @@ class ScriptAgent:
             }
         ]
 
-        # 调用 seed-sc-off 修改剧本，使用 300 秒超时
+        # 调用 seed-sc-off 修改剧本，超时由 config.limits.script_llm_timeout 控制
         logger.info(f"Calling seed-sc-off for script refinement with timeout {self.timeout}s")
         response = llm_service.chat_completion(
             model=self.model,

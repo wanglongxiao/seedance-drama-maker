@@ -27,10 +27,9 @@ asset_library:
   connection_timeout: 30
   socket_timeout: 300
 
-prompt_skill:
-  nsfw:
-    enabled: "${NSFW_ENABLED:-off}"
-    directory: "nsfw"
+content_policy:
+  # on: 允许明确年满 18 岁角色的主图、装扮图和分镜视频出现半裸/裸体
+  nsfw_enabled: "${NSFW_ENABLED:-off}"
 
 # Speech ASR 认证信息
 speech:
@@ -110,10 +109,10 @@ tos:
 
 # 视频生成配置
 video_generation:
-  # 视频总时长（秒）- 默认值 60，最大值 2400
+  # 视频总时长（秒）- 默认值 60，最大值 3600
   total_duration: 60
   total_duration_min: 30
-  total_duration_max: 2400
+  total_duration_max: 3600
   # 每个分镜时长范围（秒）- 最短 5，最长 30（适配 seedance-2.5）
   scene_duration:
     min: 5
@@ -139,8 +138,6 @@ video_generation:
     auto_retry_count: 2     # 整套参考图库自动重试次数上限（首次失败后的自动重生成次数）
   # 分镜视频生成/重新生成的并行上限（仅对可并行的批处理入口生效）
   scene_max_concurrency: 10
-  # 视频生成模式：extend=延长（串行，参考前一分镜视频）, parallel=并行（默认，各分镜独立并行）
-  default_generation_mode: "parallel"
   default_resolution: "480p"
   # 每个分镜视频的总生成次数上限（首次生成 + 自动重生成 + 人工点击重新生成合计）
   scene_total_generate_limit: 3
@@ -161,21 +158,11 @@ video_review:
     physical-laws: 0.30                # 物理世界规律
     script_semantic_consistency: 0.30  # 与分镜脚本意义上一致
 
-# 关键动作参考图审核：每张图片入库前执行硬性视觉验收
-key_action_review:
-  enabled: true
-  # 首次生成不通过后，最多再生成 2 次；仍不通过则阻止错误图片入库
-  max_regenerations: 2
-  request_retry_count: 2
-  request_retry_delay_seconds: 2
-  temperature: 0.1
-  max_tokens: 4000
-
 # 剧本生成约束
 script_generation:
   max_characters: 30         # 剧本中的主要人物/角色最多 30 人
   max_setting_definitions: 30  # 剧本中的布景设定最多 30 个
-  max_storyboard_scenes: 150  # 剧本分镜数量上限
+  max_storyboard_scenes: 200  # 剧本分镜数量上限
 
 # 生成策略配置
 generation:
@@ -228,6 +215,8 @@ limits:
   asr_max_duration: "5 hours"
   # 请求超时
   request_timeout: 600
+  # 剧本分镜 LLM 请求超时（秒）
+  script_llm_timeout: 600
 
 # 日志配置
 logging:

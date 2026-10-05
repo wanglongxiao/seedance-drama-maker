@@ -88,6 +88,11 @@ _STABLE_VISUAL_GROUPS = (
     ("exposure:front_nude", ("正面裸体",)),
     ("exposure:transparent", ("透视装",)),
     ("exposure:disheveled", ("衣衫不整",)),
+    # 身体伤痕——持久、固定的疤痕/烙印需要作为独立造型变体
+    ("injury:scar", ("疤痕", "伤疤", "烙印", "刻印")),
+    ("injury:eye_patch", ("眼罩",)),
+    ("injury:bandage", ("绷带缠绕", "绷带包扎")),
+    ("injury:missing_limb", ("独臂", "断臂", "独腿", "断腿")),
 )
 
 _TRANSIENT_STATE_KEYWORDS = (
@@ -170,40 +175,27 @@ def _stable_description_core(value: object) -> str:
     return normalize_outfit_for_similarity("，".join(_stable_description_parts(value)))
 
 
+_IDENTITY_PREFIXES = ("color:", "garment:", "cut:", "exposure:", "hair:", "injury:")
+
+
+def _identity_markers(signature: FrozenSet[str]) -> FrozenSet[str]:
+    return frozenset(marker for marker in signature if marker.startswith(_IDENTITY_PREFIXES))
+
+
 def are_outfits_visually_equivalent(first: object, second: object) -> bool:
-    """Compare stable outfit identity while ignoring transient scene damage and stains."""
-    first_text = normalize_outfit_for_similarity(first)
-    second_text = normalize_outfit_for_similarity(second)
-    if not first_text or not second_text:
-        return False
-    if first_text == second_text:
-        return True
+    """两个造型只有在服饰/裸露/发型/身体伤痕 的识别标记完全一致时视为同一变体。
 
-    first_core = _stable_description_core(first)
-    second_core = _stable_description_core(second)
-    if first_core and first_core == second_core:
-        return True
+    其他细微文字差异（褶皱、湿、血污、情绪等）不会触发新造型。
+    """
+    first_signature = _identity_markers(outfit_identity_signature(first))
+    second_signature = _identity_markers(outfit_identity_signature(second))
 
-    first_signature = outfit_identity_signature(first)
-    second_signature = outfit_identity_signature(second)
-    if first_signature and first_signature == second_signature:
-        has_identity_anchor = any(
-            marker.startswith(("garment:", "exposure:"))
-            for marker in first_signature
-        )
-        if has_identity_anchor:
-            return True
+    # 两边都没有抓取到任何稳定识别标记时，退化为文本等价判断
+    if not first_signature and not second_signature:
+        first_text = normalize_outfit_for_similarity(first)
+        second_text = normalize_outfit_for_similarity(second)
+        if not first_text or not second_text:
+            return False
+        return first_text == second_text
 
-    # Different stable colors, garment silhouettes, hairstyles, or exposure
-    # levels require separate assets even when the remaining prose is similar.
-    if first_signature != second_signature:
-        return False
-
-    comparable_first = first_core or first_text
-    comparable_second = second_core or second_text
-    shorter, longer = sorted((comparable_first, comparable_second), key=len)
-    if len(shorter) < 4 or len(shorter) / len(longer) < 0.72:
-        return False
-    if shorter in longer and len(longer) - len(shorter) <= 4:
-        return True
-    return SequenceMatcher(None, first_text, second_text).ratio() >= 0.88
+    return first_signature == second_signature

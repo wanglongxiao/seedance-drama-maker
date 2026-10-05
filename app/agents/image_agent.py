@@ -7,7 +7,7 @@ import random
 import re
 from typing import List, Dict, Any, Optional
 from app.config import config
-from app.prompt_skill import load_optional_nsfw_prompt, load_prompt, nsfw_content_requested
+from app.prompt_skill import is_explicitly_adult, load_prompt, nsfw_content_requested, nsfw_enabled
 from app.services.llm_service import llm_service
 from app.utils.logger import get_logger
 from app.models.schemas import Script, GeneratedImage, Character
@@ -108,50 +108,6 @@ class ImageAgent:
         )
         return style_text
 
-    def _sanitize_image_private_prompt(self, text: str) -> str:
-        """Remove private prompt metadata and examples that can overpower the current scene."""
-        if not text:
-            return ""
-        kept_lines: List[str] = []
-        skipping_example = False
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if re.match(r"^#+\s*示例", line):
-                skipping_example = True
-                continue
-            if skipping_example:
-                continue
-            if not line:
-                kept_lines.append(raw_line)
-                continue
-            if re.search(r"本地私有扩展|NSFW\\?_?ENABLED|公开仓库|该文件|关闭.*跳过|仅当.*加载", line):
-                continue
-            if re.search(r"(\\?\[.+?\\?\]\s*\+\s*){2,}\\?\[.+?\\?\]", line):
-                continue
-            kept_lines.append(raw_line)
-        return "\n".join(kept_lines).strip()
-
-    def _append_image_private_extensions(
-        self,
-        prompt_parts: List[str],
-        names: List[str],
-        *trigger_texts: Any,
-    ) -> None:
-        if not nsfw_content_requested(*trigger_texts):
-            return
-        extensions: List[str] = []
-        for name in names:
-            text = self._sanitize_image_private_prompt(load_optional_nsfw_prompt(name))
-            if text:
-                extensions.append(text)
-        if extensions:
-            prompt_parts.extend([
-                "",
-                "[PRIVATE VISUAL EXTENSION - BOUNDED PRIORITY]",
-                "Use the following local private guidance only as supplemental visual-detail guidance. Do not override aspect ratio, identity preservation, exact cast count, single-instance character rules, body topology/anatomy, full-body framing, background rules, reference usage rules, current scene context, or cross-scene continuity. Never create oral-sex shots, male-genital close-ups, or genital/insertion-detail close-ups; use non-genital medium/wide framing, facial emotion, body posture, hands, silhouette, lighting, and environmental reaction instead.",
-                "\n\n".join(extensions),
-            ])
-
     def _normalize_asset_name(self, name: Optional[str], fallback: str) -> str:
         normalized = re.sub(r"\s+", " ", str(name or "").strip())
         return normalized or fallback
@@ -160,362 +116,52 @@ class ImageAgent:
         normalized = re.sub(r"^\[|\]$", "", str(name or "").strip())
         return f"[{normalized}]" if normalized else ""
 
-    def _unique_scene_character_names(self, scene) -> List[str]:
-        """Return the named cast once each, preserving the script order."""
-        unique_names: List[str] = []
-        seen = set()
-        for raw_name in getattr(scene, "characters_present", None) or []:
-            name = re.sub(r"^\[|\]$", "", str(raw_name or "").strip())
-            key = re.sub(r"[^0-9a-z\u4e00-\u9fff_-]+", "", name.lower())
-            if not name or not key or key in seen:
-                continue
-            seen.add(key)
-            unique_names.append(name)
-        return unique_names
+    def _normalize_lookup_key(self, value: Any) -> str:
+        normalized = re.sub(r"\s+", "", str(value or "").strip().lower())
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff_-]+", "", normalized)
 
-    def _extract_key_action_timeline_beats(self, description: Any) -> List[Dict[str, Any]]:
-        text = str(description or "").strip()
-        if not text:
-            return []
-        marker_pattern = re.compile(
-            r"(?P<start>\d+(?:\.\d+)?)\s*(?:-|–|—|~|至|到)\s*"
-            r"(?P<end>\d+(?:\.\d+)?)\s*秒\s*[:：]"
-        )
-        markers = list(marker_pattern.finditer(text))
-        beats: List[Dict[str, Any]] = []
-        for index, marker in enumerate(markers):
-            content_end = markers[index + 1].start() if index + 1 < len(markers) else len(text)
-            content = text[marker.end():content_end].strip(" \t\r\n；;")
-            if not content:
-                continue
-            beats.append({
-                "start": float(marker.group("start")),
-                "end": float(marker.group("end")),
-                "text": f"{marker.group('start')}-{marker.group('end')}秒：{content}",
-                "content": content,
-            })
-        return beats
-
-    def _find_unauthorized_key_action_subjects(
-        self,
-        text: Any,
-        character_names: List[str],
-        script: Optional[Script] = None,
-    ) -> List[str]:
-        """Find people mentioned in scene prose but excluded from characters_present."""
-        source = str(text or "")
-        if not source:
-            return []
-
-        allowed_keys = {
-            self._normalize_lookup_key(name)
-            for name in character_names
-            if self._normalize_lookup_key(name)
-        }
-        remaining = source
-        for name in character_names:
-            clean_name = re.sub(r"^\[|\]$", "", str(name or "").strip())
-            if clean_name:
-                remaining = remaining.replace(f"[{clean_name}]", "")
-                remaining = remaining.replace(clean_name, "")
-
-        found: List[str] = []
-        seen = set()
-
-        def add(label: str) -> None:
-            normalized = self._normalize_lookup_key(label)
-            if not normalized or normalized in allowed_keys or normalized in seen:
-                return
-            seen.add(normalized)
-            found.append(str(label).strip())
-
-        for character in getattr(script, "characters", None) or []:
-            name = str(getattr(character, "name", "") or "").strip()
-            if (
-                name
-                and self._normalize_lookup_key(name) not in allowed_keys
-                and (name in remaining or f"[{name}]" in source)
-            ):
-                add(name)
-
-        for bracketed in re.findall(r"\[([^\[\]\r\n]{1,40})\]", remaining):
-            add(bracketed)
-
-        unnamed_subject_patterns = (
-            r"老太太", r"老妇人", r"老妪", r"老头(?:子)?", r"老翁",
-            r"陌生人", r"陌生男子", r"陌生女人", r"路人", r"行人",
-            r"人群", r"人流", r"群众", r"围观者", r"旁观者", r"游客",
-            r"村民", r"居民", r"客人", r"宾客", r"侍卫", r"士兵",
-            r"仆人", r"女仆", r"店员", r"摊贩",
-            r"\bcrowd\b", r"\bpedestrian(?:s)?\b", r"\bbystander(?:s)?\b",
-            r"\bstranger(?:s)?\b", r"\bpasser(?:s)?-by\b",
-        )
-        for pattern in unnamed_subject_patterns:
-            for match in re.finditer(pattern, remaining, flags=re.IGNORECASE):
-                add(match.group(0))
-        return found
-
-    def _sanitize_key_action_cast_context(
-        self,
-        text: Any,
-        character_names: List[str],
-        script: Optional[Script] = None,
-    ) -> str:
-        """Remove clauses that would visually introduce a person outside the cast."""
-        source = str(text or "").strip()
-        if not source:
-            return ""
-        clauses = [
-            part.strip()
-            for part in re.split(r"(?<=[，,；;。.!?！？])", source)
-            if part.strip()
-        ]
-        safe_clauses = [
-            clause
-            for clause in clauses
-            if not self._find_unauthorized_key_action_subjects(
-                clause,
-                character_names,
-                script,
-            )
-        ]
-        return "".join(safe_clauses).strip()
-
-    def _select_key_action_beat(
-        self,
-        scene,
-        character_names: List[str],
-        script: Optional[Script] = None,
-    ) -> str:
-        """Choose one timeline instant so a static image does not montage one actor across time."""
-        description = str(getattr(scene, "description", "") or "").strip()
-        beats = self._extract_key_action_timeline_beats(description)
-        if not beats:
-            sanitized = self._sanitize_key_action_cast_context(
-                description,
-                character_names,
-                script,
-            )
-            return sanitized or self._build_key_action_cast_only_fallback(character_names)
-
-        action_keywords = (
-            "抓", "握", "推", "拉", "抱", "压", "挡", "刺", "击", "踢", "扑", "倒",
-            "转身", "抬手", "跪", "站", "坐", "躺", "靠", "接触", "对视", "冲", "停",
-            "grab", "hold", "push", "pull", "embrace", "strike", "kick", "turn", "kneel",
-            "stand", "sit", "lie", "touch", "run", "stop",
-        )
-
-        def beat_score(beat: Dict[str, Any]) -> tuple:
-            content = str(beat.get("content") or "")
-            unauthorized_count = len(
-                self._find_unauthorized_key_action_subjects(
-                    content,
-                    character_names,
-                    script,
-                )
-            )
-            character_hits = sum(
-                1
-                for name in character_names
-                if name and (self._format_character_name(name) in content or name in content)
-            )
-            action_hits = sum(1 for keyword in action_keywords if keyword in content.lower())
-            return (
-                1 if unauthorized_count == 0 else 0,
-                character_hits,
-                -unauthorized_count,
-                action_hits,
-                min(len(content), 600),
-                float(beat.get("start") or 0),
-            )
-
-        selected = max(beats, key=beat_score)
-        sanitized_content = self._sanitize_key_action_cast_context(
-            selected.get("content"),
-            character_names,
-            script,
-        )
-        if not sanitized_content:
-            return self._build_key_action_cast_only_fallback(character_names)
-        start = selected.get("start", 0)
-        end = selected.get("end", start)
-        return f"{start:g}-{end:g}秒：{sanitized_content}"
-
-    def _build_key_action_cast_only_fallback(self, character_names: List[str]) -> str:
-        formatted_names = [
-            self._format_character_name(name)
-            for name in character_names
-            if self._format_character_name(name)
-        ]
-        if not formatted_names:
-            return "A single empty-environment instant with no visible person."
-        return (
-            "Show one frozen action instant centered only on "
-            + ", ".join(formatted_names)
-            + ". Preserve their scene-authorized pose and emotion without showing any other person."
-        )
-
-    def _build_key_action_subject_integrity_guidance(
-        self,
-        character_names: List[str],
-        has_character_references: bool,
-    ) -> List[str]:
-        formatted_names = [self._format_character_name(name) for name in character_names]
-        lines = ["[EXACT CAST, SINGLE-INSTANCE, AND BODY-TOPOLOGY LOCK]"]
-        if formatted_names:
-            lines.append(
-                f"Final visible human-like body count = exactly {len(formatted_names)}: "
-                f"{', '.join(formatted_names)}."
-            )
-            lines.extend(
-                f"- Allocate exactly one continuous body to {name}."
-                for name in formatted_names
-            )
-            if len(formatted_names) == 1:
-                lines.append(
-                    "Use a single-subject composition centered on that one body, with architecture, props, "
-                    "landscape, light, and atmosphere filling both sides of the frame."
-                )
-            else:
-                lines.append(
-                    "Use one clearly separated spatial position per listed identity, with the full group count "
-                    "equal to the exact cast count above."
-                )
-        else:
-            lines.append("Render an environment-only frame with zero visible human-like bodies.")
-        if has_character_references:
-            lines.append(
-                "Each character or outfit input image supplies identity and wardrobe to its exclusively matching "
-                "listed body; the final body count remains the exact cast count above."
-            )
-        lines.extend([
-            "All remaining foreground, background, and reflective regions contain environment only.",
-            "Each normally limbed body has one head, one neck, one torso, two shoulders, two connected arms and "
-            "hands, and two connected legs and feet.",
-            "Hands, elbows, wrists, shoulders, hips, knees, ankles, spine, and neck follow natural human ranges, "
-            "balance, weight support, perspective, and occlusion.",
-            "For physical contact, keep every limb continuously traceable from its owner torso to its extremity; "
-            "use clear poses and natural occlusion.",
-        ])
-        return lines
-
-    def _reference_matches_character(self, image: GeneratedImage, character_name: str) -> bool:
-        reference_type = str(getattr(image, "reference_type", "") or "").strip().lower()
-        if reference_type not in {"character", "character_outfit"}:
-            return False
-
-        character_key = self._normalize_lookup_key(character_name)
-        if not character_key:
-            return False
-
-        image_name_key = self._normalize_lookup_key(getattr(image, "name", ""))
-        if reference_type == "character":
-            return image_name_key == character_key
-
-        variant_key = str(getattr(image, "variant_key", "") or "")
-        variant_owner_key = self._normalize_lookup_key(variant_key.split("::", 1)[0])
-        if variant_owner_key:
-            return variant_owner_key == character_key
-        return image_name_key == character_key or image_name_key.startswith(f"{character_key}-")
-
-    def _build_key_action_character_reference_bindings(
-        self,
-        reference_images: List[GeneratedImage],
-        character_names: List[str],
-    ) -> List[str]:
-        if not character_names:
-            return []
-
-        lines = [
-            "[CHARACTER-TO-REFERENCE EXCLUSIVE BINDINGS]",
-            "Apply each image binding exclusively to its one named cast body.",
-        ]
-        for character_name in character_names:
-            formatted_name = self._format_character_name(character_name)
-            image_index = next(
-                (
-                    index
-                    for index, image in enumerate(reference_images, start=1)
-                    if self._reference_matches_character(image, character_name)
-                ),
-                None,
-            )
-            if image_index is None:
-                lines.append(
-                    f"- {formatted_name} has no matching character image. Build this identity from "
-                    "[SCENE CHARACTER DEFINITIONS]."
-                )
-                continue
-            lines.append(
-                f"- {formatted_name} => Image {image_index} exclusively; transfer that image's identity and "
-                f"appearance to the one final {formatted_name} body."
-            )
-        lines.append(
-            "Keep every bound face, body, and wardrobe visually distinct according to its named identity."
-        )
-        return lines
-
-    def _build_key_action_embodiment_guidance(
-        self,
-        character_names: List[str],
-        script: Script,
-    ) -> List[str]:
-        non_corporeal_keywords = (
-            "非实体", "无实体", "半透明", "透明虚影", "虚影", "残魂", "残念", "魂体",
-            "灵体", "幽灵", "元神", "投影", "幻影", "spirit", "ghost", "spectral",
-            "translucent", "non-corporeal", "noncorporeal", "incorporeal", "apparition",
-            "hologram",
-        )
+    def _scene_adult_characters(self, scene, script: Script) -> List[Character]:
         character_map = {
             self._normalize_lookup_key(getattr(character, "name", "")): character
-            for character in getattr(script, "characters", None) or []
+            for character in getattr(script, "characters", []) or []
         }
-        locked_characters: List[tuple[str, List[str]]] = []
-        for character_name in character_names:
-            character = character_map.get(self._normalize_lookup_key(character_name))
-            profile_values = [character_name]
-            if character is not None:
-                profile_values.extend(
-                    str(getattr(character, field, "") or "")
-                    for field in (
-                        "age",
-                        "gender",
-                        "face_features",
-                        "hairstyle",
-                        "body_features",
-                        "skin_tone",
-                        "clothing",
-                        "identity_background",
-                    )
-                )
-            profile_text = " ".join(profile_values).lower()
-            matched_keywords = [
-                keyword
-                for keyword in non_corporeal_keywords
-                if keyword.lower() in profile_text
-            ]
-            if matched_keywords:
-                locked_characters.append((character_name, matched_keywords))
-
-        if not locked_characters:
+        present_keys = list(dict.fromkeys(
+            self._normalize_lookup_key(name)
+            for name in (getattr(scene, "characters_present", None) or [])
+            if self._normalize_lookup_key(name)
+        ))
+        if not present_keys or any(key not in character_map for key in present_keys):
             return []
+        return [character_map[key] for key in present_keys]
 
-        lines = [
-            "[NON-CORPOREAL CHARACTER EMBODIMENT LOCK]",
-            "A non-corporeal named being still counts as one complete member of the exact cast.",
-        ]
-        for character_name, matched_keywords in locked_characters:
-            formatted_name = self._format_character_name(character_name)
-            cues = ", ".join(dict.fromkeys(matched_keywords))
-            lines.append(
-                f"- {formatted_name} is exactly one non-corporeal character instance (definition cues: {cues}). "
-                "Render that same named being in its described translucent/spiritual form."
-            )
-            lines.append(
-                f"- The apparition itself is the sole {formatted_name} instance. Never add a solid, corporeal, "
-                "younger, alternate, or stand-in body for it, and never replace it with a duplicate of another character."
-            )
-        return lines
+    def _append_nsfw_visual_policy(
+        self,
+        prompt_parts: List[str],
+        characters: List[Character],
+        *trigger_texts: Any,
+    ) -> bool:
+        """Append the authoritative runtime nudity policy and return whether nudity is allowed."""
+        requested = nsfw_content_requested(*trigger_texts)
+        if not nsfw_enabled() and not requested:
+            return False
+
+        all_adults = bool(characters) and all(
+            is_explicitly_adult(getattr(character, "age", "")) for character in characters
+        )
+        allowed = nsfw_enabled() and all_adults
+        if allowed:
+            prompt_parts.extend([
+                "[NSFW POLICY: ENABLED]",
+                "All depicted characters are explicitly age 18 or older. Partial nudity and full nudity requested by the current character or scene text are allowed and must not be replaced by default clothing, censorship bars, blur, or invented garments.",
+                "Keep the framing non-exploitative and scene-accurate. Never create oral-sex imagery, male-genital close-ups, or genital/insertion/anatomical-detail close-ups.",
+            ])
+        else:
+            reason = "NSFW_ENABLED is off" if not nsfw_enabled() else "one or more depicted characters are not explicitly age 18 or older"
+            prompt_parts.extend([
+                "[NSFW POLICY: DISABLED]",
+                f"Adult nudity generation is not allowed because {reason}. Ignore nude, naked, topless, bottomless, or visible-genital instructions and keep every character non-explicitly clothed.",
+            ])
+        return allowed
 
     def _build_scene_reference_name(self, scene_description: str, index: int) -> str:
         cleaned = re.sub(r"\s+", " ", str(scene_description or "").strip())
@@ -676,7 +322,13 @@ class ImageAgent:
                 ],
             )
         )
-        if self._outfit_requires_visible_genitals(reference_outfit):
+        nudity_allowed = self._append_nsfw_visual_policy(
+            prompt_parts,
+            [character],
+            reference_outfit,
+            user_style_info,
+        )
+        if nudity_allowed and self._outfit_requires_visible_genitals(reference_outfit):
             prompt_parts.extend(self._build_explicit_nudity_guidance(character))
 
         prompt_parts.extend(load_prompt("character_reference_image.md").splitlines())
@@ -785,17 +437,17 @@ class ImageAgent:
             "[WARDROBE STATE LOCK] The OUTFIT REQUIREMENT is authoritative for clothing and nudity level. "
             "Use the base reference only for identity; never restore its default clothing over the requested outfit."
         )
-        if self._outfit_requires_visible_genitals(outfit):
-            prompt_parts.extend(self._build_explicit_nudity_guidance(character))
-        prompt_parts.extend(load_prompt("character_outfit_image.md").splitlines())
-        self._append_image_private_extensions(
+        nudity_allowed = self._append_nsfw_visual_policy(
             prompt_parts,
-            ["character_outfit_image.md"],
+            [character],
+            outfit,
             user_style_info,
             getattr(script, "tone", ""),
             getattr(script, "background", ""),
-            outfit,
         )
+        if nudity_allowed and self._outfit_requires_visible_genitals(outfit):
+            prompt_parts.extend(self._build_explicit_nudity_guidance(character))
+        prompt_parts.extend(load_prompt("character_outfit_image.md").splitlines())
 
         prompt = "\n".join(prompt_parts)
         base_url = getattr(base_reference_image, "url", None)
@@ -872,388 +524,6 @@ class ImageAgent:
             name=self._normalize_asset_name(f"{scene_name} - {state_suffix}", "SceneState"),
             reference_type="scene_state",
         )
-
-    def generate_key_action_reference_image(
-        self,
-        scene,
-        script: Script,
-        reference_images: Optional[List[GeneratedImage]] = None,
-        user_style_info: str = None,
-        aspect_ratio: str = None,
-        correction_feedback: str = None,
-    ) -> GeneratedImage:
-        """Generate a scene-level key action reference image for private adult-content enhancement."""
-        if not aspect_ratio:
-            aspect_ratio = self.default_aspect_ratio
-
-        scene_character_names = self._unique_scene_character_names(scene)
-        reference_images = self._sort_key_action_reference_images(
-            reference_images,
-            scene_character_names,
-        )
-        prompt_parts: List[str] = [f"Aspect ratio: {aspect_ratio}"]
-        reference_style_info = self._extract_reference_prompt_style(user_style_info)
-        self._append_reference_style_guidance(prompt_parts, reference_style_info, script)
-        if reference_style_info:
-            prompt_parts.append("[USER VISUAL STYLE]")
-            prompt_parts.append(reference_style_info)
-
-        prompt_parts.extend(load_prompt("key_action_reference_image.md").splitlines())
-
-        scene_context = self._resolve_scene_definition_context(getattr(scene, "scene_name", ""), script)
-        reference_context = self._build_scene_reference_context(reference_images)
-        has_character_reference = self._has_any_reference_type(reference_images, "character", "character_outfit")
-        has_scene_reference = self._has_any_reference_type(reference_images, "scene", "scene_state")
-        has_scene_state_reference = self._has_any_reference_type(reference_images, "scene_state")
-        prompt_parts.extend(
-            self._build_key_action_subject_integrity_guidance(
-                scene_character_names,
-                has_character_reference,
-            )
-        )
-        if reference_context:
-            prompt_parts.extend(reference_context)
-            prompt_parts.extend(self._build_key_action_reference_priority_context(reference_images))
-        prompt_parts.extend(
-            self._build_key_action_character_reference_bindings(
-                reference_images,
-                scene_character_names,
-            )
-        )
-        prompt_parts.extend(self._build_scene_character_context(scene, script))
-        prompt_parts.extend(
-            self._build_key_action_embodiment_guidance(
-                scene_character_names,
-                script,
-            )
-        )
-        if not has_scene_reference and getattr(scene, "scene_name", None):
-            prompt_parts.append(f"Scene name: {getattr(scene, 'scene_name', '')}")
-        if scene_context["descriptions"] and not has_scene_reference:
-            prompt_parts.append(f"Scene backdrop definition: {'; '.join(scene_context['descriptions'])}")
-        scene_state = str(getattr(scene, "scene_state", "") or "").strip()
-        if not scene_state:
-            scene_state = "，".join(
-                part
-                for part in [scene_context["time_of_day"], scene_context["weather"]]
-                if str(part or "").strip()
-            )
-        if scene_state and not has_scene_state_reference:
-            prompt_parts.append(f"Backdrop state: {scene_state}")
-        scene_outfits = getattr(scene, "character_outfits", None) or {}
-        if scene_outfits:
-            outfit_lines = [
-                f"{self._format_character_name(name)}: {outfit}"
-                for name, outfit in scene_outfits.items()
-                if str(name or "").strip() and str(outfit or "").strip()
-            ]
-            if outfit_lines:
-                prompt_parts.append(f"Current character outfit and hairstyle state: {'; '.join(outfit_lines)}")
-                prompt_parts.append(
-                    "[WARDROBE STATE LOCK] Apply each current outfit and exact body-coverage state. "
-                    "Base character references provide identity only and must not alter the prescribed wardrobe."
-                )
-        selected_action_beat = self._select_key_action_beat(
-            scene,
-            scene_character_names,
-            script,
-        )
-        prompt_parts.append("[SELECTED SINGLE ACTION BEAT - DEPICT ONLY THIS INSTANT]")
-        prompt_parts.append(selected_action_beat)
-        prompt_parts.append(
-            "[TEMPORAL COMPOSITION LOCK] This is one frozen instant from one timeline beat. "
-            "Use one action, one pose, one location, and one camera stage."
-        )
-        performance_context = self._sanitize_key_action_cast_context(
-            getattr(scene, "character_description", ""),
-            scene_character_names,
-            script,
-        )
-        if performance_context:
-            prompt_parts.append(
-                "Character performance context (resolve within the same selected instant; never add another "
-                f"time phase): {performance_context}"
-            )
-        prompt_parts.append(
-            "[OFF-SCREEN NARRATIVE SUBJECT LOCK] Only Characters present may be visible. Keep the entire "
-            "foreground and background outside those exact cast bodies filled only with environment, architecture, "
-            "landscape, props, light, and atmosphere. Treat every other narrative subject as audio context."
-        )
-        prompt_parts.append(f"Mood: {getattr(scene, 'mood', '')}")
-        if getattr(scene, "camera_angle", None):
-            prompt_parts.append(f"Camera angle: {scene.camera_angle}")
-        if scene_character_names:
-            prompt_parts.append(
-                "Characters present: "
-                + ", ".join(self._format_character_name(name) for name in scene_character_names)
-            )
-        if correction_feedback:
-            prompt_parts.extend([
-                "[MANDATORY CORRECTION FROM FAILED VISUAL REVIEW]",
-                str(correction_feedback).strip(),
-                "Start a completely new composition that satisfies every positive constraint above: exact cast, "
-                "one body per identity, prescribed wardrobe coverage, valid anatomy, and one frozen instant.",
-            ])
-        self._append_image_private_extensions(
-            prompt_parts,
-            ["key_action_reference_image.md"],
-            selected_action_beat,
-            performance_context,
-            getattr(scene, "dialogue", ""),
-            scene_outfits,
-        )
-
-        prompt = "\n".join(prompt_parts)
-        response = llm_service.generate_image(
-            prompt=prompt,
-            model=self.model,
-            size=self.size,
-            image_urls=[image.url for image in (reference_images or [])] or None,
-            ratio=aspect_ratio,
-        )
-        scene_number = max(1, int(getattr(scene, "scene_number", 1) or 1))
-        return GeneratedImage(
-            scene_number=scene_number,
-            url=response["data"][0]["url"],
-            prompt=prompt,
-            name=self._build_scene_asset_name(scene, "Key Action"),
-            reference_type="key_action",
-            is_reference=True,
-        )
-
-    def _build_scene_asset_name(self, scene, suffix: str) -> str:
-        scene_number = max(1, int(getattr(scene, "scene_number", 1) or 1))
-        scene_name = self._normalize_asset_name(getattr(scene, "scene_name", ""), f"Scene {scene_number}")
-        return f"Scene {scene_number:02d} {suffix} - {scene_name}"[:64]
-
-    def _normalize_lookup_key(self, value: Any) -> str:
-        normalized = re.sub(r"\s+", "", str(value or "").strip().lower())
-        return re.sub(r"[^0-9a-z\u4e00-\u9fff_-]+", "", normalized)
-
-    def _split_scene_names(self, value: Any) -> List[str]:
-        return [
-            part.strip()
-            for part in re.split(r"[、,，/|]+", str(value or ""))
-            if part.strip()
-        ]
-
-    def _resolve_scene_definition_context(self, scene_name: Any, script: Script) -> Dict[str, Any]:
-        name_keys = {
-            self._normalize_lookup_key(name)
-            for name in self._split_scene_names(scene_name)
-            if self._normalize_lookup_key(name)
-        }
-        matched_definitions = []
-        for item in getattr(script, "scene_definitions", None) or []:
-            if self._normalize_lookup_key(getattr(item, "name", "")) in name_keys:
-                matched_definitions.append(item)
-
-        descriptions: List[str] = []
-        scene_features: List[str] = []
-        seen_descriptions = set()
-        seen_features = set()
-        time_of_day = ""
-        weather = ""
-        for item in matched_definitions:
-            description = str(getattr(item, "description", "") or "").strip()
-            if description and description not in seen_descriptions:
-                seen_descriptions.add(description)
-                descriptions.append(description)
-            for feature in getattr(item, "scene_features", None) or []:
-                normalized_feature = str(feature or "").strip()
-                if normalized_feature and normalized_feature not in seen_features:
-                    seen_features.add(normalized_feature)
-                    scene_features.append(normalized_feature)
-            if not time_of_day:
-                time_of_day = str(getattr(item, "time_of_day", "") or "").strip()
-            if not weather:
-                weather = str(getattr(item, "weather", "") or "").strip()
-
-        return {
-            "descriptions": descriptions,
-            "scene_features": scene_features,
-            "time_of_day": time_of_day,
-            "weather": weather,
-        }
-
-    def _build_scene_character_context(self, scene, script: Script) -> List[str]:
-        lines: List[str] = []
-        character_names = [
-            str(name or "").strip()
-            for name in (getattr(scene, "characters_present", None) or [])
-            if str(name or "").strip()
-        ]
-        if not character_names:
-            return lines
-
-        lines.append("[SCENE CHARACTER DEFINITIONS]")
-        character_map = {
-            self._normalize_lookup_key(getattr(character, "name", "")): character
-            for character in getattr(script, "characters", None) or []
-        }
-        for name in character_names:
-            character = character_map.get(self._normalize_lookup_key(name))
-            if character is None:
-                lines.append(f"- {self._format_character_name(name)}")
-                continue
-            summary = [
-                f"- {self._format_character_name(character.name)}",
-                f"age={character.age}",
-                f"gender={character.gender}",
-                f"face={character.face_features}",
-                f"skin={character.skin_tone}",
-            ]
-            if getattr(character, "nationality", None):
-                summary.append(f"nationality={character.nationality}")
-            if getattr(character, "hairstyle", None):
-                summary.append(f"hairstyle={character.hairstyle}")
-            if getattr(character, "body_features", None):
-                summary.append(f"body={character.body_features}")
-            if getattr(character, "clothing", None):
-                summary.append(f"clothing={character.clothing}")
-            if getattr(character, "personality", None):
-                summary.append(f"personality={character.personality}")
-            if getattr(character, "identity_background", None):
-                summary.append(f"identity_background={character.identity_background}")
-            lines.append(", ".join(summary))
-        return lines
-
-    def _get_reference_type_set(self, reference_images: Optional[List[GeneratedImage]]) -> set:
-        return {
-            str(getattr(image, "reference_type", "") or "").strip().lower()
-            for image in (reference_images or [])
-            if str(getattr(image, "reference_type", "") or "").strip()
-        }
-
-    def _has_any_reference_type(self, reference_images: Optional[List[GeneratedImage]], *reference_types: str) -> bool:
-        type_set = self._get_reference_type_set(reference_images)
-        return any(str(reference_type).strip().lower() in type_set for reference_type in reference_types)
-
-    def _build_scene_reference_context(self, reference_images: Optional[List[GeneratedImage]]) -> List[str]:
-        prompt_parts: List[str] = []
-        if not reference_images:
-            return prompt_parts
-
-        prompt_parts.append("[REFERENCE ASSETS]")
-        for index, image in enumerate(reference_images, start=1):
-            reference_type = str(getattr(image, "reference_type", "") or "").strip().lower() or "reference"
-            if reference_type == "character":
-                label = "character reference"
-            elif reference_type == "character_outfit":
-                label = "character outfit reference"
-            elif reference_type == "scene":
-                label = "scene reference"
-            elif reference_type == "scene_state":
-                label = "backdrop state reference"
-            elif reference_type == "key_action":
-                label = "key action reference"
-            else:
-                label = reference_type
-            prompt_parts.append(f"- Image {index}: {getattr(image, 'name', f'Reference {index}')} ({label})")
-        return prompt_parts
-
-    def _sort_key_action_reference_images(
-        self,
-        reference_images: Optional[List[GeneratedImage]],
-        character_names: Optional[List[str]] = None,
-    ) -> List[GeneratedImage]:
-        if not reference_images:
-            return []
-
-        images = list(reference_images)
-        ordered: List[GeneratedImage] = []
-        selected_indexes = set()
-        character_names = list(character_names or [])
-
-        for character_name in character_names:
-            matches = [
-                (index, image)
-                for index, image in enumerate(images)
-                if index not in selected_indexes
-                and self._reference_matches_character(image, character_name)
-            ]
-            if not matches:
-                continue
-            selected_index, selected_image = min(
-                matches,
-                key=lambda item: (
-                    0 if str(getattr(item[1], "reference_type", "") or "").lower() == "character_outfit" else 1,
-                    item[0],
-                ),
-            )
-            selected_indexes.add(selected_index)
-            ordered.append(selected_image)
-
-        environment_priority = {"scene_state": 0, "scene": 1}
-        environment_images = [
-            (index, image)
-            for index, image in enumerate(images)
-            if index not in selected_indexes
-            and str(getattr(image, "reference_type", "") or "").strip().lower() in environment_priority
-        ]
-        for index, image in sorted(
-            environment_images,
-            key=lambda item: (
-                environment_priority[str(getattr(item[1], "reference_type", "") or "").strip().lower()],
-                item[0],
-            ),
-        ):
-            selected_indexes.add(index)
-            ordered.append(image)
-
-        for index, image in enumerate(images):
-            if index in selected_indexes:
-                continue
-            reference_type = str(getattr(image, "reference_type", "") or "").strip().lower()
-            if character_names and reference_type in {"character", "character_outfit"}:
-                logger.warning(
-                    "Ignoring unbound key-action character reference %s (%s)",
-                    getattr(image, "name", ""),
-                    reference_type,
-                )
-                continue
-            ordered.append(image)
-        return ordered
-
-    def _build_key_action_reference_priority_context(
-        self,
-        reference_images: Optional[List[GeneratedImage]],
-    ) -> List[str]:
-        ordered_images = list(reference_images or [])
-        if not ordered_images:
-            return []
-
-        indexed = list(enumerate(ordered_images, start=1))
-        outfit_refs = [f"Image {idx}" for idx, image in indexed if getattr(image, "reference_type", None) == "character_outfit"]
-        state_refs = [f"Image {idx}" for idx, image in indexed if getattr(image, "reference_type", None) == "scene_state"]
-        character_refs = [f"Image {idx}" for idx, image in indexed if getattr(image, "reference_type", None) == "character"]
-        scene_refs = [f"Image {idx}" for idx, image in indexed if getattr(image, "reference_type", None) == "scene"]
-
-        parts: List[str] = ["[KEY ACTION REFERENCE PRIORITY]"]
-        if outfit_refs:
-            parts.append(
-                f"Prefer {'/'.join(outfit_refs)} for the current character outfit, hairstyle, body coverage, damage, stains, and continuity."
-            )
-            parts.append(
-                "Character outfit references are authoritative for wardrobe and body coverage; "
-                "base character references may supply identity only and must not alter the current wardrobe."
-            )
-        if state_refs:
-            parts.append(
-                f"Prefer {'/'.join(state_refs)} for the current backdrop state, especially time of day, weather, and environment continuity."
-            )
-        if character_refs:
-            parts.append(
-                f"Use {'/'.join(character_refs)} only as fallback identity references when a matching character outfit reference is unavailable."
-            )
-        if scene_refs:
-            parts.append(
-                f"Use {'/'.join(scene_refs)} only as fallback environment references when a matching backdrop state reference is unavailable."
-            )
-        parts.append(
-            "Combine the scene script, the current outfit/state references above, and the applicable key-action rules to stage one decisive action frame."
-        )
-        return parts
 
     def generate_reference_image(
         self,

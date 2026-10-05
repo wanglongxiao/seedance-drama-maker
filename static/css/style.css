@@ -89,14 +89,15 @@ body {
 
 .chat-header-top {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
-    gap: 8px 12px;
+    justify-content: space-between;
+    gap: 12px;
 }
 
 .chat-header-title-group {
     min-width: 0;
-    flex: 1 1 100%;
+    flex: 1 1 auto;
 }
 
 .chat-header h1 {
@@ -104,6 +105,8 @@ body {
     line-height: 1.3;
     margin-bottom: 2px;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .chat-header p {
@@ -141,38 +144,6 @@ body {
 }
 
 .language-select option {
-    color: #333;
-}
-
-.video-mode-switcher {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 6px;
-    flex: 0 0 auto;
-    min-width: 0;
-}
-
-.video-mode-switcher label {
-    font-size: 11px;
-    opacity: 0.95;
-    white-space: nowrap;
-}
-
-.video-mode-select {
-    width: 100%;
-    height: 32px;
-    border: 1px solid rgba(255, 255, 255, 0.35);
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.14);
-    color: #fff;
-    font-size: 12px;
-    padding: 0 10px;
-    outline: none;
-    cursor: pointer;
-}
-
-.video-mode-select option {
     color: #333;
 }
 
@@ -770,6 +741,20 @@ body {
     .videos-grid {
         grid-template-columns: repeat(3, 1fr);
     }
+
+    .chat-header {
+        padding: 12px;
+    }
+
+    .chat-header p,
+    .language-switcher label {
+        display: none;
+    }
+
+    .chat-header h1 {
+        font-size: 15px;
+        margin-bottom: 0;
+    }
 }
 
 @media (max-width: 900px) {
@@ -817,7 +802,7 @@ body {
         border-right: none;
     }
 
-    /* 头部与文案在小屏上更紧凑：标题 + 两个选择框压缩到 1 行 */
+    /* 头部与文案在小屏上更紧凑：标题与语言选择器保持同一行 */
     .chat-header {
         padding: 8px 12px;
     }
@@ -848,8 +833,7 @@ body {
         display: none;
     }
 
-    .language-switcher,
-    .video-mode-switcher {
+    .language-switcher {
         flex: 0 0 auto;
         width: auto;
         max-width: none;
@@ -857,8 +841,7 @@ body {
         margin-right: 0;
     }
 
-    .language-switcher label,
-    .video-mode-switcher label {
+    .language-switcher label {
         display: none;
     }
 

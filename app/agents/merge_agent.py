@@ -12,6 +12,7 @@ from app.config import config
 from app.services.ffmpeg_service import ffmpeg_service
 from app.services.tos_service import tos_service
 from app.utils.logger import get_logger
+from app.utils.scene_identity import scene_content_fingerprint
 from app.utils.task_paths import ensure_project_temp_subdir
 from app.models.schemas import Script, GeneratedVideo
 
@@ -53,6 +54,49 @@ class MergeAgent:
             project_id=project_id,
             category="videos/final",
         )
+
+    def order_videos_for_script(
+        self,
+        script: Script,
+        videos: List[GeneratedVideo],
+    ) -> List[GeneratedVideo]:
+        scenes = list(getattr(script, "scenes", None) or [])
+        expected_numbers = list(range(1, len(scenes) + 1))
+        script_numbers = [int(getattr(scene, "scene_number", 0) or 0) for scene in scenes]
+        if script_numbers != expected_numbers:
+            raise ValueError(
+                f"Storyboard scene numbers must be contiguous and ordered: "
+                f"expected={expected_numbers}, actual={script_numbers}"
+            )
+
+        videos_by_number = {}
+        for video in videos or []:
+            scene_number = int(getattr(video, "scene_number", 0) or 0)
+            if scene_number in videos_by_number:
+                raise ValueError(f"Duplicate generated video for scene {scene_number}")
+            videos_by_number[scene_number] = video
+
+        actual_numbers = sorted(videos_by_number)
+        if actual_numbers != expected_numbers:
+            raise ValueError(
+                f"Generated videos do not match storyboard scenes: "
+                f"expected={expected_numbers}, actual={actual_numbers}"
+            )
+
+        ordered_videos: List[GeneratedVideo] = []
+        for scene in scenes:
+            scene_number = int(scene.scene_number)
+            video = videos_by_number[scene_number]
+            if not str(getattr(video, "url", "") or "").strip():
+                raise ValueError(f"Generated video for scene {scene_number} has no URL")
+            content_hash = str(getattr(video, "scene_content_hash", "") or "").strip()
+            expected_hash = scene_content_fingerprint(scene)
+            if content_hash and content_hash != expected_hash:
+                raise ValueError(
+                    f"Generated video content does not match storyboard scene {scene_number}"
+                )
+            ordered_videos.append(video)
+        return ordered_videos
     
     def merge_videos(
         self,
@@ -77,8 +121,8 @@ class MergeAgent:
         })
         temporary_edge_trim_enabled = self._is_temporary_edge_trim_enabled()
         
-        # 按场景编号排序
-        sorted_videos = sorted(videos, key=lambda v: v.scene_number)
+        # 严格按剧本编号映射，拒绝重复、缺失、额外或内容身份不匹配的分镜视频。
+        sorted_videos = self.order_videos_for_script(script, videos)
         
         # 提取视频URL
         video_urls = [v.url for v in sorted_videos]

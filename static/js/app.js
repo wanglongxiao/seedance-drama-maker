@@ -55,7 +55,7 @@ let referenceImageRegenerateLocked = false;
 // 参考图分阶段（category1/category2）子状态机：
 let referenceStage = null; // 当前已完成子阶段：category1/category2
 let pendingReferenceStage = null; // 待进入子阶段：category2/videos
-let referenceStageHasCategory2 = false; // 后端下发：本项目是否存在分类2（装扮/布景状态/关键动作）
+let referenceStageHasCategory2 = false; // 后端下发：本项目是否存在分类2（装扮/布景状态）
 let projectEnding = false;
 let projectEnded = false;
 let projectEndBeaconSent = false;
@@ -95,7 +95,7 @@ function getPersistedProjectId() {
         return null;
     }
 }
-const I18N_VERSION = '20261004c';
+const I18N_VERSION = '20261005b';
 const FRONTEND_CONFIG_VERSION = '20260811c';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
@@ -136,8 +136,8 @@ const UI_LANGUAGE_ALIASES = {
 let languageRequestSerial = 0;
 let frontendConfig = {
     auto_run_countdown_seconds: 10,
-    total_duration_max: 2400,
-    max_storyboard_scenes: 150,
+    total_duration_max: 3600,
+    max_storyboard_scenes: 200,
     reference_image_max_count: 30,
     character_reference_max_count: 10,
     scene_reference_max_count: 20,
@@ -145,12 +145,6 @@ let frontendConfig = {
 
 function getCurrentReviewMode() {
     return isAutoRunMode ? 'auto' : 'manual';
-}
-
-function getCurrentVideoMode() {
-    const select = document.getElementById('videoModeSelect');
-    const value = select ? String(select.value || '').trim().toLowerCase() : '';
-    return value === 'extend' ? 'extend' : 'parallel';
 }
 
 // ===== 自定义下拉框：接管原生 select 的弹层，保证弹出位置贴合触发器、字体清晰、跨端一致 =====
@@ -270,7 +264,6 @@ function syncSelectDisplay(selectId) {
 
 function initCustomSelects() {
     enhanceSelect('languageSelect');
-    enhanceSelect('videoModeSelect');
 }
 
 function refreshCustomSelects() {
@@ -432,20 +425,9 @@ async function loadFrontendConfig() {
                 ...frontendConfig,
                 ...result.config,
             };
-            applyDefaultVideoMode();
         }
     } catch (error) {
         console.error('Failed to load frontend config:', error);
-    }
-}
-
-function applyDefaultVideoMode() {
-    const select = document.getElementById('videoModeSelect');
-    if (!select) return;
-    const defaultMode = frontendConfig.default_video_generation_mode === 'extend' ? 'extend' : 'parallel';
-    select.value = defaultMode;
-    if (typeof syncSelectDisplay === 'function' && customSelectRegistry.has('videoModeSelect')) {
-        syncSelectDisplay('videoModeSelect');
     }
 }
 
@@ -486,13 +468,6 @@ function applyStaticTranslations() {
     if (appTitle) appTitle.innerHTML = `🎬 ${t('app.title')}`;
     if (appSubtitle) appSubtitle.textContent = t('app.subtitle');
     if (languageLabel) languageLabel.textContent = t('app.language');
-    const videoModeLabel = document.getElementById('videoModeLabel');
-    if (videoModeLabel) videoModeLabel.textContent = t('app.videoModeLabel');
-    const videoModeSelect = document.getElementById('videoModeSelect');
-    if (videoModeSelect && videoModeSelect.options.length >= 2) {
-        videoModeSelect.options[0].textContent = t('app.videoModeParallel');
-        videoModeSelect.options[1].textContent = t('app.videoModeExtend');
-    }
     if (imageBtn) imageBtn.title = t('input.uploadImage');
     if (micBtn) micBtn.title = isRecording ? t('input.stopRecording') : t('input.holdToRecord');
     if (textInput) textInput.placeholder = t('input.placeholder');
@@ -517,8 +492,6 @@ function rerenderPreviewCards() {
     if (scriptCard) scriptCard.remove();
     const referenceCard = document.getElementById('reference-image-card');
     if (referenceCard) referenceCard.remove();
-    const keyActionReferenceCard = document.getElementById('key-action-reference-card');
-    if (keyActionReferenceCard) keyActionReferenceCard.remove();
     const imagesCard = document.getElementById('images-card');
     if (imagesCard) imagesCard.remove();
     const videosContainer = document.getElementById('videos-container');
@@ -830,13 +803,12 @@ function refreshReferenceImageActionState() {
     });
 }
 
-// 统一刷新参考图库、角色装扮图、布景状态图和关键动作图的重新生成按钮状态。
+// 统一刷新参考图库、角色装扮图和布景状态图的重新生成按钮状态。
 // 视频生成开始（referenceImageLocked=true）等锁定态变化时必须调用本函数，
 // 否则变体图按钮不会随之置灰（refreshReferenceImageActionState 只覆盖参考图库）。
 function refreshAllReferenceActionStates() {
     refreshReferenceImageActionState();
     refreshVariantAssetsActionState();
-    refreshKeyActionReferenceActionState();
 }
 
 // 初始化
@@ -908,14 +880,7 @@ function applyRestoredSnapshot(snap) {
     persistActiveProject(currentProjectId);
 
     // 恢复后默认不自动推进（isAutoRunMode 保持 false），避免刷新即触发合成等破坏性动作；
-    // 用户可再次点击继续或输入 auto 指令恢复全自动。视频模式选择器按快照回填。
-    if (snap.video_generation_mode) {
-        const videoModeSelect = document.getElementById('videoModeSelect');
-        if (videoModeSelect) {
-            videoModeSelect.value = snap.video_generation_mode === 'extend' ? 'extend' : 'parallel';
-            if (typeof syncSelectDisplay === 'function') syncSelectDisplay('videoModeSelect');
-        }
-    }
+    // 用户可再次点击继续或输入 auto 指令恢复全自动。
 
     hideEmptyState();
     addAgentMessage(t('messages.projectRestored'));
@@ -928,7 +893,7 @@ function applyRestoredSnapshot(snap) {
         updateStepHighlight('script_agent', 100);
     }
 
-    // 2) 参考图库（含装扮/布景状态/关键动作）
+    // 2) 参考图库（含装扮/布景状态）
     if (snap.reference_output) {
         // 恢复态下不希望再自动触发确认倒计时，这里标记为已确认完成。
         const refOutput = { ...snap.reference_output, ready_for_confirmation: false };
@@ -1118,7 +1083,7 @@ function reconcileUiFromSnapshot(snap) {
             updateStepHighlight('script_agent', 100);
         }
 
-        // 2) 参考图库（含角色/布景/装扮/布景状态/关键动作子模块）：
+        // 2) 参考图库（含角色/布景/装扮/布景状态子模块）：
         //    只要快照带 reference_output，就用它幂等重绘（displayReferenceImage 内部按卡片
         //    id 复用节点、按数据增删子模块），从而补齐「进入某子阶段但右侧空白」的场景。
         if (snap.reference_output) {
@@ -1126,9 +1091,7 @@ function reconcileUiFromSnapshot(snap) {
             const missingVariant = !document.getElementById('variant-assets-card')
                 && ((snap.reference_output.character_outfit_images || []).length
                     || (snap.reference_output.scene_state_images || []).length);
-            const missingKeyAction = !document.getElementById('key-action-reference-card')
-                && (snap.reference_output.key_action_reference_images || []).length;
-            if (missingReference || missingVariant || missingKeyAction) {
+            if (missingReference || missingVariant) {
                 const refOutput = { ...snap.reference_output, ready_for_confirmation: false };
                 displayReferenceImage(refOutput);
                 referenceImageLocked = true;
@@ -1180,14 +1143,13 @@ function announceAutoTransitionsFromSnapshot(snap) {
     const reached = (s) => (order[refStage] || 0) >= (order[s] || 0);
     const refOut = snap.reference_output || {};
     const hasCategory2 = !!((refOut.character_outfit_images || []).length
-        || (refOut.scene_state_images || []).length
-        || (refOut.key_action_reference_images || []).length);
+        || (refOut.scene_state_images || []).length);
 
     // 剧本 -> 参考图（图片生成）
     if (snap.reference_output || refStage !== 'none' || snap.script) {
         announceTransitionOnce('reference_image', t('messages.autoEnterNext', { step: getStepName('reference_image') }));
     }
-    // 参考图 category1 完成 -> 装扮/布景状态/关键动作子阶段（仅当存在 category2）
+    // 参考图 category1 完成 -> 装扮/布景状态子阶段（仅当存在 category2）
     if (reached('category1_done') && hasCategory2) {
         announceTransitionOnce('refstage_category2', t('messages.autoEnterNextReferenceStage', { stage: getReferenceStageName('category2') }));
     }
@@ -2282,7 +2244,6 @@ function clearPreviewFromStep(targetStep) {
             case 'reference_image':
                 document.getElementById('reference-image-card')?.remove();
                 document.getElementById('variant-assets-card')?.remove();
-                document.getElementById('key-action-reference-card')?.remove();
                 break;
             case 'videos':
                 document.querySelectorAll('.video-item[id^="video-item-"]').forEach(item => item.remove());
@@ -2322,8 +2283,7 @@ function startStep(step) {
         project_id: currentProjectId,
         step: step,
         ui_language: currentLanguage,
-        review_mode: getCurrentReviewMode(),
-        generation_mode: getCurrentVideoMode()
+        review_mode: getCurrentReviewMode()
     }));
 }
 
@@ -2640,7 +2600,6 @@ function proceedToReferenceStage(nextStage) {
             project_id: currentProjectId || '',
             client_id: wsClientId || '',
             stage: referenceStage || 'category1',
-            generation_mode: getCurrentVideoMode(),
             ui_language: currentLanguage,
         })
     })
@@ -2692,8 +2651,7 @@ function startVideoGenerationAfterReference() {
             project_id: currentProjectId,
             client_id: wsClientId || '',
             ui_language: currentLanguage,
-            review_mode: getCurrentReviewMode(),
-            generation_mode: getCurrentVideoMode()
+            review_mode: getCurrentReviewMode()
         })
     })
     .then(response => response.json())
@@ -3435,6 +3393,72 @@ function removeVideoItem(sceneNumber) {
     }
 }
 
+function shiftSceneIndexedMapAfterSkip(source, skippedSceneNumber) {
+    const shifted = {};
+    Object.entries(source || {}).forEach(([rawSceneNumber, value]) => {
+        const oldSceneNumber = Number(rawSceneNumber);
+        if (!Number.isFinite(oldSceneNumber) || oldSceneNumber === skippedSceneNumber) return;
+        const newSceneNumber = oldSceneNumber > skippedSceneNumber
+            ? oldSceneNumber - 1
+            : oldSceneNumber;
+        shifted[newSceneNumber] = value && typeof value === 'object'
+            ? { ...value, scene_number: newSceneNumber }
+            : value;
+    });
+    return shifted;
+}
+
+function shiftVideoSceneArtifactsAfterSkip(skippedSceneNumber) {
+    videoOutputsByScene = shiftSceneIndexedMapAfterSkip(videoOutputsByScene, skippedSceneNumber);
+    videoReviewOutputsByScene = shiftSceneIndexedMapAfterSkip(videoReviewOutputsByScene, skippedSceneNumber);
+    videoSceneState = shiftSceneIndexedMapAfterSkip(videoSceneState, skippedSceneNumber);
+    regeneratingVideoSceneNumbers = new Set(
+        Array.from(regeneratingVideoSceneNumbers)
+            .filter(sceneNumber => Number(sceneNumber) !== skippedSceneNumber)
+            .map(sceneNumber => Number(sceneNumber) > skippedSceneNumber
+                ? Number(sceneNumber) - 1
+                : Number(sceneNumber))
+    );
+
+    const items = Array.from(document.querySelectorAll('.video-item[id^="video-item-"]'))
+        .map(item => {
+            const match = item.id.match(/^video-item-(\d+)$/);
+            return { item, sceneNumber: match ? Number(match[1]) : 0 };
+        })
+        .filter(entry => entry.sceneNumber > skippedSceneNumber)
+        .sort((a, b) => a.sceneNumber - b.sceneNumber);
+
+    items.forEach(({ item, sceneNumber }) => {
+        const newSceneNumber = sceneNumber - 1;
+        item.id = `video-item-${newSceneNumber}`;
+        const label = item.querySelector('.video-label');
+        if (label) label.textContent = t('labels.scene', { scene: newSceneNumber });
+        const thumb = item.querySelector('.video-thumb');
+        if (thumb) thumb.setAttribute('onclick', `openVideoModalIfReady(${newSceneNumber})`);
+        const placeholder = item.querySelector('.video-placeholder');
+        if (placeholder) placeholder.id = `video-placeholder-${newSceneNumber}`;
+        const video = item.querySelector('video');
+        if (video) video.id = `video-src-${newSceneNumber}`;
+        const regenerateBtn = item.querySelector('button.item-btn.regenerate');
+        if (regenerateBtn) {
+            regenerateBtn.setAttribute(
+                'onclick',
+                `event.stopPropagation(); regenerateVideo(${newSceneNumber})`
+            );
+        }
+        const skipBtn = item.querySelector('button.item-btn.skip');
+        if (skipBtn) {
+            skipBtn.id = `video-skip-${newSceneNumber}`;
+            skipBtn.setAttribute(
+                'onclick',
+                `event.stopPropagation(); skipScene(${newSceneNumber})`
+            );
+        }
+        const review = item.querySelector('.video-review-status');
+        if (review) review.id = `video-review-${newSceneNumber}`;
+    });
+}
+
 function trimVideoSceneArtifacts(totalScenes) {
     Object.keys(videoOutputsByScene).map(Number).forEach((scene) => {
         if (scene > totalScenes) delete videoOutputsByScene[scene];
@@ -3468,6 +3492,7 @@ function handleSceneSkipped(output) {
     clearVideoItemLoading(skippedSceneNumber);
     hideSkipSceneButton(skippedSceneNumber);
     removeVideoItem(skippedSceneNumber);
+    shiftVideoSceneArtifactsAfterSkip(skippedSceneNumber);
     videoTotalScenes = totalScenes;
     trimVideoSceneArtifacts(totalScenes);
     updateVideoStepProgressUI();
@@ -3748,7 +3773,7 @@ function displayReferenceImage(output) {
     const isReferenceStageComplete = !!(output && output.stage_ready === true);
 
     if (hasPendingReferenceRegeneration()) {
-        // 仍有参考图/装扮/布景状态/关键动作图在重新生成中：状态栏必须保持“图片重新生成中”，
+        // 仍有参考图/装扮/布景状态图在重新生成中：状态栏必须保持“图片重新生成中”，
         // 不能因为 reference_output 携带 ready_for_confirmation 就误显示“已生成完成，请确认”。
         renderStatusBar(t('labels.referenceImageRegeneratingText'), 'loading', t('steps.referenceImageTitle'));
     } else if (isReferenceGenerationComplete || isReferenceStageComplete) {
@@ -3795,8 +3820,6 @@ function displayReferenceImage(output) {
 
     // 在布景参考图库之后渲染“各分镜-角色装扮-布景状态”模块。
     displayVariantAssets(output);
-    // 在角色装扮/布景状态模块之后渲染“关键动作参考图”模块。
-    displayKeyActionReferenceImages(output);
 
     contentDisplay.scrollTop = contentDisplay.scrollHeight;
 
@@ -3826,7 +3849,7 @@ function displayVariantAssets(output) {
         card.id = 'variant-assets-card';
     }
 
-    // 保证顺序：参考图库 → 角色装扮/布景状态 → 关键动作参考图。
+    // 保证顺序：参考图库 → 角色装扮/布景状态。
     const referenceCard = document.getElementById('reference-image-card');
     if (referenceCard && referenceCard.parentNode === contentDisplay) {
         if (referenceCard.nextSibling !== card) {
@@ -3902,7 +3925,7 @@ function markReferenceAssetRegenerationPending(referenceAssetKey) {
     // 保持 regeneratingReferenceAssetKeys 中的锁定，不在 finally 中移除。
 }
 
-// 统一收尾：解锁按钮并刷新三个模块的状态。
+// 统一收尾：解锁按钮并刷新两个模块的状态。
 // force=true 时（WebSocket 结果到达）无条件解锁；否则若该 key 仍在等待后台异步结果，则保持锁定。
 function finishReferenceAssetRegeneration(referenceAssetKey, force = false) {
     if (referenceAssetKey) {
@@ -3910,7 +3933,6 @@ function finishReferenceAssetRegeneration(referenceAssetKey, force = false) {
             // 仍在等待 WebSocket 推送结果，保持锁定，仅刷新状态。
             refreshReferenceImageActionState();
             refreshVariantAssetsActionState();
-            refreshKeyActionReferenceActionState();
             return;
         }
         regeneratingReferenceAssetKeys.delete(referenceAssetKey);
@@ -3919,7 +3941,6 @@ function finishReferenceAssetRegeneration(referenceAssetKey, force = false) {
     referenceImageRegenerating = regeneratingReferenceAssetKeys.size > 0;
     refreshReferenceImageActionState();
     refreshVariantAssetsActionState();
-    refreshKeyActionReferenceActionState();
     // 处于参考图子阶段等待（category1/category2 完成后）时，重启该子阶段倒计时；
     // 否则走主步骤（videos/merge）倒计时逻辑。
     if (pendingReferenceStage && pendingReferenceStage !== 'videos') {
@@ -3929,7 +3950,7 @@ function finishReferenceAssetRegeneration(referenceAssetKey, force = false) {
     }
 }
 
-// 处理后端通过 WebSocket 推送的单张重生成结果（参考图/装扮图/布景状态图/关键动作图）。
+// 处理后端通过 WebSocket 推送的单张重生成结果（参考图/装扮图/布景状态图）。
 function handleReferenceAssetRegenerated(data) {
     data = data || {};
     const referenceAssetKey = data.reference_asset_key || '';
@@ -3996,7 +4017,7 @@ function handleVideoSceneRegenerated(data) {
     }
 }
 
-// 重新生成单张角色装扮图/布景状态图/关键动作参考图
+// 重新生成单张角色装扮图/布景状态图
 async function regenerateVariantAsset(referenceType, encodedVariantKey) {
     if (!currentProjectId) {
         alert(t('messages.createProjectFirst'));
@@ -4013,7 +4034,6 @@ async function regenerateVariantAsset(referenceType, encodedVariantKey) {
     cancelAutoRunCountdown();
     refreshReferenceImageActionState();
     refreshVariantAssetsActionState();
-    refreshKeyActionReferenceActionState();
     renderStatusBar(t('labels.referenceImageRegeneratingText'), 'loading', t('steps.referenceImageTitle'));
 
     try {
@@ -4060,88 +4080,6 @@ async function regenerateVariantAsset(referenceType, encodedVariantKey) {
     } finally {
         finishReferenceAssetRegeneration(referenceAssetKey);
     }
-}
-
-// 刷新“关键动作参考图”模块内重新生成按钮状态。
-function refreshKeyActionReferenceActionState() {
-    const card = document.getElementById('key-action-reference-card');
-    if (!card) return;
-    const regenerateButtons = card.querySelectorAll('button.reference-regenerate-btn');
-    regenerateButtons.forEach((regenerateBtn) => {
-        const assetKey = regenerateBtn.dataset.referenceKey || '';
-        const enabled = canRegenerateReferenceImage(false, assetKey);
-        regenerateBtn.disabled = !enabled;
-        regenerateBtn.style.opacity = enabled ? '' : '0.65';
-        regenerateBtn.style.cursor = enabled ? 'pointer' : 'not-allowed';
-    });
-}
-
-// 渲染“关键动作参考图”模块：位于角色装扮/布景状态之后。
-function displayKeyActionReferenceImages(output) {
-    const keyActionImages = (output && output.key_action_reference_images) || [];
-    const existing = document.getElementById('key-action-reference-card');
-
-    if (!keyActionImages.length) {
-        if (existing) existing.remove();
-        return;
-    }
-
-    let card = existing;
-    if (!card) {
-        card = document.createElement('div');
-        card.className = 'content-card';
-        card.id = 'key-action-reference-card';
-    }
-
-    const anchorCard = document.getElementById('variant-assets-card') || document.getElementById('reference-image-card');
-    if (anchorCard && anchorCard.parentNode === contentDisplay) {
-        if (anchorCard.nextSibling !== card) {
-            contentDisplay.insertBefore(card, anchorCard.nextSibling);
-        }
-    } else if (card.parentNode !== contentDisplay) {
-        contentDisplay.appendChild(card);
-    }
-
-    const linkAttrs = getExternalLinkAttrs();
-    const sortedImages = [...keyActionImages].sort(
-        (a, b) => (Number(a.scene_number) || 0) - (Number(b.scene_number) || 0)
-    );
-
-    const items = sortedImages.map((item) => {
-        const sceneNumber = Number(item.scene_number) || 0;
-        const sceneLabel = t('labels.scene', { scene: sceneNumber });
-        const variantKey = item.variant_key || `scene_${String(sceneNumber).padStart(3, '0')}::key_action`;
-        const title = item.name || sceneLabel;
-        return `
-            <div class="reference-item" style="display:flex; flex-direction:column; gap:8px; padding: 12px; border: 1px solid #f0f0f0; border-radius: 10px; background: #fff; font-size: 13px; line-height: 1.5;">
-                <div style="position: relative; width: 100%; cursor: pointer; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.12);" onclick="openMediaModal('image', '${item.url}')">
-                    <img src="${item.url}" alt="${escapeHtml(title)}" style="width:100%; height:180px; object-fit:cover; display:block;">
-                    <div style="position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.6); color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px;">
-                        ${t('labels.clickToZoom')}
-                    </div>
-                </div>
-                <div style="font-size: 13px; color: #888;">${t('labels.keyActionReferenceImage')}</div>
-                <div style="font-size: 16px; font-weight:600; color:#333; line-height: 1.4;">${escapeHtml(sceneLabel)}</div>
-                <div class="item-actions" style="display:flex; gap:8px; flex-wrap: wrap;">
-                    <button
-                        class="item-btn regenerate reference-regenerate-btn"
-                        data-locked="false"
-                        data-reference-key="${escapeHtml(buildReferenceAssetKey('key_action', variantKey))}"
-                        onclick="event.stopPropagation(); regenerateVariantAsset('key_action', '${encodeURIComponent(variantKey)}')"
-                        style="background: #faad14; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer;"
-                    >${t('actions.regenerate')}</button>
-                    <a href="${item.url}" ${linkAttrs} class="item-btn download" style="background: #1890ff; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; width: fit-content;">${t('actions.download')}</a>
-                </div>
-            </div>
-        `;
-    }).join('');
-
-    card.innerHTML = `
-        <h4 style="margin: 0 0 15px 0; font-size: 18px; font-weight: 600; color: #333; border-bottom: 2px solid #1890ff; padding-bottom: 10px;">${t('labels.keyActionReferenceLibrary')}</h4>
-        <div class="reference-grid">${items}</div>
-    `;
-
-    refreshKeyActionReferenceActionState();
 }
 
 // 重新生成单张参考图

@@ -12,12 +12,12 @@ English documentation. Simplified Chinese version: `README.md`
 
 Powered by the **SeeDance 2.5** video model — turn one sentence into a cinematic AI short drama:
 
-- 🎬 **Up to 30-second shots**: each scene can run up to 30 seconds (5–30s adjustable) for more continuous long-take storytelling, with a final cut up to `2400` seconds.
+- 🎬 **Up to 30-second shots**: each scene can run up to 30 seconds (5–30s adjustable) for more continuous long-take storytelling, with a final cut up to `3600` seconds.
 - 🖼️ **Up to 50 reference inputs**: a single task can fuse up to 50 character / backdrop reference images for highly consistent characters and scenes across shots.
 - 🌍 **14 languages natively supported**: native multilingual dialogue and narration across Chinese, English, Japanese, Spanish, and 14 languages total.
 - 🎞️ **Cinematic audiovisual quality**: native audio-video sync, adaptive aspect ratio, and the final cut is remuxed to high-fidelity `MP4` (H.264/AAC, `+faststart`) that streams progressively in the browser.
 - 🎭 **Character-outfit / backdrop-state variants**: per scene the system derives character-outfit images and backdrop time/weather-state images, and references them consistently in scene videos.
-- 🤖 **Fully automated multi-agent pipeline**: script → reference library → character-outfit/backdrop-state variants and key-action references → scene generation & review → long-video merge, end to end.
+- 🤖 **Fully automated multi-agent pipeline**: script → reference library → character-outfit/backdrop-state variants → scene generation & review → long-video merge, end to end.
 
 ## Overview
 
@@ -35,7 +35,7 @@ The system automatically coordinates script writing, character definitions, back
 Current primary workflow:
 
 ```text
-User Input -> Script Generation -> Reference Library Confirmation -> Character-Outfit/Backdrop-State Variants And Key-Action References -> Scene Video Generation And Review -> Final Merge
+User Input -> Script Generation -> Reference Library Confirmation -> Character-Outfit/Backdrop-State Variants -> Scene Video Generation And Review -> Final Merge
 ```
 
 The system focuses on:
@@ -153,9 +153,14 @@ VIDEO_REVIEW_API_KEY=your-video-review-api-key
 ASSET_LIBRARY_REGION=ap-southeast-1
 ASSET_LIBRARY_API_HOST=ark.ap-southeast-1.byteplusapi.com
 ASSET_LIBRARY_PROJECT_NAME=default
+
+# Allow partial/full nudity only for characters explicitly identified as age 18+
+NSFW_ENABLED=off
 ```
 
 Keep placeholders in `config.yaml`; values are injected from `.env` at runtime:
+
+When `NSFW_ENABLED=on`, the script, character reference, outfit reference, and scene-video pipelines consistently enable the adult-nudity policy. When disabled, those pipelines explicitly request non-explicit clothed output. The policy is implemented by shared code and public prompts, with no private prompt directory dependency.
 
 ```yaml
 byteplus:
@@ -199,11 +204,11 @@ The speech-to-text path preserves the browser's actual recording format. Chrome 
 
 Current rules:
 
-- Total video duration limit: `2400` seconds
+- Total video duration limit: `3600` seconds
 - Per-scene duration range: `5`–`30` seconds (tuned for `SeeDance-2.5`)
 - Scene duration is allocated dynamically from action beats, cast size, information density, spatial blocking, and emotional turns; simple shots stay short, complex scenes receive more time, with at least a `2`-second spread and multiple duration tiers whenever the total allows it
 - Each `description` uses continuous executable time segments: at least 2 segments for `5`–`9` seconds, 3 for `10`–`18` seconds, and 4 for `19`–`30` seconds, covering environment, blocking, actions, subtle performance, camera work, lighting, and narrative results
-- Scene limit: `150`
+- Scene limit: `200`
 - Character definition limit: `30`
 - Backdrop definition limit: `30`
 - Adjacent scenes use motivated action/eyeline/prop/composition matches, sound bridges, natural occlusion, or lighting echoes; continuous scenes extend the performance directly, avoiding template transitions and forced suspense on every shot
@@ -259,7 +264,8 @@ After all character main images and scene main images are generated, the system 
 - Character-outfit image = the scene's outfit description + the corresponding character main image
 - Backdrop-state image = the scene's time/weather state + the corresponding scene main image
 - Variants across scenes are generated in parallel, bounded by the image concurrency setting (`video_generation.reference_images.max_concurrency`)
-- Variants are deduplicated (each `character::outfit` or `scene::time::weather` is generated once) and preferred in scene videos
+- Character outfits are deduplicated by stable visual traits such as clothing, nudity level, hairstyle, and injuries; backdrop states are normalized by time and weather so minor wording differences do not trigger duplicate generation
+- Each variant is bound to one or more scenes through `scene_numbers`, and scene videos prefer variants explicitly matched to the current scene number
 
 ### 3.3 Scene Video Generation
 
@@ -267,7 +273,6 @@ After all character main images and scene main images are generated, the system 
 
 - Character image (preferring the character-outfit image when the scene has one)
 - Scene image (preferring the backdrop-state image when the scene has one)
-- The scene's key-action reference image
 - The current scene script and user style requirements
 
 Character references now use `asset://asset-id` URIs in video generation requests whenever an asset is available, for example:
@@ -282,16 +287,16 @@ Character references now use `asset://asset-id` URIs in video generation request
 }
 ```
 
-Reference selection differs by video mode (switchable in the UI):
-
-- **Parallel mode (default)**: multiple scenes are generated at the same time for faster throughput; each scene references only character images, backdrop images, and key-action references, without the previous scene's video
-- **Extend mode**: scenes are generated serially, which is slower but optimizes scene-to-scene transitions — every scene except scene 1 additionally references the previous scene's generated video as `reference_video`, used only to keep character appearance/outfit/scene/lighting consistent while advancing the new scene from a fresh camera angle, avoiding near-identical adjacent shots
+Scene videos only use character and backdrop images matched to the current scene. Automatic review generates scenes concurrently according to the configured limit, while manual review generates one scene at a time and waits for confirmation.
 
 Key rules:
 
 - Automatic failure retry counts are controlled by YAML (`video_review.max_retries`, `video_generation.scene_total_generate_limit`)
 - Manual `Regenerate` clicks do not consume the automatic failure budget
 - The video prompt appends a no-background-music constraint by default unless the user explicitly requests a music style
+- When `NSFW_ENABLED=on` and a character is explicitly age 18+, a scene whose text indicates ongoing intimacy inherits the previous scene's partial/full-nudity outfit state; another character image is used only after the script clearly ends that state
+- Scene numbers are normalized to `1..N` from storyboard array order, and every generated result stores a scene-content fingerprint to prevent a correctly numbered video from being attached to the wrong script content
+- Archived scene-video names use a sortable format such as `scene_012_attempt_03.mov`
 
 ### 3.4 Prompt And Skill Management
 
@@ -326,6 +331,8 @@ Review dimensions:
 - Physical world rules
 - Semantic consistency with the scene script
 
+For character-consistency review, each character uses the outfit image bound to the current scene when available, falling back to the character main image only when no matching outfit image exists.
+
 Current default review configuration:
 
 - `video_review.pass_threshold = 60`
@@ -338,7 +345,7 @@ Flow rules:
 - Manual mode: review still runs, but regeneration is not automatic; the user may continue manually
 - The workflow never moves forward while there are unfinished automatic or manual regeneration jobs
 - Cloud long-running tasks route messages through the stable `client_id` to the latest WebSocket connection, so generation and review results still reach the active frontend after gateway or browser reconnects
-- In parallel mode, each scene is persisted as soon as it finishes, preventing completed late-index scenes from being lost when another scene hits a 504 timeout
+- In auto mode, every scene is persisted as soon as it finishes. Failed scenes are removed in descending order only after all parallel jobs settle, then all remaining artifacts are renumbered together to prevent script/video mismatches
 - When auto mode reaches the retry cap and selects the highest-scoring candidate, the scene is marked as accepted-over-retry and does not block the final merge
 
 ### 5. Merge
@@ -351,9 +358,10 @@ Current default merge settings:
 - Before concatenation each scene segment is normalized to uniform parameters (H.264/`yuv420p` + AAC `48kHz` stereo + CFR) to avoid mismatched audio sample rates/codecs causing silent second halves or broken web playback
 - After merging, the output is remuxed to `MP4` (stream-copy `-c copy` first, falling back to `H.264/AAC` re-encode) with `-movflags +faststart` moving the `moov atom` to the front for progressive browser playback
 - The final uploaded and browser-played cut is `MP4`
-- `merge.temporary_edge_trim = off`
-- `trim_previous_end_frames = 0`
-- `trim_next_start_frames = 1`
+- Before merging, the system rejects duplicate, missing, or extra scene numbers and verifies each video's scene-content fingerprint; segments are always merged in physical storyboard-array order
+- `merge.temporary_edge_trim = on`
+- `trim_previous_end_frames = 2`
+- `trim_next_start_frames = 0`
 
 After all videos and reviews finish:
 

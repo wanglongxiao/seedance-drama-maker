@@ -101,8 +101,9 @@ class GeneratedImage(BaseModel):
     url: str
     prompt: str
     name: Optional[str] = None
-    reference_type: Optional[Literal["character", "scene", "character_outfit", "scene_state", "key_action"]] = None
+    reference_type: Optional[Literal["character", "scene", "character_outfit", "scene_state"]] = None
     variant_key: Optional[str] = None  # 装扮图/布景状态图去重键，如 "角色key::装扮key" 或 "场景key::时间key::天气key"
+    scene_numbers: List[int] = Field(default_factory=list)  # 该参考图强绑定的分镜编号集合（多分镜共用）
     source: str = "generated"
     used_original: bool = False
     is_end_frame: bool = False
@@ -125,6 +126,7 @@ class UploadedReferenceImage(BaseModel):
 class GeneratedVideo(BaseModel):
     """生成的视频片段数据模型"""
     scene_number: int
+    scene_content_hash: Optional[str] = None
     url: str
     first_frame_url: str
     last_frame_url: Optional[str] = None  # 只有最后一个分镜使用尾帧
@@ -182,7 +184,6 @@ class VideoProject(BaseModel):
     scene_reference_images: List[GeneratedImage] = Field(default_factory=list)
     character_outfit_images: List[GeneratedImage] = Field(default_factory=list)
     scene_state_images: List[GeneratedImage] = Field(default_factory=list)
-    key_action_reference_images: List[GeneratedImage] = Field(default_factory=list)
     reference_image_library: Dict[str, Any] = Field(default_factory=dict)
     scene_reference_mappings: Dict[int, Dict[str, Any]] = Field(default_factory=dict)
     task_tos_prefix: Optional[str] = None
@@ -211,8 +212,6 @@ class VideoProject(BaseModel):
     # （本地单实例不复现）。持久化该标记后，后端可在每个阶段完成时「进程内自链」下一阶段，
     # 使推进不再依赖 WS 消息抵达浏览器。随项目状态持久化到 TOS，支持跨实例接管。
     auto_run: bool = False
-    # 视频生成模式：extend=延长（串行，参考前一分镜视频），parallel=并行（默认，各分镜独立并行生成）
-    video_generation_mode: str = "parallel"
     next_scene_index: int = 0
     video_scene_states: Dict[int, VideoSceneState] = Field(default_factory=dict)
     generated_video_seeds: List[str] = Field(default_factory=list)

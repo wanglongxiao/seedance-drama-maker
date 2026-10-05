@@ -9,7 +9,7 @@
 通过语义分析对比计算分数，只要文字表达的意思相似即可
 """
 import time
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 import requests
 from app.config import config
 from app.prompt_skill import render_prompt
@@ -79,9 +79,9 @@ class VideoReviewAgent:
         self,
         script_scene_description: str,
         video_url: str,
-        previous_video_url: str = None,
         reference_image_url: str = None,
         output_language: str = "zh-CN",
+        reference_image_urls: Optional[List[str]] = None,
     ) -> Tuple[bool, str, int]:
         """
         审核视频是否符合剧本要求
@@ -89,8 +89,8 @@ class VideoReviewAgent:
         Args:
             script_scene_description: 剧本中该分镜的描述
             video_url: 生成的视频URL
-            previous_video_url: 前一个分镜视频URL（可作为上下文参考）
-            reference_image_url: 参考图URL（用于角色一致性检查）
+            reference_image_url: 兼容旧调用的单张角色参考图URL
+            reference_image_urls: 当前分镜各角色参考图URL；装扮图应替代同角色主图
 
         Returns:
             (is_approved: bool, feedback: str, score: int)
@@ -98,23 +98,29 @@ class VideoReviewAgent:
             - feedback: 反馈信息，如果不通过，说明原因
             - score: 综合评分（0-100分）
         """
+        normalized_reference_urls: List[str] = []
+        for url in list(reference_image_urls or []) + ([reference_image_url] if reference_image_url else []):
+            normalized_url = str(url or "").strip()
+            if normalized_url and normalized_url not in normalized_reference_urls:
+                normalized_reference_urls.append(normalized_url)
+
         logger.info(f"[REVIEW] Starting video review for: {video_url[:100]}...")
         logger.info(f"[REVIEW] Script description: {script_scene_description[:200]}...")
-        logger.info(f"[REVIEW] Has previous video: {previous_video_url is not None}")
-        logger.info(f"[REVIEW] Has reference image: {reference_image_url is not None}")
+        logger.info(f"[REVIEW] Character reference image count: {len(normalized_reference_urls)}")
 
         reference_image_section = ""
-        if reference_image_url:
-            reference_image_section = "【角色参考】\n参考图片中的角色形象应该在视频中保持一致\n"
-        previous_video_section = ""
-        if previous_video_url:
-            previous_video_section = "【上下文参考】\n可参考前一个分镜视频理解角色状态和剧情背景，但重点仍是判断当前视频本身是否合理自然\n"
+        if normalized_reference_urls:
+            reference_image_section = (
+                "【角色参考】\n"
+                "以下图片是当前分镜各角色的有效参考图。若提供的是角色装扮图，"
+                "人物一致性必须以该装扮图中的服装、发型、裸露层级和外观为准，"
+                "不得改用角色主图中的默认服装。\n"
+            )
 
         prompt = render_prompt(
             "video_review.md",
             script_scene_description=script_scene_description,
             reference_image_section=reference_image_section,
-            previous_video_section=previous_video_section,
             pass_threshold=self.pass_threshold,
             output_language_rule=translate(
                 output_language,
@@ -144,23 +150,13 @@ class VideoReviewAgent:
             }
         })
 
-        # 如果有参考图，添加参考图
-        if reference_image_url:
+        # 添加当前分镜的全部角色参考图
+        for reference_url in normalized_reference_urls:
             content.append({
                 "type": "image_url",
                 "image_url": {
-                    "url": reference_image_url
+                    "url": reference_url
                 }
-            })
-
-        # 如果有前一个视频，添加前一个视频
-        if previous_video_url:
-            content.append({
-                "type": "video_url",
-                "video_url": {
-                    "url": previous_video_url
-                },
-                "role": "previous_video"
             })
 
         messages = [

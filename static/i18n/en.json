@@ -6,9 +6,6 @@
     "title": "AI Video Studio",
     "subtitle": "Tell me what you want to create",
     "language": "Language",
-    "videoModeLabel": "Video Mode",
-    "videoModeParallel": "Parallel",
-    "videoModeExtend": "Extend",
     "welcome": "Hello! I am your AI video generator. Tell me what kind of video you want to create.",
     "youCan": "You can:",
     "welcomeText": "Type a text description directly",
@@ -68,7 +65,7 @@
     "review": "Review",
     "video": "Video",
     "referenceCategory1": "Character gallery & scene reference gallery",
-    "referenceCategory2": "Character outfit, backdrop state & key action reference images"
+    "referenceCategory2": "Character outfit & backdrop state images"
   },
   "status": {
     "processing": "Processing...",
@@ -189,8 +186,6 @@
     "variantSceneStates": "Backdrop State Images",
     "variantTypeCharacterOutfit": "Character Outfit",
     "variantTypeSceneState": "Backdrop State",
-    "keyActionReferenceLibrary": "🎬 Key Action Reference Images",
-    "keyActionReferenceImage": "Key Action Reference",
     "sceneSettings": "🏞️ Backdrop Settings ({count})",
     "sceneUsage": "🏷️ Backdrop Used:",
     "referenceLibraryUnified": "🎨 Unified Reference Library"
@@ -227,7 +222,7 @@
     "autoEnterNextNewFlow": "Automatically entering next step: {step}... (scene generation + review)",
     "autoEnterNextReferenceStage": "Automatically entering next stage: {stage}...",
     "referenceCategory1Complete": "🎨 Character gallery and scene reference gallery are ready!\n\nType in the chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - proceed to the next stage\n• \"regenerate\" / \"redo\" / \"regen\" - remake this stage\nor click \"Regenerate\" on any single image to fine-tune it",
-    "referenceCategory2Complete": "🎨 Character outfit images, backdrop state images, and key action reference images are ready!\n\nType in the chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - proceed to the next stage\n• \"regenerate\" / \"redo\" / \"regen\" - remake this stage\nor click \"Regenerate\" on any single image to fine-tune it",
+    "referenceCategory2Complete": "🎨 Character outfit images and backdrop state images are ready!\n\nType in the chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - proceed to the next stage\n• \"regenerate\" / \"redo\" / \"regen\" - remake this stage\nor click \"Regenerate\" on any single image to fine-tune it",
     "exitAutoRun": "⛔ Auto mode exited.\n\nEnter in chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - continue\n• \"regenerate\" / \"redo\" / \"regen\" - regenerate current step",
     "exitAutoRunStatus": "Auto mode exited. Enter a command in chat to continue",
     "scriptComplete": "📖 Script generation complete!\n\nEnter in chat:\n• \"continue\" / \"next\" / \"ok\" / \"go\" / \"start\" - next step: 🎨 Reference image\n• \"regenerate\" / \"redo\" / \"regen\" - regenerate 📖 Script generation",
