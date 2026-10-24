@@ -546,7 +546,7 @@ async def chat(
         if isinstance(e, ScriptQualityExhausted):
             return {
                 "success": True, "project_id": project_id,
-                "response": str(e), "script_quality_pending": True,
+                "response": translate(ui_language, "script_quality.paused"), "script_quality_pending": True,
                 "script_quality_report": e.report,
             }
         return {
@@ -1668,16 +1668,17 @@ async def resolve_script_quality_choice(project_id: str, request: Request):
     if access_error:
         return {"success": False, "error": access_error}
     project = main_agent.get_project_for_read(project_id)
+    locale = normalize_locale(getattr(project, "output_language", "zh-CN"))
     if not project or project.is_ended:
-        return {"success": False, "error": "Project unavailable"}
+        return {"success": False, "error": translate(locale, "script_quality.unavailable")}
     if not project.script_quality_pending or not project.script_quality_candidate:
-        return {"success": False, "error": "No script quality choice is pending"}
+        return {"success": False, "error": translate(locale, "script_quality.no_pending")}
     choice = data.get("choice")
     if choice not in {"restart", "use_best"}:
-        return {"success": False, "error": "Invalid script quality choice"}
+        return {"success": False, "error": translate(locale, "script_quality.invalid_choice")}
     # A pending script decision precedes all downstream generation.
     if project.processing_phase:
-        return {"success": False, "error": "Project is already processing"}
+        return {"success": False, "error": translate(locale, "script_quality.processing")}
     project.script_quality_pending = False
     if choice == "restart":
         project.script = None

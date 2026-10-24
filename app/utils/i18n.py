@@ -16,6 +16,41 @@ SUPPORTED_OUTPUT_LANGUAGES: Dict[str, str] = {
 
 
 BACKEND_TRANSLATIONS = {
+    "script_quality.paused": {
+        "zh-CN": "剧本校验未通过，请选择恢复方式后继续。",
+        "zh-TW": "劇本校驗未通過，請選擇恢復方式後繼續。",
+        "en": "Script review failed. Choose a recovery option to continue.",
+        "ja": "脚本の審査が不合格です。復旧方法を選択してください。",
+        "es": "La revisión del guion falló. Elige una opción para continuar.",
+    },
+    "script_quality.unavailable": {
+        "zh-CN": "项目不存在或已结束。",
+        "zh-TW": "專案不存在或已結束。",
+        "en": "The project is missing or has ended.",
+        "ja": "プロジェクトが存在しないか終了しています。",
+        "es": "El proyecto no existe o ya ha terminado.",
+    },
+    "script_quality.no_pending": {
+        "zh-CN": "当前没有待处理的剧本校验选择。",
+        "zh-TW": "目前沒有待處理的劇本校驗選擇。",
+        "en": "No script review choice is pending.",
+        "ja": "保留中の脚本審査の選択はありません。",
+        "es": "No hay ninguna elección pendiente de revisión del guion.",
+    },
+    "script_quality.invalid_choice": {
+        "zh-CN": "无效的剧本恢复选项。",
+        "zh-TW": "無效的劇本恢復選項。",
+        "en": "Invalid script recovery option.",
+        "ja": "脚本の復旧方法が無効です。",
+        "es": "La opción de recuperación del guion no es válida.",
+    },
+    "script_quality.processing": {
+        "zh-CN": "项目正在处理中，请稍后重试。",
+        "zh-TW": "專案正在處理中，請稍後重試。",
+        "en": "The project is processing. Please try again later.",
+        "ja": "プロジェクトを処理中です。後でもう一度お試しください。",
+        "es": "El proyecto se está procesando. Inténtalo de nuevo más tarde.",
+    },
     "chat.system_prompt": {
         "zh-CN": "你是一个专业的AI视频生成助手。你的任务是：\n1. 理解用户的视频创作需求\n2. 询问必要的细节（如风格、角色、场景等）\n3. 引导用户提供参考图片或语音描述\n4. 当信息足够时，告知用户可以开始生成视频\n\n请用友好、专业的语气与用户交流。",
         "zh-TW": "你是一個專業的AI影片生成助手。你的任務是：\n1. 理解使用者的影片創作需求\n2. 詢問必要的細節（如風格、角色、場景等）\n3. 引導使用者提供參考圖片或語音描述\n4. 當資訊足夠時，告知使用者可以開始生成影片\n\n請用友善、專業的語氣與使用者交流。",

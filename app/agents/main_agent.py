@@ -1954,7 +1954,7 @@ class MainAgent:
             raise ValueError(f"Project not found: {project_id}")
         self._raise_if_project_ended(project)
         if project.script_quality_pending:
-            raise ValueError("Choose a script quality recovery option before generating videos")
+            raise ValueError(translate(project.output_language, "script_quality.paused"))
 
         if not hasattr(project, 'reference_image') or not project.reference_image:
             raise ValueError(f"Reference image not found for project {project_id}")
@@ -3298,7 +3298,7 @@ class MainAgent:
     ) -> GeneratedImage:
         self._raise_if_project_ended(project)
         if project.script_quality_pending:
-            raise ValueError("Choose a script quality recovery option before generating references")
+            raise ValueError(translate(project.output_language, "script_quality.paused"))
         # 确保后台素材组准备任务完成，再进行参考图生成/登记。
         await self.ensure_project_prepared(project.project_id)
         active_task = self._reference_generation_tasks.get(project.project_id)
@@ -3361,7 +3361,7 @@ class MainAgent:
         """
         self._raise_if_project_ended(project)
         if project.script_quality_pending:
-            raise ValueError("Choose a script quality recovery option before generating references")
+            raise ValueError(translate(project.output_language, "script_quality.paused"))
         await self.ensure_project_prepared(project.project_id)
         stage_key = f"{project.project_id}:{stage}"
         active_task = self._reference_generation_tasks.get(stage_key)
