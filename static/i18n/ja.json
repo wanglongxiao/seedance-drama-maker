@@ -1,4 +1,10 @@
 {
+  "scriptQuality": {
+    "paused": "脚本の審査が不合格です。生成を一時停止しました。",
+    "restart": "プロジェクト全体を再開始",
+    "useBest": "最良の候補で生成を続行",
+    "summary": "最良の候補：第 {round} 回、残り {count} 件。"
+  },
   "meta": {
     "pageTitle": "AI動画生成アシスタント"
   },

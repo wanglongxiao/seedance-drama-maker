@@ -535,15 +535,10 @@ class FFmpegService:
             url: 文件URL
             local_path: 本地保存路径
         """
-        import requests
-        
-        logger.debug(f"Downloading: {url}")
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-        
-        with open(local_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+        from app.services.tos_service import tos_service
+
+        logger.debug("Downloading media file")
+        tos_service.download_file(url, local_path)
         
         logger.debug(f"Downloaded to: {local_path}")
 

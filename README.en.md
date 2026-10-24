@@ -107,7 +107,7 @@ Before running the system, prepare the following:
 - Enable the required `ModelArk` models and get the corresponding `apikey`
 - Enable `Seed-Speech` and get `appid` and `apikey`
 - Enable `TOS` and get valid `AK/SK`
-- Create your own public-readable `bucket` in `TOS`
+- Create your own private `bucket` in `TOS`
 - Configure non-sensitive fields such as `endpoint` in `config.yaml`; put real `apikey` / `AK` / `SK` / `appid` / `bucket` values in the project-root `.env`
 
 ### Credential Governance Rules
@@ -126,8 +126,11 @@ Put sensitive credentials into the project-root `.env` (copy from `.env.example`
 BYTEPLUS_AK=your-byteplus-ak
 BYTEPLUS_SK=your-byteplus-sk
 TOS_REGION=ap-southeast-1
-TOS_BUCKET=your-public-bucket
+TOS_BUCKET=your-private-bucket
 TOS_ENDPOINT=https://tos-ap-southeast-1.bytepluses.com
+TOS_PRIVATE_BUCKET=true
+TOS_PRESIGNED_URL_EXPIRES=604800
+TOS_PRESIGNED_URL_REFRESH_MARGIN=3600
 
 # ModelArk
 MODELARK_API_KEY=your-modelark-api-key
@@ -214,6 +217,9 @@ Current rules:
 - Adjacent scenes use motivated action/eyeline/prop/composition matches, sound bridges, natural occlusion, or lighting echoes; continuous scenes extend the performance directly, avoiding template transitions and forced suspense on every shot
 - Narrative hooks must grow from established character choices, consequences, partial reveals, sounds, props, or emotional changes and be paid off by later scenes; video generation must not add unmotivated black screens, white flashes, spins, particles, glitches, repeated whip pans, or frequent fades
 - If script quality validation fails, the script model revises the previous complete JSON using the concrete validation findings, preserving unaffected content instead of generating again from the original request
+- Generation, rewriting, and targeted fixes share one review flow for locked settings, structure, duration, and story continuity. Semantic findings are checked against script evidence to avoid false failures for inherited camera positions, lighting, or prop inserts
+- `script_generation.validation_max_rounds` defaults to `3`, including the first draft and later fixes. Valid director timing plans are kept before any duration adjustment
+- When all rounds fail, manual mode pauses and offers a full project restart or continuation with the best draft; the choice survives a page refresh. Auto mode continues with the best candidate, ranked by locked settings, executable structure, duration, and confirmed issue count
 - Per-scene special outfits and hairstyle changes are written explicitly to `character_outfits`, while backdrop time/weather state is written explicitly to `scene_state`; both fields appear before the scene description and are persisted for downstream image/video generation
 - Backend `INFO` logs contain only compact metadata such as model, message count, and prompt/payload length; full prompts, request bodies, asset polling results, and heartbeats are limited to `DEBUG` to prevent oversized long-running logs
 
@@ -418,6 +424,7 @@ Services
 ### Key Design Points
 
 - All sensitive credentials live in `.env`; `config.yaml` keeps only `${VAR}` placeholders injected by `app/config.py` at runtime
+- TOS objects retain private ACLs. Browsers, models, review, and ASR receive automatically refreshed temporary GET URLs, while backend copy, merge, and state persistence use the TOS SDK directly
 - The UI supports `zh-CN`, `zh-TW`, `en`, `ja`, and `es`; `SeeDance-2.5` video dialogue is natively supported in 14 languages
 - The pipeline generates in `MOV` and remuxes the final cut to `MP4` (`+faststart`), with `TOS` normalizing `Content-Type` for reliable web playback
 - Each project is bound to its browser connection to support isolated multi-tab execution
@@ -481,6 +488,13 @@ To prevent secret leakage or accidental publication of test artifacts, this repo
 - `.env`, `/.run/`, `*.log`, cache directories, `/plan.md`, and `/docs/` must not enter Git
 - README files, `config.yaml`, and `.env.example` keep placeholders only and never contain real credentials
 - Before committing, make sure test audio, test images, service logs, and temporary exports are not staged
+- Temporary share packages, archive exports, key files, and local deployment JSON stay outside Git and the image context. Before release, scan staged files and history; report file paths only, without printing secret values
+
+### Cloud Release
+
+Release in this order: `git commit → git push → rebuild image → release veFaaS`. Build the image from committed code with Python, FFmpeg/FFprobe, and fonts. Inject real credentials through veFaaS environment variables; never put secrets in Docker `ARG` or `ENV`.
+
+The veFaaS service in BytePlus `ap-southeast-1` keeps at least `1` and at most `5` instances. Once the new revision is ready, move all traffic to it and retain the previous revision for rollback. Check the cloud page, locale files, private TOS signed access, and release status.
 
 ## Open Source Rules
 

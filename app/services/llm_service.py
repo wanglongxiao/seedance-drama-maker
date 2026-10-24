@@ -7,6 +7,7 @@ import requests
 import json
 from typing import Dict, Any, List, Optional
 from app.config import config
+from app.services.tos_service import tos_service
 from app.utils.logger import get_logger
 
 logger = get_logger("llm_service")
@@ -144,6 +145,7 @@ class LLMService:
         """
         url = f"{self.base_url}/chat/completions"
 
+        tos_service.refresh_urls_in_value(messages)
         payload = {
             "model": model,
             "messages": messages,
@@ -236,7 +238,10 @@ class LLMService:
             logger.info(f"Image generation requested with ratio: {ratio}, normalized size: {normalized_size}")
 
         if image_urls:
-            payload["image"] = image_urls
+            payload["image"] = [
+                tos_service.ensure_accessible_url(image_url)
+                for image_url in image_urls
+            ]
 
         payload_json = json.dumps(payload, ensure_ascii=False)
         logger.log_llm_input(model, prompt)
@@ -333,6 +338,7 @@ class LLMService:
 
         # 优先使用 reference_image_url (seedance-2.0 格式)
         if reference_image_url:
+            reference_image_url = tos_service.ensure_accessible_url(reference_image_url)
             content.append({
                 "type": "image_url",
                 "image_url": {"url": reference_image_url},
@@ -340,6 +346,7 @@ class LLMService:
             })
             logger.info(f"Using reference_image for character consistency")
         elif first_frame_url:
+            first_frame_url = tos_service.ensure_accessible_url(first_frame_url)
             # 兼容旧版本：使用 first_frame
             content.append({
                 "type": "image_url",
@@ -446,6 +453,8 @@ class LLMService:
             headers = self._get_headers(model)
 
         ratio = aspect_ratio or ("16:9" if normalized_resolution in {"720p", "1080p"} else "9:16")
+
+        tos_service.refresh_urls_in_value(content)
 
         # 构建 payload
         payload = {

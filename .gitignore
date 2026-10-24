@@ -24,6 +24,12 @@ temp/
 /logs/
 /tmp/
 /outputs/
+/.trae-html-share-packages/
+*.pem
+*.key
+*.p12
+*.pfx
+/dm_vefaas*.json
 
 # IDE
 .vscode/

@@ -7,9 +7,9 @@ import os
 import mimetypes
 import io
 import requests
-from datetime import datetime
-from typing import Optional, List
-from urllib.parse import urlparse
+from datetime import datetime, timezone
+from typing import Any, Optional, List, Tuple
+from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 from app.config import config
 from app.utils.logger import get_logger
@@ -42,17 +42,33 @@ class TOSService:
     def __init__(self):
         self.bucket = config.tos_bucket
         self.region = config.tos_region
-        self.endpoint = config.tos_endpoint.replace("https://", "").replace("http://", "")
+        self.endpoint = config.tos_endpoint.replace("https://", "").replace("http://", "").rstrip("/")
         self.uploads_dir = config.tos_uploads_dir
         self.request_timeout = config.get('tos.request_timeout', 180)
         self.socket_timeout = config.get('tos.socket_timeout', 180)
         self.connection_timeout = config.get('tos.connection_timeout', 30)
         self.max_retry_count = config.get('tos.max_retry_count', 5)
+        self.private_bucket = self._as_bool(config.get('tos.private_bucket', True))
+        self.presigned_url_expires = max(
+            60,
+            min(int(config.get('tos.presigned_url_expires', 604800)), 604800),
+        )
+        self.presigned_url_refresh_margin = max(
+            0,
+            min(
+                int(config.get('tos.presigned_url_refresh_margin', 3600)),
+                self.presigned_url_expires - 1,
+            ),
+        )
         # BytePlus 认证信息
         self.ak = config.get('byteplus.ak')
         self.sk = config.get('byteplus.sk')
         # 创建 TOS 客户端
         self.client = self._create_client()
+
+    @staticmethod
+    def _as_bool(value: Any) -> bool:
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
     def _create_client(self):
         """创建 TOS 客户端"""
@@ -105,18 +121,123 @@ class TOSService:
             normalized = normalized[len(self.uploads_dir) + 1:]
         return normalized
 
-    def build_url(self, filename: str, project_id: Optional[str] = None, category: Optional[str] = None) -> str:
+    def build_object_url(
+        self,
+        filename: str,
+        project_id: Optional[str] = None,
+        category: Optional[str] = None,
+    ) -> str:
         """
-        构建文件公共访问URL
+        构建不带签名的对象 URL，仅用于对象识别和公共桶访问。
 
         Args:
             filename: 文件名
 
         Returns:
-            完整的公共访问 URL
+            完整对象 URL
         """
         object_key = self.build_object_key(filename, project_id=project_id, category=category)
         return f"https://{self.bucket}.{self.endpoint}/{object_key}"
+
+    def _generate_presigned_url(self, object_key: str) -> str:
+        if not self.client:
+            raise RuntimeError("TOS SDK not available, cannot sign a private object URL")
+        import tos
+
+        result = self.client.pre_signed_url(
+            tos.HttpMethodType.Http_Method_Get,
+            self.bucket,
+            object_key,
+            expires=self.presigned_url_expires,
+        )
+        signed_url = str(getattr(result, "signed_url", "") or "").strip()
+        if not signed_url:
+            raise RuntimeError(f"TOS returned an empty presigned URL for object: {object_key}")
+        return signed_url
+
+    def _managed_object_key(self, file_url: str) -> Optional[str]:
+        normalized = str(file_url or "").strip()
+        if not normalized.startswith(("http://", "https://")):
+            return None
+        try:
+            parsed = urlparse(normalized)
+        except ValueError:
+            return None
+        if parsed.scheme not in {"http", "https"}:
+            return None
+        expected_host = f"{self.bucket}.{self.endpoint}".lower()
+        if (parsed.netloc or "").lower() != expected_host:
+            return None
+        object_key = parsed.path.lstrip("/")
+        return object_key or None
+
+    def _presigned_url_remaining_seconds(self, file_url: str) -> Optional[float]:
+        parsed = urlparse(str(file_url or "").strip())
+        query = {
+            str(key).lower(): values[0]
+            for key, values in parse_qs(parsed.query).items()
+            if values
+        }
+        signed_at = query.get("x-tos-date")
+        expires = query.get("x-tos-expires")
+        if not signed_at or not expires:
+            return None
+        try:
+            issued_at = datetime.strptime(signed_at, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            expires_at = issued_at.timestamp() + int(expires)
+            return expires_at - datetime.now(timezone.utc).timestamp()
+        except (TypeError, ValueError):
+            return None
+
+    def ensure_accessible_url(self, file_url: str) -> str:
+        """为当前私有桶 URL 生成或按需刷新 GET 签名；外部 URL 原样返回。"""
+        normalized = str(file_url or "").strip()
+        object_key = self._managed_object_key(normalized)
+        if not object_key or not self.private_bucket:
+            return normalized
+        remaining = self._presigned_url_remaining_seconds(normalized)
+        if remaining is not None and remaining > self.presigned_url_refresh_margin:
+            return normalized
+        return self._generate_presigned_url(object_key)
+
+    def refresh_urls_in_value(self, value: Any, _seen: Optional[set] = None) -> Any:
+        """递归刷新 Pydantic 模型及容器中的私有 TOS URL，并原位更新。"""
+        if isinstance(value, str):
+            return self.ensure_accessible_url(value)
+        if value is None or isinstance(value, (int, float, bool, bytes, datetime)):
+            return value
+
+        seen = _seen if _seen is not None else set()
+        value_id = id(value)
+        if value_id in seen:
+            return value
+        seen.add(value_id)
+
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                value[index] = self.refresh_urls_in_value(item, seen)
+            return value
+        if isinstance(value, dict):
+            for key, item in list(value.items()):
+                value[key] = self.refresh_urls_in_value(item, seen)
+            return value
+        model_fields = getattr(type(value), "model_fields", None)
+        if model_fields:
+            for field_name in model_fields:
+                current = getattr(value, field_name, None)
+                refreshed = self.refresh_urls_in_value(current, seen)
+                if refreshed is not current:
+                    setattr(value, field_name, refreshed)
+        return value
+
+    def build_url(
+        self,
+        filename: str,
+        project_id: Optional[str] = None,
+        category: Optional[str] = None,
+    ) -> str:
+        object_url = self.build_object_url(filename, project_id=project_id, category=category)
+        return self.ensure_accessible_url(object_url)
 
     def build_object_key(self, filename: str, project_id: Optional[str] = None, category: Optional[str] = None) -> str:
         """
@@ -145,14 +266,14 @@ class TOSService:
         category: Optional[str] = None,
     ) -> str:
         """
-        上传文件到TOS，并设置为公共读权限
+        上传文件到 TOS。私有桶保持私有 ACL，并返回有时效的读取签名 URL。
 
         Args:
             local_path: 本地文件路径
             custom_filename: 自定义文件名（可选）
 
         Returns:
-            文件的公共访问URL
+            可访问的文件 URL
         """
         if not os.path.exists(local_path):
             raise FileNotFoundError(f"文件不存在: {local_path}")
@@ -185,13 +306,13 @@ class TOSService:
                     content_type=content_type,
                 )
                 
-                # 设置对象 ACL 为公共读
-                self.client.put_object_acl(self.bucket, object_key, acl=tos.ACLType.ACL_Public_Read)
-                logger.info(f"Object ACL set to Public Read: {object_key}")
+                if not self.private_bucket:
+                    self.client.put_object_acl(self.bucket, object_key, acl=tos.ACLType.ACL_Public_Read)
+                    logger.info(f"Object ACL set to Public Read: {object_key}")
                 
-                public_url = self.build_url(filename, project_id=project_id, category=category)
-                logger.info(f"File uploaded successfully via SDK: {public_url}")
-                return public_url
+                accessible_url = self.build_url(filename, project_id=project_id, category=category)
+                logger.info(f"File uploaded successfully via SDK: {object_key}")
+                return accessible_url
             else:
                 # SDK 不可用，返回本地文件路径
                 logger.warning("TOS SDK not available, returning local file path")
@@ -211,7 +332,7 @@ class TOSService:
         category: Optional[str] = None,
     ) -> str:
         """
-        上传字节数据到TOS，并设置为公共读权限
+        上传字节数据到 TOS。私有桶保持私有 ACL，并返回有时效的读取签名 URL。
 
         Args:
             data: 文件字节数据
@@ -219,7 +340,7 @@ class TOSService:
             content_type: 内容类型（可选）
 
         Returns:
-            文件的公共访问URL
+            可访问的文件 URL
         """
         # 构建对象键
         object_key = self.build_object_key(filename, project_id=project_id, category=category)
@@ -231,15 +352,20 @@ class TOSService:
                 import tos
                 # 使用 SDK 上传
                 from io import BytesIO
-                self.client.put_object(self.bucket, object_key, content=BytesIO(data))
+                self.client.put_object(
+                    self.bucket,
+                    object_key,
+                    content=BytesIO(data),
+                    content_type=self._resolve_content_type(filename, fallback=content_type),
+                )
                 
-                # 设置对象 ACL 为公共读
-                self.client.put_object_acl(self.bucket, object_key, acl=tos.ACLType.ACL_Public_Read)
-                logger.info(f"Object ACL set to Public Read: {object_key}")
+                if not self.private_bucket:
+                    self.client.put_object_acl(self.bucket, object_key, acl=tos.ACLType.ACL_Public_Read)
+                    logger.info(f"Object ACL set to Public Read: {object_key}")
                 
-                public_url = self.build_url(filename, project_id=project_id, category=category)
-                logger.info(f"Bytes uploaded successfully via SDK: {public_url}")
-                return public_url
+                accessible_url = self.build_url(filename, project_id=project_id, category=category)
+                logger.info(f"Bytes uploaded successfully via SDK: {object_key}")
+                return accessible_url
             else:
                 # SDK 不可用
                 logger.error("TOS SDK not available, cannot upload bytes")
@@ -269,10 +395,9 @@ class TOSService:
 
         images = []
         for index, url in enumerate(image_urls, start=1):
-            logger.info(f"Downloading reference image {index} for stitching: {url}")
-            response = requests.get(url, timeout=self.request_timeout)
-            response.raise_for_status()
-            image = Image.open(io.BytesIO(response.content)).convert("RGB")
+            logger.info(f"Downloading reference image {index} for stitching")
+            content, _ = self._read_url_bytes(url)
+            image = Image.open(io.BytesIO(content)).convert("RGB")
             images.append(image)
 
         target_height = max(image.height for image in images)
@@ -312,18 +437,46 @@ class TOSService:
         category: Optional[str] = None,
     ) -> str:
         """将远程文件复制到任务目录下，统一纳入任务文件管理。"""
-        response = requests.get(source_url, timeout=self.request_timeout)
-        response.raise_for_status()
+        content, source_content_type = self._read_url_bytes(source_url)
         return self.upload_bytes(
-            response.content,
+            content,
             target_filename,
             content_type=self._resolve_content_type(
                 target_filename,
-                fallback=response.headers.get("Content-Type"),
+                fallback=source_content_type,
             ),
             project_id=project_id,
             category=category,
         )
+
+    def _read_url_bytes(self, source_url: str) -> Tuple[bytes, Optional[str]]:
+        object_key = self._managed_object_key(source_url)
+        if object_key and self.client:
+            result = self.client.get_object(self.bucket, object_key)
+            try:
+                return result.read(), getattr(result, "content_type", None)
+            finally:
+                close = getattr(result, "close", None)
+                if callable(close):
+                    close()
+
+        response = requests.get(source_url, timeout=self.request_timeout)
+        response.raise_for_status()
+        return response.content, response.headers.get("Content-Type")
+
+    def download_file(self, source_url: str, local_path: str) -> None:
+        """下载到本地；当前桶对象直接通过 SDK 读取，不依赖 URL 签名有效期。"""
+        object_key = self._managed_object_key(source_url)
+        if object_key and self.client:
+            self.client.get_object_to_file(self.bucket, object_key, local_path)
+            return
+
+        with requests.get(source_url, stream=True, timeout=self.request_timeout) as response:
+            response.raise_for_status()
+            with open(local_path, "wb") as target:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        target.write(chunk)
 
     def get_file_url(self, filename: str) -> str:
         """
@@ -333,16 +486,12 @@ class TOSService:
             filename: 文件名
 
         Returns:
-            文件的公共访问URL
+            可访问的文件 URL
         """
         return self.build_url(filename)
 
     def extract_object_key_from_url(self, file_url: str) -> Optional[str]:
-        parsed = urlparse(str(file_url or ""))
-        if parsed.scheme not in {"http", "https"}:
-            return None
-        object_key = parsed.path.lstrip("/")
-        return object_key or None
+        return self._managed_object_key(file_url)
 
     def delete_file(self, filename: str, project_id: Optional[str] = None, category: Optional[str] = None) -> bool:
         """

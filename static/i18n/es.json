@@ -1,4 +1,10 @@
 {
+  "scriptQuality": {
+    "paused": "La revisión del guion falló. Generación pausada.",
+    "restart": "Reiniciar todo el proyecto",
+    "useBest": "Continuar con el mejor borrador",
+    "summary": "Mejor borrador: ronda {round}; quedan {count} problemas."
+  },
   "meta": {
     "pageTitle": "Asistente de Video con IA"
   },

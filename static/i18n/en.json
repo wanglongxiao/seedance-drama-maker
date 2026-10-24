@@ -1,4 +1,10 @@
 {
+  "scriptQuality": {
+    "paused": "Script review failed. Generation is paused.",
+    "restart": "Restart the whole project",
+    "useBest": "Continue with the best draft",
+    "summary": "Best draft: round {round}; {count} issues remain."
+  },
   "meta": {
     "pageTitle": "AI Video Generator"
   },

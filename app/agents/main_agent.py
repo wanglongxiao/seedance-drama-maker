@@ -22,7 +22,7 @@ from app.utils.scene_identity import scene_content_fingerprint
 from app.utils.task_paths import ensure_project_temp_dir
 from app.utils.thread_pools import run_generation, run_interactive
 from app.models.schemas import VideoProject, Script, GeneratedImage, GeneratedVideo, VideoSceneState, UploadedReferenceImage
-from app.agents.script_agent import ScriptAgent
+from app.agents.script_agent import ScriptAgent, ScriptQualityExhausted
 from app.agents.image_agent import ImageAgent
 from app.agents.video_agent import VideoAgent
 from app.agents.video_review_agent import VideoReviewAgent, VideoReviewUnavailableError
@@ -1849,6 +1849,8 @@ class MainAgent:
         return await self._notify_scene_skipped(project, websocket, scene_number, resolved_reason)
 
     def can_rewrite_script(self, project: Optional[VideoProject]) -> bool:
+        if project and project.script_quality_pending:
+            return False
         if not project or not getattr(project, "script", None):
             return False
         if getattr(project, "video_review_mode", "manual") != "manual":
@@ -1912,6 +1914,8 @@ class MainAgent:
             # 返回项目，等待用户确认
             return project
 
+        except ScriptQualityExhausted:
+            raise
         except Exception as e:
             logger.error(f"Video generation failed: {str(e)}")
             project.status = "failed"
@@ -1949,6 +1953,8 @@ class MainAgent:
         if not project:
             raise ValueError(f"Project not found: {project_id}")
         self._raise_if_project_ended(project)
+        if project.script_quality_pending:
+            raise ValueError("Choose a script quality recovery option before generating videos")
 
         if not hasattr(project, 'reference_image') or not project.reference_image:
             raise ValueError(f"Reference image not found for project {project_id}")
@@ -2834,6 +2840,32 @@ class MainAgent:
             scene_state.auto_retry_count += 1
             logger.info(f"[REVIEW] Scene {scene_number} - Retrying generation ({scene_state.auto_retry_count}/{max_retries})")
 
+    async def _run_script_validation(self, project: VideoProject, method, **kwargs) -> Script:
+        self._raise_if_project_ended(project)
+        try:
+            script = await run_generation(method, **kwargs)
+        except ScriptQualityExhausted as exc:
+            self._raise_if_project_ended(project)
+            project.script_quality_report = exc.report
+            if project.auto_run:
+                project.script_quality_report["accepted"] = "auto"
+                project.script_quality_pending = False
+                project.script_quality_candidate = None
+                self.save_project_state(project.project_id)
+                return exc.best_script
+            project.script_quality_pending = True
+            project.script_quality_candidate = exc.best_script
+            project.processing_phase = ""
+            project.current_step = "script_quality_pending"
+            project.status = "waiting_script_quality_choice"
+            self.save_project_state(project.project_id)
+            raise
+        self._raise_if_project_ended(project)
+        project.script_quality_report = {}
+        project.script_quality_pending = False
+        project.script_quality_candidate = None
+        return script
+
     async def _generate_script(self, project: VideoProject) -> Script:
         """调用ScriptAgent生成剧本"""
         logger.info(f"Generating script for project {project.project_id}")
@@ -2860,7 +2892,8 @@ class MainAgent:
         
         logger.info(f"Script generation input preview: {user_input[:500]}...")
 
-        return await run_generation(
+        return await self._run_script_validation(
+            project,
             self.script_agent.generate_script,
             user_input=user_input,
             reference_images=project.reference_images,
@@ -2889,7 +2922,8 @@ class MainAgent:
 
 剧本修改要求：{edit_request}"""
 
-        script = await run_generation(
+        script = await self._run_script_validation(
+            project,
             self.script_agent.rewrite_script,
             existing_script=project.script,
             edit_request=edit_request,
@@ -2917,6 +2951,7 @@ class MainAgent:
         project.next_scene_index = 0
         project.video_scene_states = {}
         project.generated_video_seeds = []
+        self.save_project_state(project_id)
         return script
 
     async def _generate_reference_image(
@@ -3262,6 +3297,8 @@ class MainAgent:
         progress_callback: Optional[Callable[[VideoProject], Awaitable[None]]] = None,
     ) -> GeneratedImage:
         self._raise_if_project_ended(project)
+        if project.script_quality_pending:
+            raise ValueError("Choose a script quality recovery option before generating references")
         # 确保后台素材组准备任务完成，再进行参考图生成/登记。
         await self.ensure_project_prepared(project.project_id)
         active_task = self._reference_generation_tasks.get(project.project_id)
@@ -3323,6 +3360,8 @@ class MainAgent:
         - session 在最后一个实际参考图阶段完成后清理（见 `_generate_reference_image` finally）。
         """
         self._raise_if_project_ended(project)
+        if project.script_quality_pending:
+            raise ValueError("Choose a script quality recovery option before generating references")
         await self.ensure_project_prepared(project.project_id)
         stage_key = f"{project.project_id}:{stage}"
         active_task = self._reference_generation_tasks.get(stage_key)
@@ -3856,6 +3895,12 @@ class MainAgent:
         except Exception as e:
             logger.warning(f"save_project_state failed for {project_id}: {str(e)}")
 
+    @staticmethod
+    def _refresh_project_tos_urls(project: Optional[VideoProject]) -> Optional[VideoProject]:
+        if project is not None:
+            tos_service.refresh_urls_in_value(project)
+        return project
+
     def _restore_project_from_tos(self, project_id: str) -> Optional[VideoProject]:
         """内存未命中时，尝试从 TOS 快照恢复项目到内存。"""
         try:
@@ -3863,6 +3908,7 @@ class MainAgent:
             if not state_json:
                 return None
             project = VideoProject.model_validate_json(state_json)
+            self._refresh_project_tos_urls(project)
             self.projects[project_id] = project
             logger.info(f"Project {project_id} restored from TOS snapshot")
             return project
@@ -3876,7 +3922,7 @@ class MainAgent:
             return None
         project = self.projects.get(project_id)
         if project is not None:
-            return project
+            return self._refresh_project_tos_urls(project)
         return self._restore_project_from_tos(project_id)
 
     def get_project_for_read(self, project_id: str) -> Optional[VideoProject]:
@@ -3896,8 +3942,9 @@ class MainAgent:
         try:
             state_json = tos_service.get_project_state_json(project_id)
             if not state_json:
-                return in_memory
+                return self._refresh_project_tos_urls(in_memory)
             remote = VideoProject.model_validate_json(state_json)
+            self._refresh_project_tos_urls(remote)
             local_version = int(getattr(in_memory, "state_version", 0) or 0)
             remote_version = int(getattr(remote, "state_version", 0) or 0)
             if remote_version > local_version:
@@ -3910,7 +3957,7 @@ class MainAgent:
                 return remote
         except Exception as e:
             logger.warning(f"get_project_for_read TOS reconcile failed for {project_id}: {str(e)}")
-        return in_memory
+        return self._refresh_project_tos_urls(in_memory)
 
     def chat_with_user(self, message: str, project_id: str = None, output_language: Optional[str] = None) -> str:
         """处理已有项目的补充需求，不再执行旧的风格收集/预处理 LLM 对话。"""

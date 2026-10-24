@@ -95,7 +95,7 @@ function getPersistedProjectId() {
         return null;
     }
 }
-const I18N_VERSION = '20261005b';
+const I18N_VERSION = '20261024a';
 const FRONTEND_CONFIG_VERSION = '20260811c';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
@@ -532,6 +532,7 @@ function rerenderLocalizedUI() {
     }
     updateUploadedFiles();
     rerenderPreviewCards();
+    if (scriptQualityPending) showScriptQualityChoice(scriptQualityReport);
 }
 
 async function setLanguage(locale, shouldRerender = true) {
@@ -581,8 +582,88 @@ async function initI18n() {
     await setLanguage(savedLanguage, false);
 }
 
+let scriptQualityPending = false;
+let scriptQualityChoiceBusy = false;
+let scriptQualityReport = {};
+
+function scriptQualityText(report) {
+    const vars = { round: report.best_round, count: (report.issues || []).length };
+    return ['paused', 'restart', 'useBest', 'summary'].map(key => t(`scriptQuality.${key}`, vars));
+}
+
+function showScriptQualityChoice(report) {
+    scriptQualityReport = report;
+    scriptQualityPending = true;
+    isWaitingForConfirm = false;
+    pendingStep = null;
+    cancelAutoRunCountdown();
+    hideLoading();
+    if (!statusSection || scriptQualityChoiceBusy) return;
+    const text = scriptQualityText(report);
+    renderStatusBar('', 'script_quality_choice');
+    statusSection.style.flexDirection = 'column';
+    statusSection.replaceChildren();
+    const title = document.createElement('p');
+    title.textContent = text[0];
+    statusSection.appendChild(title);
+    const summary = document.createElement('p');
+    summary.textContent = text[3];
+    statusSection.appendChild(summary);
+    const issues = document.createElement('ul');
+    (report.issues || []).forEach(issue => {
+        const item = document.createElement('li');
+        item.textContent = issue;
+        issues.appendChild(item);
+    });
+    statusSection.appendChild(issues);
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;gap:12px;flex-wrap:wrap';
+    ['restart', 'use_best'].forEach((choice, index) => {
+        const button = document.createElement('button');
+        button.className = 'action-btn';
+        button.textContent = text[index + 1];
+        button.onclick = () => resolveScriptQualityChoice(choice);
+        actions.appendChild(button);
+    });
+    statusSection.appendChild(actions);
+}
+
+async function resolveScriptQualityChoice(choice) {
+    if (!scriptQualityPending || scriptQualityChoiceBusy) return;
+    scriptQualityChoiceBusy = true;
+    statusSection.querySelectorAll('button').forEach(button => button.disabled = true);
+    try {
+        const response = await fetch(`/project/${encodeURIComponent(currentProjectId)}/script-quality-choice`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ choice, client_id: wsClientId || '' }),
+        });
+        const result = await parseJsonResponse(response);
+        if (!response.ok || !result.success) throw new Error(result.error || getHttpErrorMessage(response.status));
+        scriptQualityPending = false;
+        statusSection.style.flexDirection = '';
+        hideStatusSection();
+        if (result.script) displayScript(result.script);
+        if (choice === 'restart') {
+            clearPreviewFromStep('script');
+            lastScriptData = null;
+            lastReferenceImageOutput = null;
+            lastImagesOutput = null;
+            lastFinalVideoUrl = null;
+            stepProgress = { script: 0, reference_image: 0, videos: 0, merge: 0 };
+            updateOverallProgress();
+        }
+        startStep(result.next_step);
+    } catch (error) {
+        addAgentMessage(t('messages.serverError', { error: error.message }));
+        statusSection.querySelectorAll('button').forEach(button => button.disabled = false);
+    } finally {
+        scriptQualityChoiceBusy = false;
+    }
+}
+
 function renderStatusBar(text, mode = 'info', stepName = '') {
     if (!statusSection) return;
+    if (mode !== 'script_quality_choice') statusSection.style.flexDirection = '';
 
     statusSection.dataset.mode = mode;
     statusSection.style.display = 'flex';
@@ -884,6 +965,12 @@ function applyRestoredSnapshot(snap) {
 
     hideEmptyState();
     addAgentMessage(t('messages.projectRestored'));
+    if (snap.script_quality_pending) {
+        if (snap.script) displayScript(snap.script);
+        showScriptQualityChoice(snap.script_quality_report || {});
+        startProjectReconcilePolling();
+        return;
+    }
 
     // 1) 剧本
     if (snap.script) {
@@ -1060,6 +1147,10 @@ async function reconcileProjectSnapshotOnce() {
 // 每个分支都以 DOM 是否已存在作为幂等门槛，确保健康的单实例路径不受影响。
 function reconcileUiFromSnapshot(snap) {
     if (!snap) return;
+    if (snap.script_quality_pending) {
+        showScriptQualityChoice(snap.script_quality_report || {});
+        return;
+    }
 
     // 0) 转场聊天提示优先补发：与右侧渲染解耦。
     //    云端多实例下「自动进入下一阶段：...」原本仅由实时 WS step_complete 驱动，
@@ -1180,6 +1271,10 @@ function announceAutoTransitionsFromSnapshot(snap) {
 // 实时 status/agent_output 全部丢失时右侧内容与底部状态栏空白的根因。
 function reconcileStatusBarFromSnapshot(snap) {
     if (!statusSection) return;
+    if (snap.script_quality_pending) {
+        showScriptQualityChoice(snap.script_quality_report || {});
+        return;
+    }
     if (snap.final_video_url) return; // 最终完成态由 displayFinalVideo 处理
 
     // 已有非占位内容（如实时链路的“生成中/等待确认/倒计时”）时不覆盖。
@@ -1407,6 +1502,9 @@ function handleWebSocketMessage(data) {
             hideFullscreenGenerating();
             hideLoading();
             addAgentMessage(data.data.message);
+            break;
+        case 'script_quality_choice':
+            showScriptQualityChoice(data.data);
             break;
             
         case 'pong':
@@ -2110,6 +2208,9 @@ async function sendMessage() {
             persistActiveProject(currentProjectId);
             updateProjectActionState();
             addAgentMessage(result.response);
+            if (result.script_quality_pending) {
+                showScriptQualityChoice(result.script_quality_report || {});
+            }
 
             if (result.script_updated && result.script_output) {
                 displayScript(result.script_output);
@@ -2258,6 +2359,7 @@ function clearPreviewFromStep(targetStep) {
 
 // 开始执行某一步骤
 function startStep(step) {
+    if (scriptQualityPending) return;
     currentStep = step;
 
     if (!currentProjectId) {
@@ -4649,6 +4751,8 @@ function hideLoading() {
 
 // 重置项目
 function resetProject() {
+    scriptQualityPending = false;
+    scriptQualityChoiceBusy = false;
     currentProjectId = null;
     hasDraftProject = false;
     stopVideoReconcilePolling(); // 重置项目：停止残留的视频对账轮询

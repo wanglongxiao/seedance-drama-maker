@@ -11,6 +11,7 @@ import requests
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 from app.config import config
+from app.services.tos_service import tos_service
 from app.utils.logger import get_logger
 
 logger = get_logger("asr_service")
@@ -60,6 +61,7 @@ class ASRService:
         Returns:
             (task_id, log_id) 元组
         """
+        audio_url = tos_service.ensure_accessible_url(audio_url)
         submit_url = f"{self.base_url}{self.submit_path}"
         task_id = str(uuid.uuid4())
         audio_format = kwargs.get("format") or self._get_audio_format_from_url(audio_url)

@@ -1,4 +1,10 @@
 {
+  "scriptQuality": {
+    "paused": "剧本校验未通过，后续生成已暂停",
+    "restart": "重新启动整个项目",
+    "useBest": "使用最佳候选剧本继续生成",
+    "summary": "最佳候选：第 {round} 轮；仍有 {count} 项问题。"
+  },
   "meta": {
     "pageTitle": "AI 视频生成助手"
   },

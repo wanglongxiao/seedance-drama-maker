@@ -4,9 +4,34 @@
 # Open Source Usage: attribution required; preserve this notice in redistributions.
 
 import logging
+import re
 import sys
-from typing import Optional
+from typing import Any, Optional
 from app.config import config
+
+
+_URL_QUERY_RE = re.compile(r"(https?://[^\s\"'<>?]+\?)[^\s\"'<>]+")
+
+
+def _redact_url_queries(value: Any) -> Any:
+    """Prevent temporary TOS signatures and other URL credentials from entering logs."""
+    if isinstance(value, str):
+        return _URL_QUERY_RE.sub(r"\1<redacted>", value)
+    if isinstance(value, tuple):
+        return tuple(_redact_url_queries(item) for item in value)
+    if isinstance(value, list):
+        return [_redact_url_queries(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_url_queries(item) for key, item in value.items()}
+    return value
+
+
+class _URLCredentialFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = _redact_url_queries(record.msg)
+        record.args = _redact_url_queries(record.args)
+        return True
+
 
 class AgentLogger:
     """Agent日志工具类"""
@@ -34,6 +59,7 @@ class AgentLogger:
                     config.get('logging.format', '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
                 )
                 console_handler.setFormatter(formatter)
+                console_handler.addFilter(_URLCredentialFilter())
                 logger.addHandler(console_handler)
         
         return logger

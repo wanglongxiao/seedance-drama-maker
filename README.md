@@ -107,7 +107,7 @@
 - 开通 `ModelArk` 对应模型，并获取 `apikey`
 - 开通 `Seed-Speech`，并获取 `appid` 与 `apikey`
 - 开通 `TOS`，并获取 `AK/SK`
-- 在 `TOS` 中建立你自己的公共可读存储桶 `bucket`
+- 在 `TOS` 中建立你自己的私有存储桶 `bucket`
 - 在 `config.yaml` 中配置这些服务的 `endpoint` 等非敏感项；真实的 `apikey` / `AK` / `SK` / `appid` / `bucket` 一律写入项目根目录的 `.env`
 
 ### 凭证治理规则
@@ -126,8 +126,11 @@
 BYTEPLUS_AK=your-byteplus-ak
 BYTEPLUS_SK=your-byteplus-sk
 TOS_REGION=ap-southeast-1
-TOS_BUCKET=your-public-bucket
+TOS_BUCKET=your-private-bucket
 TOS_ENDPOINT=https://tos-ap-southeast-1.bytepluses.com
+TOS_PRIVATE_BUCKET=true
+TOS_PRESIGNED_URL_EXPIRES=604800
+TOS_PRESIGNED_URL_REFRESH_MARGIN=3600
 
 # ModelArk
 MODELARK_API_KEY=your-modelark-api-key
@@ -214,6 +217,9 @@ models:
 - 相邻分镜通过动作/视线/道具/构图匹配、声桥、自然遮挡或光影呼应连贯承接；连续场景优先直接延续表演，避免模板化转场特效和每镜强行悬念
 - 叙事钩子必须来自已建立的人物选择、事件后果、部分揭示的信息、声音、道具或情绪变化，并由后续分镜兑现；视频生成阶段禁止擅加无剧情动机的黑屏、闪白、旋转、粒子、故障、连续甩镜或频繁淡入淡出
 - 剧本质量校验未通过时，脚本模型会基于上一轮完整 JSON 和具体校验结果定向修正，仅调整问题部分，不从原始需求重新生成
+- 生成、改稿与定向修正使用统一校验：检查锁定设定、结构、时长与叙事连贯性；语义审稿发现的问题需经事实复核确认，避免因继承的机位、光源或道具插镜产生误判
+- `script_generation.validation_max_rounds` 默认 `3`，包含首次生成与后续修正；已有效的导演时长计划优先保留，必要时再微调
+- 轮次耗尽后，手动模式暂停后续生成，可选择重新启动整个项目或使用最佳候选剧本继续；刷新页面可恢复待选状态。自动模式直接选择最符合要求的候选继续，按锁定设定、结构可执行性、时长与已确认问题数量排序
 - 分镜中的特殊装扮与发型变化显式写入 `character_outfits`，布景时间/天气状态显式写入 `scene_state`；两者均位于“场景描述”之前，并持久化用于后续生图/生视频
 - 服务端 `INFO` 日志仅记录模型、消息数量、Prompt/请求体长度等摘要；完整 Prompt、请求体、素材轮询结果和心跳仅在 `DEBUG` 级别输出，避免长任务产生超大日志
 
@@ -411,6 +417,7 @@ Services
 ### 关键设计点
 
 - 所有敏感凭证统一写入 `.env`，`config.yaml` 仅保留 `${VAR}` 占位符，运行时由 `app/config.py` 注入
+- TOS 对象保持私有 ACL；浏览器、模型、审核与 ASR 使用自动续签的临时 GET URL，后端复制、合成和状态快照直接通过 TOS SDK 读写
 - 前后端界面支持 `zh-CN`、`zh-TW`、`en`、`ja`、`es`；`SeeDance-2.5` 视频对白原生支持 14 种语言
 - 视频链路生成阶段统一使用 `MOV`，最终成片统一转封装为 `MP4`（`+faststart`），`TOS` 归一化 `Content-Type` 保证 Web 端正常播放
 - 项目与浏览器连接绑定，支持多标签页独立运行
@@ -474,6 +481,13 @@ http://localhost:8888
 - `.env`、`/.run/`、`*.log`、缓存目录、`/plan.md`、`/docs/` 均不进入 Git
 - README、`config.yaml`、`.env.example` 只保留占位符示例，不写入真实凭证
 - 提交前请确认测试音频、测试图片、服务日志、临时导出文件没有进入暂存区
+- 临时分享包、压缩导出、密钥文件和本地部署 JSON 均排除在 Git 与镜像上下文之外；发布前检查暂存区和历史记录，扫描只报告文件路径，不输出密钥值
+
+### 云端发布
+
+发布顺序为 `git commit → git push → 重建镜像 → 发布 veFaaS`。镜像基于已提交代码构建，包含 Python、FFmpeg/FFprobe 与字体；真实凭证通过 veFaaS 环境变量注入，禁止使用 Docker `ARG` 或 `ENV` 写入密钥。
+
+BytePlus `ap-southeast-1` 的 veFaaS 使用常驻最少 `1`、最多 `5` 个实例。新版本就绪后切换全部流量，保留上一版本用于回滚，并验证云端页面、多语言文件、私有 TOS 签名访问与发布状态。
 
 ## Prompt 与 Skill 统一管理
 

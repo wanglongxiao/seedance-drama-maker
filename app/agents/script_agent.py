@@ -3,11 +3,12 @@
 # @contact https://www.linkedin.com/in/alexwanglx/
 # Open Source Usage: attribution required; preserve this notice in redistributions.
 import ast
+import copy
 import json
 import re
 from typing import Dict, Any, List, Optional
 from app.config import config
-from app.prompt_skill import nsfw_content_requested, nsfw_enabled, render_prompt
+from app.prompt_skill import load_prompt, nsfw_content_requested, nsfw_enabled, render_prompt
 from app.services.llm_service import llm_service
 from app.utils.i18n import language_name, translate
 from app.utils.logger import get_logger
@@ -18,6 +19,15 @@ from app.utils.outfit_similarity import (
 from app.models.schemas import Script, Scene, Character, SceneDefinition
 
 logger = get_logger("script_agent")
+
+
+class ScriptQualityExhausted(ValueError):
+    """A completed quality review with a recoverable best draft."""
+
+    def __init__(self, best_script: Script, report: Dict[str, Any]):
+        self.best_script = best_script
+        self.report = report
+        super().__init__("剧本经过定向修正后仍未通过质量检查：" + "；".join(report["issues"][:3]))
 
 
 class ScriptAgent:
@@ -42,6 +52,7 @@ class ScriptAgent:
         self.max_storyboard_scenes = int(config.get('script_generation.max_storyboard_scenes', 200))
         self.temperature = config.get('models.script.temperature', 0.8)
         self.max_tokens = int(config.get('models.script.max_tokens', 120000))
+        self.validation_max_rounds = max(1, int(config.get('script_generation.validation_max_rounds', 3)))
 
     def _disallowed_duration_examples(self) -> str:
         """返回超出分镜时长范围的示例值，用于提示词约束。"""
@@ -150,11 +161,7 @@ class ScriptAgent:
         )) - 2) * 0.35)
 
         # 开头用于建立信息、结尾用于收束；中段通常承载更多动作和因果。
-        if count > 1 and index == 0:
-            score *= 0.82
-        elif count > 1 and index == count - 1:
-            score *= 0.88
-        elif count >= 3 and 0 < index < count - 1:
+        if count >= 3 and 0 < index < count - 1:
             score *= 1.08
         return max(0.1, score)
 
@@ -169,15 +176,43 @@ class ScriptAgent:
         duration_caps = [self._scene_duration_cap(scene) for scene in scenes]
         bounded_total = self._bounded_total_duration(target_total_duration)
         target = max(n * lo, min(sum(duration_caps), bounded_total))
+        try:
+            planned_durations = [int(scene.get("duration", lo)) for scene in scenes]
+        except (TypeError, ValueError):
+            planned_durations = []
+        if (
+            planned_durations and sum(planned_durations) == target
+            and all(lo <= duration <= cap
+                    for duration, cap in zip(planned_durations, duration_caps))
+            and not self._collect_duration_variation_issues(scenes)
+        ):
+            # An already valid directed plan needs no redistribution or retiming.
+            return
         extra = target - n * lo
         if extra <= 0:
             for scene in scenes:
                 scene["duration"] = lo
             return
 
-        weights = [
+        complexity_weights = [
             self._estimate_scene_complexity(scene, index, n)
             for index, scene in enumerate(scenes)
+        ]
+        # A director-designed duration is stronger evidence than prose length.
+        # Retain its rhythm and use complexity only to distribute corrections.
+        planned_extras = []
+        for scene, cap in zip(scenes, duration_caps):
+            try:
+                planned_extras.append(max(0, min(cap, int(scene.get("duration", lo))) - lo))
+            except (TypeError, ValueError):
+                planned_extras.append(0)
+        planned_total = sum(planned_extras)
+        complexity_total = sum(complexity_weights) or float(n)
+        weights = [
+            (0.75 * planned_extras[index] / planned_total
+             + 0.25 * complexity / complexity_total)
+            if planned_total else complexity
+            for index, complexity in enumerate(complexity_weights)
         ]
         total_weight = sum(weights) or float(n)
         capacities = [duration_cap - lo for duration_cap in duration_caps]
@@ -1280,48 +1315,14 @@ class ScriptAgent:
 
         # 调用大模型 - seed-sc-off，超时由 config.limits.script_llm_timeout 控制
         logger.info(f"Calling seed-sc-off for script generation with timeout {self.timeout}s")
-        max_attempts = 2
-        script_data = None
-        for attempt in range(1, max_attempts + 1):
-            response = llm_service.chat_completion(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                timeout=self.timeout
-            )
-
-            content = response['choices'][0]['message']['content']
-            self._log_raw_model_response("generate_script", attempt, content)
-            script_data = self._parse_script(content)
-            names_ok = self._validate_uploaded_reference_name_usage(script_data, uploaded_reference_images)
-            quality_ok = self._is_script_quality_acceptable(script_data, user_input)
-            if quality_ok and names_ok:
-                break
-
-            if attempt < max_attempts:
-                logger.warning(
-                    f"Script quality check failed on attempt {attempt}/{max_attempts}; requesting targeted revision"
-                )
-                feedback = self._collect_script_quality_feedback(script_data, user_input)
-                if not names_ok:
-                    feedback.append("用户上传参考图的锁定角色名或布景名未被完整保留和引用。")
-                messages.extend([
-                    {
-                        "role": "assistant",
-                        "content": self._serialize_script_for_revision(script_data),
-                    },
-                    {
-                        "role": "user",
-                        "content": self._build_quality_revision_request(feedback),
-                    },
-                ])
+        script_data = self._generate_validated_script(
+            messages, f"{user_input}\n{audio_text or ''}", target_total_duration, uploaded_reference_images,
+        )
 
         logger.info(f"Script generated with {len(script_data['scenes'])} scenes")
         logger.info(f"Script style: {script_data.get('style', 'Not specified')}")
 
-        # 在合法区间内微调各分镜时长，使总时长尽量贴近用户指定/默认的目标秒数。
-        self._fit_scene_durations_to_target(script_data['scenes'], target_total_duration)
+        # Duration and timed beats were already checked together.
         logger.info(
             f"Script total duration fitted to {sum(int(s.get('duration', 0)) for s in script_data['scenes'])}s "
             f"(target {target_total_duration}s)"
@@ -1414,48 +1415,15 @@ class ScriptAgent:
             }
         ]
 
-        max_attempts = 2
-        script_data = None
-        quality_input = f"{existing_script.title}\n{existing_script.style}\n{edit_request}"
-        for attempt in range(1, max_attempts + 1):
-            response = llm_service.chat_completion(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                timeout=self.timeout
-            )
-
-            content = response['choices'][0]['message']['content']
-            self._log_raw_model_response("rewrite_script", attempt, content)
-            script_data = self._parse_script(content)
-            names_ok = self._validate_uploaded_reference_name_usage(script_data, uploaded_reference_images)
-            quality_ok = self._is_script_quality_acceptable(script_data, quality_input)
-            if quality_ok and names_ok:
-                break
-
-            if attempt < max_attempts:
-                logger.warning(
-                    f"Script rewrite quality check failed on attempt {attempt}/{max_attempts}; requesting targeted revision"
-                )
-                feedback = self._collect_script_quality_feedback(script_data, quality_input)
-                if not names_ok:
-                    feedback.append("用户上传参考图的锁定角色名或布景名未被完整保留和引用。")
-                messages.extend([
-                    {
-                        "role": "assistant",
-                        "content": self._serialize_script_for_revision(script_data),
-                    },
-                    {
-                        "role": "user",
-                        "content": self._build_quality_revision_request(feedback),
-                    },
-                ])
+        quality_input = (
+            f"{existing_script.title}\n{existing_script.style}\n{existing_script.tone or ''}"
+            f"\n{existing_script.background}\n{edit_request}\n{audio_text or ''}"
+        )
+        script_data = self._generate_validated_script(
+            messages, quality_input, total_duration, uploaded_reference_images, "rewrite_script",
+        )
 
         logger.info(f"Script rewritten with {len(script_data['scenes'])} scenes")
-
-        # 与首次生成一致：改稿后同样把总时长微调贴近目标秒数。
-        self._fit_scene_durations_to_target(script_data['scenes'], total_duration)
 
         characters = [Character(**c) for c in script_data['characters']]
         scene_definitions = [SceneDefinition(**item) for item in script_data.get('scene_definitions', [])]
@@ -1487,6 +1455,7 @@ class ScriptAgent:
             "水墨", "油画", "水彩", "素描", "卡通", "动漫", "写实", "抽象",
             "赛博朋克", "蒸汽波", "复古", "怀旧", "未来", "科幻",
             "温馨", "治愈", "悬疑", "恐怖", "搞笑", "轻松", "史诗", "宏大",
+            "武打", "武侠", "动作", "情爱", "爱情", "冒险", "文艺", "战争", "都市",
             "黑白", "彩色", "暖色调", "冷色调", "暗调", "明亮",
             "中国风", "日式", "欧美", "韩式",
             "电影感", "纪录片", "MV", "广告",
@@ -1522,6 +1491,25 @@ class ScriptAgent:
         # 2. "30秒"（前后有分隔符或空格）
         # 3. "1分钟"、"2分钟"
         # 4. "时长1分30秒"
+
+        # Explicit totals also occur in "生成30秒短片"; do not mistake a
+        # separately specified per-scene duration for the requested total.
+        explicit = re.search(
+            r"(?:总时长|总长|全片(?:时长)?)\s*[：:]?\s*(\d+)\s*"
+            r"(分钟|分|秒)(?:\s*(\d+)\s*秒)?",
+            user_input,
+        ) or re.search(
+            r"(?:时长|生成|制作)\s*[：:]?\s*(\d+)\s*"
+            r"(分钟|分|秒)(?:\s*(\d+)\s*秒)?",
+            user_input,
+        )
+        if explicit:
+            total = int(explicit.group(1)) * (60 if explicit.group(2) != "秒" else 1)
+            if explicit.group(2) != "秒":
+                total += int(explicit.group(3) or 0)
+            if 1 <= total <= self.total_duration_max:
+                return total
+            return None
 
         # 匹配 "时长" 开头的格式
         duration_pattern1 = r'时长[：:]?\s*(\d+)\s*秒'
@@ -1586,6 +1574,7 @@ class ScriptAgent:
                 language=language_name(output_language),
             ),
         )]
+        prompt_parts.append(load_prompt("script_director_storytelling.md"))
         self._append_nsfw_script_policy(prompt_parts, *trigger_texts)
         return "\n\n".join(part for part in prompt_parts if part)
 
@@ -1617,8 +1606,8 @@ class ScriptAgent:
 
         if style_hint:
             prompt_parts.append("\n【风格要求】")
-            prompt_parts.append(f'- style 必须完全等于 "{style_hint}"')
-            prompt_parts.append("- 不得改写、补充、混搭或解释该风格")
+            prompt_parts.append(f'- 风格提示："{style_hint}"；它只是关键词摘要，不覆盖用户原文中更完整的风格与题材要求。')
+            prompt_parts.append("- style 优先保留用户明确指定的完整风格；题材须落实在行动、困境和关系变化中。")
         else:
             prompt_parts.append("\n【风格要求】")
             prompt_parts.append("用户未指定风格，请根据故事内容自动生成合适的风格")
@@ -1642,6 +1631,7 @@ class ScriptAgent:
         prompt_parts.append(f"- 目标总时长：约{effective_total_duration}秒；分镜总时长要尽量贴近该值，且不得超过{self.total_duration_max}秒。")
         prompt_parts.append(f"- 分镜时长：每个 duration 必须是 {self.scene_duration_min}-{self.scene_duration_max} 秒之间的整数，禁止输出 {self._disallowed_duration_examples()} 或更大值。")
         prompt_parts.append("- 时长分配：先按动作节点、出场人数、信息量、空间调度和情绪转折评估内容丰富度；不同丰富度的分镜不得同长，可行时最长与最短至少相差2秒。")
+        prompt_parts.append("- 按导演叙事设计检查全片累计节奏：精简纯铺陈和高潮后收束，把主要时长留给策略变化、阻碍、选择、代价与高潮；长篇不能靠重演早期剧情扩写。")
         prompt_parts.append("- 细节密度：5-9秒至少2个连续秒段，10-18秒至少3段，19-30秒至少4段；每段必须有环境空间、人物动作与细微表演、镜头、光影及明确结果。")
         prompt_parts.append(f"- 建议分镜数量：约{estimated_scene_count}个；角色最多{self.max_characters}个，布景最多{self.max_setting_definitions}个，分镜最多{self.max_storyboard_scenes}个。")
         prompt_parts.append("- 详细结构、字段顺序、角色/布景/对白/装扮/布景状态/去重/转场规则以 system prompt 为准，不在此重复。")
@@ -1662,8 +1652,7 @@ class ScriptAgent:
         style_output_rule = ""
         if style_hint:
             style_output_rule = (
-                f'【强制】style字段必须完全等于："{style_hint}"\n'
-                f'【强制】禁止添加任何其他文字到style字段'
+                "【强制】style 遵循用户原始完整风格要求，关键词提示不能删减用户指定的题材。"
             )
         prompt_parts.append("\n【输出要求】")
         if style_output_rule:
@@ -1837,6 +1826,8 @@ class ScriptAgent:
             "眼", "眉", "嘴角", "表情", "神色", "呼吸", "手", "指尖", "肩",
             "身体", "重心", "脚步", "转身", "抬头", "低头", "握", "抓", "站",
             "坐", "跪", "躺", "靠", "望", "看", "停顿", "eye", "gaze",
+            "抬", "压", "推", "拉", "移", "退", "收", "递", "拾", "掀", "抽",
+            "放", "抵", "松", "捏", "贴", "撑", "俯", "咬", "瞳", "唇",
             "breath", "hand", "shoulder", "body", "turn", "step", "look",
             "目", "視線", "呼吸", "手", "肩", "cuerpo", "mano", "mirada",
         )
@@ -1864,6 +1855,9 @@ class ScriptAgent:
                 issues.append({"scene": scene_number, "reason": "timeline_does_not_cover_duration"})
                 continue
 
+            # Camera and light can continue across timed beats. Requiring their
+            # keywords in every beat creates redundant prose and false failures.
+            visual_context = description + " " + str(scene.get("camera_angle") or "")
             for segment_index, segment in enumerate(segments):
                 if segment["end"] <= segment["start"]:
                     issues.append({"scene": scene_number, "reason": "invalid_timeline_range"})
@@ -1873,31 +1867,21 @@ class ScriptAgent:
                     break
 
                 content = self._normalize_single_line(segment["content"])
-                sentence_count = len([part for part in re.split(r"[。；;.!?！？]+", content) if part.strip()])
-                if len(content) < 48 or sentence_count < 2:
+                # Reject placeholders, without padding a clear action merely to
+                # meet a fixed sentence count. Dramatic completeness is reviewed.
+                if len(content) < 24:
                     issues.append({
                         "scene": scene_number,
                         "reason": f"segment_{segment_index + 1}_too_brief",
                     })
                     break
-                if not any(keyword in content for keyword in camera_keywords):
-                    issues.append({
-                        "scene": scene_number,
-                        "reason": f"segment_{segment_index + 1}_missing_camera",
-                    })
-                    break
-                if not any(keyword in content for keyword in performance_keywords):
-                    issues.append({
-                        "scene": scene_number,
-                        "reason": f"segment_{segment_index + 1}_missing_performance",
-                    })
-                    break
-                if not any(keyword in content for keyword in lighting_keywords):
-                    issues.append({
-                        "scene": scene_number,
-                        "reason": f"segment_{segment_index + 1}_missing_environment_feedback",
-                    })
-                    break
+            else:
+                if scene.get("characters_present") and not any(keyword in description for keyword in performance_keywords):
+                    issues.append({"scene": scene_number, "reason": "missing_performance"})
+                if not any(keyword in visual_context for keyword in camera_keywords):
+                    issues.append({"scene": scene_number, "reason": "missing_camera_design"})
+                if not any(keyword in description for keyword in lighting_keywords):
+                    issues.append({"scene": scene_number, "reason": "missing_environment_feedback"})
         return issues
 
     def _collect_duration_variation_issues(
@@ -2052,6 +2036,180 @@ class ScriptAgent:
         }
         return json.dumps(public_data, ensure_ascii=False, indent=2, default=str)
 
+    def _review_story_as_director(
+        self, script_data: Dict[str, Any], user_input: str,
+    ) -> List[str]:
+        """Review dramatic meaning across the whole story, with scene evidence."""
+        scenes = script_data.get("scenes") or []
+        if not scenes:
+            return []
+        summary = {
+            "user_request": user_input,
+            "title": script_data.get("title"),
+            "style": script_data.get("style"),
+            "tone": script_data.get("tone"),
+            "era": script_data.get("era"),
+            "background": str(script_data.get("background") or "")[:2000],
+            "characters": [
+                {key: character.get(key) for key in
+                 ("name", "personality", "identity_background")}
+                for character in script_data.get("characters") or []
+            ],
+            "scenes": [],
+        }
+        for scene in scenes:
+            segments = self._extract_description_timeline_segments(scene.get("description"))
+            # Preserve every beat, rather than dropping the middle of long stories.
+            summary["scenes"].append({
+                "scene_number": scene["scene_number"],
+                "duration": scene.get("duration"),
+                "scene_name": scene.get("scene_name"),
+                "characters_present": scene.get("characters_present"),
+                "mood": scene.get("mood"),
+                "dialogue": str(scene.get("dialogue") or "")[:1600],
+                "beats": [segment["content"][:650] for segment in segments]
+                or [str(scene.get("description") or "")[:2000]],
+            })
+        response = llm_service.chat_completion(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": load_prompt("script_director_review.md")},
+                {"role": "user", "content": json.dumps(summary, ensure_ascii=False)},
+            ],
+            temperature=0.2,
+            max_tokens=4096,
+            response_format={"type": "json_object"},
+            thinking={"type": "disabled"},
+        )
+        content = response["choices"][0]["message"]["content"]
+        try:
+            review = json.loads(self._extract_json_object(content) or content)
+            issues = review["issues"]
+            if not isinstance(issues, list):
+                raise ValueError("issues must be an array")
+            numbers = {scene["scene_number"] for scene in scenes}
+            categories = {"continuity", "repetition", "pacing", "tone", "genre", "payoff"}
+            feedback = []
+            for issue in issues[:6]:
+                if not isinstance(issue, dict):
+                    raise ValueError("director finding must be an object")
+                cited = issue.get("scenes")
+                if (
+                    issue.get("category") not in categories
+                    or not isinstance(cited, list) or not cited
+                    or any(type(number) is not int or number not in numbers for number in cited)
+                    or not isinstance(issue.get("evidence"), str) or not issue["evidence"].strip()
+                    or not isinstance(issue.get("fix"), str) or not issue["fix"].strip()
+                ):
+                    raise ValueError("director finding lacks valid scene evidence")
+                feedback.append(
+                    f"导演审稿[{issue['category']}] 分镜 {','.join(map(str, cited))}："
+                    f"{issue['evidence'][:700]}；修正：{issue['fix'][:700]}"
+                )
+            if feedback:
+                verdict_response = llm_service.chat_completion(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": load_prompt("script_director_verdict.md")},
+                        {"role": "user", "content": json.dumps(
+                            {"script": summary, "candidate_issues": issues[:6]},
+                            ensure_ascii=False,
+                        )},
+                    ],
+                    temperature=0.0, max_tokens=1024,
+                    response_format={"type": "json_object"},
+                    thinking={"type": "disabled"},
+                )
+                verdict_content = verdict_response["choices"][0]["message"]["content"]
+                verdict = json.loads(self._extract_json_object(verdict_content) or verdict_content)
+                confirmed = verdict["confirmed"]
+                if (
+                    not isinstance(confirmed, list)
+                    or any(type(index) is not int or not 0 <= index < len(feedback)
+                           for index in confirmed)
+                    or len(set(confirmed)) != len(confirmed)
+                ):
+                    raise ValueError("director verdict has invalid finding indexes")
+                feedback = [feedback[index] for index in confirmed]
+            logger.info("Director review completed: scenes=%s findings=%s", len(scenes), len(feedback))
+            return feedback
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("导演审稿未返回有效的分镜证据，请重试剧本生成。") from exc
+
+    def _generate_validated_script(
+        self, messages: List[Dict[str, Any]], user_input: str,
+        target_duration: int, uploaded_reference_images: List[Any] = None,
+        stage: str = "generate_script",
+    ) -> Dict[str, Any]:
+        """Keep the best usable draft when configured quality rounds are exhausted."""
+        target_duration = self._bounded_total_duration(target_duration)
+        best = None
+        best_rank = None
+        rounds = []
+        for attempt in range(1, self.validation_max_rounds + 1):
+            response = llm_service.chat_completion(
+                model=self.model, messages=messages, temperature=self.temperature,
+                max_tokens=self.max_tokens, timeout=self.timeout,
+            )
+            content = response["choices"][0]["message"]["content"]
+            self._log_raw_model_response(stage, attempt, content)
+            data = self._parse_script(content)
+            names_ok = self._validate_uploaded_reference_name_usage(data, uploaded_reference_images)
+            # Validate what will actually be returned, including retimed beat boundaries.
+            self._fit_scene_durations_to_target(data["scenes"], target_duration)
+            quality_ok = self._is_script_quality_acceptable(data, user_input)
+            feedback = self._collect_script_quality_feedback(data, user_input) if not quality_ok else []
+            if not names_ok:
+                feedback.append("用户上传参考图的锁定角色名或布景名未被完整保留和引用。")
+            actual_duration = sum(int(scene["duration"]) for scene in data["scenes"])
+            if abs(actual_duration - target_duration) > max(2, target_duration * 0.05):
+                feedback.append(
+                    f"当前可执行总时长为 {actual_duration} 秒，目标为 {target_duration} 秒；"
+                    "请调整分镜数量和有效动作节拍，使总时长可达；"
+                    "不能把短剧情拉长、重复，也不能省略中段关键发展。"
+                )
+            if quality_ok and names_ok and not feedback:
+                feedback.extend(self._review_story_as_director(data, user_input))
+            if quality_ok and names_ok and not feedback:
+                return data
+            if not feedback:
+                feedback = ["程序质量校验未通过，请复核结构与内容。"]
+            # Prefer preserved references and executable structure, then duration
+            # accuracy and fewer evidenced story problems. Ties keep the earlier draft.
+            rank = (int(names_ok), int(quality_ok),
+                    int(abs(actual_duration - target_duration) <= max(2, target_duration * 0.05)),
+                    -len(feedback), -abs(actual_duration - target_duration))
+            rounds.append({"round": attempt, "issues": list(feedback)})
+            try:
+                candidate = Script(
+                    **{key: data[key] for key in ("title", "style", "background", "characters", "scenes")},
+                    era=data.get("era"), tone=data.get("tone"),
+                    scene_definitions=data.get("scene_definitions", []),
+                    total_duration=actual_duration,
+                )
+            except (ValueError, TypeError, KeyError):
+                candidate = None
+            if candidate is not None and candidate.scenes and (best_rank is None or rank > best_rank):
+                best_rank = rank
+                best = (copy.deepcopy(candidate), attempt, list(feedback))
+            if attempt == self.validation_max_rounds:
+                if best is not None:
+                    raise ScriptQualityExhausted(best[0], {
+                        "max_rounds": self.validation_max_rounds, "best_round": best[1],
+                        "issues": best[2], "rounds": rounds,
+                    })
+                raise ValueError(
+                    "剧本经过定向修正后仍未通过质量检查，请调整需求后重试："
+                    + "；".join(feedback[:3])
+                )
+            logger.warning("Script needs targeted revision: stage=%s attempt=%s findings=%s",
+                           stage, attempt, len(feedback))
+            messages.extend([
+                {"role": "assistant", "content": self._serialize_script_for_revision(data)},
+                {"role": "user", "content": self._build_quality_revision_request(feedback)},
+            ])
+        raise RuntimeError("Unreachable script validation state")
+
     def _build_quality_revision_request(self, feedback: List[str]) -> str:
         """Build an edit request grounded in concrete validation findings."""
         findings = feedback or ["程序质量校验未通过，请逐项复核所有硬性规则。"]
@@ -2064,7 +2222,8 @@ class ScriptAgent:
             f"【程序校验结果与修正建议】\n{numbered_findings}\n\n"
             "【修正规则】\n"
             "1. 优先修正上述失败项，保留未涉及问题的剧情结构、角色、布景、风格、"
-            "对白和镜头内容。\n"
+            "对白和镜头内容；若失败项涉及整段重复、因果缺口或中段薄弱，允许合并、替换、"
+            "重排相关分镜并重分配时长，而不是只换词修饰，保持核心设定和已成立的事实。\n"
             "2. 修正一处时必须同步维护 duration、description 秒段边界、总时长及相邻分镜承接，"
             "不得引入新的矛盾。\n"
             "3. 最终仍需返回修正后的完整剧本 JSON，而不是补丁、局部片段、解释或重新创作说明。"
@@ -2089,7 +2248,8 @@ class ScriptAgent:
         normalized_input = (user_input or "").lower()
         allows_empty_dialogue = any(
             phrase in normalized_input
-            for phrase in ["不生成对话", "不要对话", "只生成旁白", "no dialogue", "narration only"]
+            for phrase in ["不生成对话", "不要对话", "无对白", "无对话", "默片", "只生成旁白",
+                           "no dialogue", "no speech", "silent film", "narration only"]
         )
         if not allows_empty_dialogue and not any(
             str(scene.get("dialogue") or "").strip() for scene in scenes
@@ -2131,16 +2291,8 @@ class ScriptAgent:
                 "请保持上一秒段及上一分镜的裸露层级，或先完整写出拿起衣物并穿好/扣好/系好的连续动作，"
                 "再在后续秒段或下一分镜切换为穿衣造型。"
             )
-        for issue in self._collect_duplicate_scene_issues(scenes)[:10]:
-            feedback.append(
-                f"分镜 {issue.get('scene_a')} 与 {issue.get('scene_b')} 的 "
-                f"{issue.get('field')} 高度重复；保留承接关系并改出新的剧情结果。"
-            )
-        for issue in self._collect_adjacent_redundancy_issues(scenes)[:10]:
-            feedback.append(
-                f"相邻分镜 {issue.get('scene_a')} -> {issue.get('scene_b')} 重复前镜内容；"
-                "下一镜应先响应前镜结果，再推进新动作或信息。"
-            )
+        # Wording similarity is only advisory; evidence-based director review
+        # decides whether a reprise actually repeats an already completed arc.
         for issue in self._collect_intrusive_transition_issues(scenes)[:10]:
             reason = issue.get("reason")
             if reason == "meta_transition_language":
@@ -2251,7 +2403,8 @@ class ScriptAgent:
         normalized_input = (user_input or "").lower()
         user_explicitly_allows_empty_dialogue = any(
             phrase in normalized_input
-            for phrase in ["不生成对话", "不要对话", "只生成旁白", "no dialogue", "narration only"]
+            for phrase in ["不生成对话", "不要对话", "无对白", "无对话", "默片", "只生成旁白",
+                           "no dialogue", "no speech", "silent film", "narration only"]
         )
         if not user_explicitly_allows_empty_dialogue:
             non_empty_dialogues = sum(
@@ -2313,25 +2466,25 @@ class ScriptAgent:
         if duplicate_issues:
             for issue in duplicate_issues[:5]:
                 logger.warning(
-                    "Script quality check failed: scene %s and scene %s are too similar (%s=%.2f)",
+                    "Script similarity advisory: scene %s and scene %s share wording (%s=%.2f)",
                     issue["scene_a"],
                     issue["scene_b"],
                     issue["field"],
                     issue["similarity"],
                 )
-            return False
+            # Similar wording can be a meaningful reprise. The director review
+            # distinguishes repetition without progress from a changed payoff.
 
         adjacent_redundancy_issues = self._collect_adjacent_redundancy_issues(scenes)
         if adjacent_redundancy_issues:
             for issue in adjacent_redundancy_issues[:5]:
                 logger.warning(
-                    "Script quality check failed: adjacent scene %s -> %s repeats prior content (%s=%.2f)",
+                    "Script similarity advisory: adjacent scene %s -> %s shares wording (%s=%.2f)",
                     issue["scene_a"],
                     issue["scene_b"],
                     issue["field"],
                     issue["similarity"],
                 )
-            return False
 
         characters = script_data.get('characters') or []
         character_keys = {
@@ -3653,55 +3806,12 @@ class ScriptAgent:
         """
         logger.log_agent_call("ScriptAgent", "refine_script")
 
-        messages = [
-            {
-                "role": "system",
-                "content": self._get_system_prompt(
-                    "zh-CN",
-                    current_script.total_duration,
-                    current_script.json(),
-                    feedback,
-                )
-            },
-            {
-                "role": "user",
-                "content": f"请修改以下剧本：\n\n当前剧本：{current_script.json()}\n\n修改意见：{feedback}\n\n请输出修改后的完整剧本JSON，确保剧情连贯不跳跃。"
-            }
-        ]
-
-        # 调用 seed-sc-off 修改剧本，超时由 config.limits.script_llm_timeout 控制
-        logger.info(f"Calling seed-sc-off for script refinement with timeout {self.timeout}s")
-        response = llm_service.chat_completion(
-            model=self.model,
-            messages=messages,
-            temperature=0.8,
-            max_tokens=self.max_tokens,
-            timeout=self.timeout
-        )
-
-        content = response['choices'][0]['message']['content']
-        self._log_raw_model_response("refine_script", 1, content)
-        script_data = self._parse_script(content)
-        characters = [Character(**c) for c in script_data['characters']]
-        scene_definitions = [SceneDefinition(**item) for item in script_data.get('scene_definitions', [])]
-        scenes = [Scene(**s) for s in script_data['scenes']]
-
-        return Script(
-            title=script_data['title'],
-            style=script_data['style'],
-            era=script_data.get('era'),
-            background=script_data['background'],
-            tone=script_data.get('tone'),
-            characters=characters,
-            scene_definitions=scene_definitions,
-            scenes=scenes,
-            total_duration=sum(s.duration for s in scenes)
-        )
+        return self.rewrite_script(current_script, feedback)
 
     def _log_raw_model_response(self, stage: str, attempt: int, content: str) -> None:
-        logger.info("Script model raw response (%s, attempt %s) BEGIN", stage, attempt)
-        logger.info("%s", str(content or ""))
-        logger.info("Script model raw response (%s, attempt %s) END", stage, attempt)
+        logger.info("Script model response: stage=%s attempt=%s chars=%s",
+                    stage, attempt, len(content or ""))
+        logger.debug("Script model raw response (%s, attempt %s): %s", stage, attempt, content)
 
     def _fallback_scene_name_from_description(self, description: str, index: int) -> str:
         cleaned = re.sub(r'\s+', ' ', str(description or '').strip())

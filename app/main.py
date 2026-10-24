@@ -21,6 +21,7 @@ from app.utils.logger import get_logger
 from app.utils.task_paths import ensure_project_temp_dir, cleanup_project_temp_dir
 from app.utils.thread_pools import run_interactive, run_generation, shutdown_pools
 from app.agents.main_agent import main_agent
+from app.agents.script_agent import ScriptQualityExhausted
 from app.services.asset_library_service import asset_library_service
 from app.services.tos_service import tos_service
 from app.services.asr_service import asr_service
@@ -542,6 +543,12 @@ async def chat(
         
     except Exception as e:
         logger.error(f"Chat failed: {str(e)}")
+        if isinstance(e, ScriptQualityExhausted):
+            return {
+                "success": True, "project_id": project_id,
+                "response": str(e), "script_quality_pending": True,
+                "script_quality_report": e.report,
+            }
         return {
             "success": False,
             "error": translate(ui_language, "chat.error", error=str(e))
@@ -626,6 +633,8 @@ async def restore_project_snapshot(project_id: str):
             "output_language": lang,
             "video_review_mode": getattr(project, "video_review_mode", "manual") or "manual",
             "script": project.script.dict() if getattr(project, "script", None) else None,
+            "script_quality_pending": project.script_quality_pending,
+            "script_quality_report": project.script_quality_report,
             "reference_output": (
                 main_agent._build_reference_output(project) if reference_ready else None
             ),
@@ -1310,6 +1319,9 @@ async def rollback_step(request: Request):
         # 清空剧本（如果是退回剧本）
         if target_step == 'script':
             project.script = None
+            project.script_quality_pending = False
+            project.script_quality_candidate = None
+            project.script_quality_report = {}
 
         # 清空参考图（如果是退回参考图或更早）
         if target_index <= step_order.index('reference_image'):
@@ -1639,6 +1651,70 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(client_id, websocket)
 
 
+async def _script_quality_blocks_generation(client_id, project) -> bool:
+    if project and project.script_quality_pending:
+        await manager.send_message(client_id, {
+            "type": "script_quality_choice", "data": project.script_quality_report,
+        })
+        return True
+    return False
+
+
+@app.post("/project/{project_id}/script-quality-choice")
+async def resolve_script_quality_choice(project_id: str, request: Request):
+    data = await request.json()
+    client_id = data.get("client_id")
+    access_error = validate_project_client_access(project_id, client_id)
+    if access_error:
+        return {"success": False, "error": access_error}
+    project = main_agent.get_project_for_read(project_id)
+    if not project or project.is_ended:
+        return {"success": False, "error": "Project unavailable"}
+    if not project.script_quality_pending or not project.script_quality_candidate:
+        return {"success": False, "error": "No script quality choice is pending"}
+    choice = data.get("choice")
+    if choice not in {"restart", "use_best"}:
+        return {"success": False, "error": "Invalid script quality choice"}
+    # A pending script decision precedes all downstream generation.
+    if project.processing_phase:
+        return {"success": False, "error": "Project is already processing"}
+    project.script_quality_pending = False
+    if choice == "restart":
+        project.script = None
+        project.script_quality_report = {}
+        project.current_step = "script"
+        project.status = "restarting"
+        project.progress = 0
+        project.reference_image = None
+        project.images = []
+        project.videos = []
+        project.final_video_url = None
+        project.character_reference_images = []
+        project.scene_reference_images = []
+        project.character_outfit_images = []
+        project.scene_state_images = []
+        project.reference_image_library = {}
+        project.scene_reference_mappings = {}
+        project.video_scene_states = {}
+        project.generated_video_seeds = []
+        project.next_scene_index = 0
+        project.reference_stage = "none"
+        project.regenerating_scene_numbers = []
+        next_step = "script"
+    else:
+        project.script = project.script_quality_candidate
+        main_agent._normalize_project_scene_number_sequence(project)
+        project.script_quality_report["accepted"] = "manual"
+        project.current_step = "script_generated"
+        project.status = "script_generated"
+        project.progress = max(project.progress, 25)
+        next_step = "reference_image"
+    project.script_quality_candidate = None
+    main_agent.save_project_state(project_id)
+    return {"success": True, "next_step": next_step,
+            "script": project.script.model_dump() if project.script else None}
+
+
 async def execute_step_with_websocket(client_id: str, project_id: str, step: str, review_mode: Optional[str] = None):
     """执行步骤并通过WebSocket发送更新"""
     websocket = get_reconnecting_websocket(client_id)
@@ -1662,6 +1738,11 @@ async def execute_step_with_websocket(client_id: str, project_id: str, step: str
         })
         return
     lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
+    if project.script_quality_pending:
+        await manager.send_message(client_id, {
+            "type": "script_quality_choice", "data": project.script_quality_report,
+        })
+        return
     
     try:
         # 根据步骤执行相应的Agent
@@ -1683,6 +1764,10 @@ async def execute_step_with_websocket(client_id: str, project_id: str, step: str
                 "data": {"message": translate(lang, "error.step_execute_failed", error=f"unknown step: {step}")}
             })
             
+    except ScriptQualityExhausted as e:
+        await manager.send_message(client_id, {
+            "type": "script_quality_choice", "data": e.report,
+        })
     except Exception as e:
         logger.error(f"Step execution failed: {str(e)}")
         await manager.send_message(client_id, {
@@ -1694,6 +1779,8 @@ async def execute_step_with_websocket(client_id: str, project_id: str, step: str
 async def execute_script_step(client_id: str, project_id: str):
     """执行剧本生成步骤"""
     project = main_agent.get_project(project_id)
+    if await _script_quality_blocks_generation(client_id, project):
+        return
     lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
     # 阶段开始即置位并持久化：云端多实例下即使本次 status/progress 推送丢失，
     # 其它实例的快照对账也能据此补出「剧本生成中」的底部状态栏。
@@ -1749,6 +1836,8 @@ async def execute_script_step(client_id: str, project_id: str):
 async def execute_images_step(client_id: str, project_id: str):
     """执行图片生成步骤（两步流程：先生成参考图库，用户确认后再生成分镜）"""
     project = main_agent.get_project(project_id)
+    if await _script_quality_blocks_generation(client_id, project):
+        return
     lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
     
     # ========== 第一步：生成参考图库==========
@@ -1886,6 +1975,8 @@ async def execute_reference_stage(client_id: str, project_id: str, stage: str):
     若为 category2 但实际无变体资产，直接进入视频阶段。
     """
     project = main_agent.get_project(project_id)
+    if await _script_quality_blocks_generation(client_id, project):
+        return
     lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
     meta = _REFERENCE_STAGE_META.get(stage, _REFERENCE_STAGE_META["category1"])
 
@@ -1997,6 +2088,8 @@ async def continue_generate_after_reference_confirmation(client_id: str, project
         return
 
     project = main_agent.get_project(project_id)
+    if await _script_quality_blocks_generation(client_id, project):
+        return
     if not project:
         await manager.send_message(client_id, {
             "type": "error",
@@ -2218,6 +2311,8 @@ async def regenerate_reference_image(client_id: str, project_id: str):
 async def execute_videos_step(client_id: str, project_id: str, review_mode: Optional[str] = None):
     """执行视频生成步骤 - 简化版本，直接使用参考图"""
     project = main_agent.get_project(project_id)
+    if await _script_quality_blocks_generation(client_id, project):
+        return
     lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
 
     # 检查是否有参考图
@@ -2270,6 +2365,8 @@ async def execute_videos_step(client_id: str, project_id: str, review_mode: Opti
 async def execute_merge_step(client_id: str, project_id: str):
     """执行视频合成步骤"""
     project = main_agent.get_project(project_id)
+    if await _script_quality_blocks_generation(client_id, project):
+        return
     lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
 
     total_scenes = len(getattr(getattr(project, "script", None), "scenes", []) or [])

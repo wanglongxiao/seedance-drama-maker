@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Added a director review for generated and revised scripts, with scene evidence for cause and effect, repeated story beats, pacing, tone, genre, and ending payoff.
+- Check candidate findings against the script before requesting edits. Allow implied actions, object inserts, and continuing camera and light setups without padding descriptions to a fixed sentence count.
+- Preserve planned scene timing instead of rewarding longer prose. Configure generation and revision review rounds with `script_generation.validation_max_rounds` (3 total rounds by default).
+- When review rounds run out, manual mode pauses for a choice to restart the project or continue with the best draft; automatic mode continues with the best draft. Pending choices and findings persist across page refreshes.
+- Added genre-specific story guidance with optional hooks, and fixed total-duration parsing and silent-script validation.
+- Removed tests for exact prompt wording, frontend version strings, logic copied into tests, and duplicate cases. Kept behavior tests for generation, script recovery, asset binding, review, merging, and cloud recovery.
+
 ## \[2.0.0] - 2026-08-16
 
 ### Added
@@ -17,6 +26,7 @@
 - Improved thread-pool isolation by separating interactive requests from generation tasks, reducing upload and state-restore starvation during multi-window concurrent generation.
 - Improved outfit/backdrop variant deduplication and explicit scene binding. Ongoing adult scenes can inherit the previous scene's outfit state, while character-consistency review prefers the current scene's outfit references.
 - Improved service logging by moving heartbeats, asset polling, and complete model request bodies to `DEBUG`; `INFO` now keeps compact request summaries to prevent rapid log growth during long jobs.
+- Switched TOS access to private buckets: uploads no longer receive public-read ACLs, browsers and external models use automatically refreshed temporary URLs, backend downloads and copies use the TOS SDK directly, and signed query parameters are removed from logs.
 
 ### Fixed
 

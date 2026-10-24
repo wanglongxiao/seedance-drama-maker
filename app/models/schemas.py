@@ -162,6 +162,9 @@ class VideoProject(BaseModel):
     reference_images: List[str] = Field(default_factory=list)
     audio_url: Optional[str] = None
     script: Optional[Script] = None
+    script_quality_report: Dict[str, Any] = Field(default_factory=dict)
+    script_quality_pending: bool = False
+    script_quality_candidate: Optional[Script] = None
     images: List[GeneratedImage] = Field(default_factory=list)
     videos: List[GeneratedVideo] = Field(default_factory=list)
     final_video_url: Optional[str] = None

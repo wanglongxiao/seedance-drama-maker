@@ -100,12 +100,17 @@ tos:
   bucket: "${TOS_BUCKET}"
   endpoint: "${TOS_ENDPOINT:-https://tos-ap-southeast-1.bytepluses.com}"
   uploads_dir: "uploads"
+  # 私有桶：上传对象保持 private ACL，对外读取使用短期签名 URL
+  private_bucket: "${TOS_PRIVATE_BUCKET:-true}"
+  # TOS GET 签名最长有效期为 7 天；到期前 1 小时自动刷新
+  presigned_url_expires: "${TOS_PRESIGNED_URL_EXPIRES:-604800}"
+  presigned_url_refresh_margin: "${TOS_PRESIGNED_URL_REFRESH_MARGIN:-3600}"
   temp_dir: "/tmp/aw-videobot-sd2"   # 本地任务临时目录根路径；每个任务在其下创建唯一子目录
   request_timeout: 300      # TOS 上传/下载请求超时（秒）
   socket_timeout: 300       # TOS 上传/下载数据传输超时（秒）
   connection_timeout: 300   # TOS 建连超时（秒）
-  # 生成的文件将保存到此 bucket，权限设置为公共可读
-  # 文件URL格式: https://{bucket}.{endpoint-host}/uploads/{filename}
+  # 对象 URL 格式：https://{bucket}.{endpoint-host}/uploads/{filename}
+  # 私有桶返回的实际访问 URL 会附带 X-Tos-* 临时签名参数
 
 # 视频生成配置
 video_generation:
@@ -160,6 +165,7 @@ video_review:
 
 # 剧本生成约束
 script_generation:
+  validation_max_rounds: 3   # 生成与改稿的校验总轮数（含首次生成）
   max_characters: 30         # 剧本中的主要人物/角色最多 30 人
   max_setting_definitions: 30  # 剧本中的布景设定最多 30 个
   max_storyboard_scenes: 200  # 剧本分镜数量上限
@@ -194,7 +200,7 @@ server:
 
 merge:
   # 临时拼接裁帧逻辑开关：on=开启，off=关闭
-  temporary_edge_trim: "on"
+  temporary_edge_trim: "off"
   # 前一段视频末尾裁掉的帧数
   trim_previous_end_frames: 2
   # 后一段视频开头裁掉的帧数
