@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--function-name", default="seedance-drama-maker-v3")
     parser.add_argument("--service-id", help="Reuse a previously created gateway service")
     parser.add_argument("--builder", default="dmbuilder")
+    parser.add_argument("--upload-mode", choices=("resumable", "buildx"), default="resumable")
     parser.add_argument("--state-file", type=Path, default=ROOT / ".run/deployment-v3.json")
     args = parser.parse_args()
     state_path = args.state_file
@@ -91,6 +92,7 @@ def main():
         raise RuntimeError("Registry login failed; raw output withheld")
     with tempfile.TemporaryDirectory(prefix="seedance-release-") as temporary, \
          tempfile.TemporaryDirectory(prefix="seedance-model-cache-") as model_context:
+        Path(model_context).chmod(0o755)
         archive = subprocess.check_output(["git", "archive", "HEAD"], cwd=ROOT)
         subprocess.run(["tar", "-xf", "-", "-C", temporary], input=archive, check=True)
         local_models = Path(env.get("WHISPER_CACHE_DIR") or "~/.cache/whisper").expanduser()
@@ -102,10 +104,22 @@ def main():
                     os.link(source, target)
                 except OSError:
                     shutil.copy2(source, target)
-        subprocess.run(["docker", "buildx", "build", "--builder", args.builder,
+        build = ["docker", "buildx", "build", "--builder", args.builder,
                         "--platform", "linux/amd64", "--tag", image, "--label",
                         f"org.opencontainers.image.revision={sha}", "--build-context",
-                        f"whisper-cache={model_context}", "--push", temporary], check=True)
+                        f"whisper-cache={model_context}"]
+        if args.upload_mode == "resumable":
+            oci_archive = Path(temporary) / "image.oci.tar"
+            build += ["--provenance=false", "--output",
+                      f"type=oci,dest={oci_archive},oci-mediatypes=false", temporary]
+            subprocess.run(build, check=True)
+            subprocess.run([os.sys.executable, ROOT / "scripts/publish_oci.py",
+                "--registry", args.registry, "--repository", f"{args.namespace}/seedance-drama-maker",
+                "--tag", f"git-{sha[:12]}", "--archive", oci_archive,
+                "--profile", args.profile, "--region", args.region,
+                "--state-file", state_path.parent / "oci-upload-checkpoint.json"], check=True)
+        else:
+            subprocess.run(build + ["--push", temporary], check=True)
     print("Image published:", image, flush=True)
     state.update(commit=sha, image=image)
     save()

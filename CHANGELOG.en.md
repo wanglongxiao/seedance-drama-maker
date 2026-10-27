@@ -10,6 +10,7 @@
 - Cloud setup uses 1–5 instances, an HTTPS API gateway, shared signed access cookies, HTTP/WebSocket authentication and TOS snapshot recovery. Local access stays open by default.
 - Updated all five UI languages, 13px download links, centered single-line progress and static cache versions.
 - Scan source, staged files and Git history before release. Build from committed source; exclude secrets, logs, tests, IDE files and local output. Redact keys, endpoints and signed URLs from logs.
+- Large images upload in 4 MiB chunks by default, save resume progress and refresh authentication to recover from network interruptions.
 
 - Added a director review for generated and revised scripts, with scene evidence for cause and effect, repeated story beats, pacing, tone, genre, and ending payoff.
 - Check candidate findings against the script before requesting edits. Allow implied actions, object inserts, and continuing camera and light setups without padding descriptions to a fixed sentence count.

@@ -564,6 +564,8 @@ The deployment script enables `RUNTIME_SMOKE_ENABLED=true`. After login, `POST /
 
 Builds can reuse local Whisper checkpoints. Only `small.pt` and `large-v3-turbo.pt` enter a separate build context, and Whisper checks their official SHA256 values. Missing models download automatically. User directories and other local files are never copied.
 
+By default, builds export an OCI archive and upload in 4 MiB Registry v2 chunks, save resume progress, refresh authentication and skip existing layers. Transport errors print their type only, without tokens or upload signatures. The private `.run/oci-upload-checkpoint.json` uses mode 600 and stays outside Git and the image. Use `--upload-mode buildx` for a normal push on a stable network.
+
 ## Open Source Rules
 
 - Copyright (c) 2026 Alex Wang
