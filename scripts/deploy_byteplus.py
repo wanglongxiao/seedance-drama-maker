@@ -31,8 +31,12 @@ def main():
     parser.add_argument("--upload-mode", choices=("resumable", "buildx"), default="resumable")
     parser.add_argument("--reuse-published-image", action="store_true",
                         help="Resume without rebuilding when all image inputs match the published commit")
+    parser.add_argument("--reuse-runtime-layers", action="store_true",
+                        help="Build fresh app code on the published runtime after validating unchanged dependencies")
     parser.add_argument("--state-file", type=Path, default=ROOT / ".run/deployment-v3.json")
     args = parser.parse_args()
+    if args.reuse_published_image and args.reuse_runtime_layers:
+        parser.error("Choose published-image reuse or runtime-layer reuse")
     state_path = args.state_file
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
@@ -65,6 +69,16 @@ def main():
     remote = subprocess.check_output(["git", "ls-remote", "origin", "refs/heads/main"], cwd=ROOT).decode()
     if not remote.startswith(sha):
         raise RuntimeError("Push this commit to origin/main before building")
+    runtime_base = None
+    if args.reuse_runtime_layers:
+        runtime_commit = state.get("commit")
+        runtime_base = state.get("image")
+        if not runtime_commit or not runtime_base:
+            raise RuntimeError("No published runtime image in deployment state")
+        runtime_inputs = ["Dockerfile", "requirements.txt", "requirements-video-tools.txt", "runtime"]
+        changed = subprocess.run(["git", "diff", "--quiet", runtime_commit, sha, "--", *runtime_inputs], cwd=ROOT)
+        if changed.returncode:
+            raise RuntimeError("Runtime inputs changed; rebuild without --reuse-runtime-layers")
     subprocess.run([os.sys.executable, ROOT / "scripts/audit_secrets.py"], check=True, cwd=ROOT)
     env_path = ROOT / ".env"
     env = dotenv_values(env_path)
@@ -88,6 +102,9 @@ def main():
                      WHISPER_CACHE_DIR="/opt/whisper-models", VIDEO_OUTPUT_DIR="/tmp/seedance-outputs",
                      REMOTION_BROWSER_EXECUTABLE="/usr/bin/chromium", RUNTIME_SMOKE_ENABLED="true")
     registry_host = f"{args.registry}-{args.region}.cr.bytepluses.com"
+    if runtime_base and runtime_base != (
+            f"{registry_host}/{args.namespace}/seedance-drama-maker:git-{runtime_commit[:12]}"):
+        raise RuntimeError("Published runtime does not match this registry, repository and commit")
     image_sha = state.get("commit") if args.reuse_published_image else sha
     if args.reuse_published_image:
         inputs = ["Dockerfile", ".dockerignore", "app", "static", "config.yaml", "run.sh",
@@ -112,7 +129,7 @@ def main():
             archive = subprocess.check_output(["git", "archive", "HEAD"], cwd=ROOT)
             subprocess.run(["tar", "-xf", "-", "-C", temporary], input=archive, check=True)
             local_models = Path(env.get("WHISPER_CACHE_DIR") or "~/.cache/whisper").expanduser()
-            for name in ("small.pt", "large-v3-turbo.pt"):
+            for name in (() if runtime_base else ("small.pt", "large-v3-turbo.pt")):
                 source = local_models / name
                 if source.is_file() and not source.is_symlink():
                     target = Path(model_context) / name
@@ -124,6 +141,17 @@ def main():
                             "--platform", "linux/amd64", "--tag", image, "--label",
                             f"org.opencontainers.image.revision={sha}", "--build-context",
                             f"whisper-cache={model_context}"]
+            if runtime_base:
+                # Remove old application trees first, including files deleted in
+                # the new commit. Never carry stale source into the new release.
+                dockerfile = Path(temporary) / "runtime.Dockerfile"
+                dockerfile.write_text(
+                    f"FROM {runtime_base}\nWORKDIR /app\n"
+                    "RUN rm -rf /app/app /app/static\n"
+                    "COPY app ./app\nCOPY static ./static\n"
+                    "COPY config.yaml run.sh ./\nRUN chmod +x run.sh\n")
+                build += ["--file", str(dockerfile)]
+                print("Reusing validated runtime layers:", runtime_commit[:12], flush=True)
             if args.upload_mode == "resumable":
                 oci_archive = Path(temporary) / "image.oci.tar"
                 build += ["--provenance=false", "--output",
