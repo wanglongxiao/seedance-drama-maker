@@ -6,14 +6,16 @@ Requires official bp CLI, Docker buildx, python-dotenv, and a configured bp prof
 import argparse
 import json
 import os
-from pathlib import Path
 import re
 import secrets
 import shutil
 import subprocess
 import tempfile
 import time
+from pathlib import Path
+
 from dotenv import dotenv_values, set_key
+from rebase_oci import rebase_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,6 +39,8 @@ def main():
     args = parser.parse_args()
     if args.reuse_published_image and args.reuse_runtime_layers:
         parser.error("Choose published-image reuse or runtime-layer reuse")
+    if args.reuse_runtime_layers and args.upload_mode != "resumable":
+        parser.error("Runtime reuse requires resumable upload")
     state_path = args.state_file
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
@@ -129,7 +133,7 @@ def main():
             archive = subprocess.check_output(["git", "archive", "HEAD"], cwd=ROOT)
             subprocess.run(["tar", "-xf", "-", "-C", temporary], input=archive, check=True)
             local_models = Path(env.get("WHISPER_CACHE_DIR") or "~/.cache/whisper").expanduser()
-            for name in (() if runtime_base else ("small.pt", "large-v3-turbo.pt")):
+            for name in ("small.pt", "large-v3-turbo.pt"):
                 source = local_models / name
                 if source.is_file() and not source.is_symlink():
                     target = Path(model_context) / name
@@ -141,22 +145,15 @@ def main():
                             "--platform", "linux/amd64", "--tag", image, "--label",
                             f"org.opencontainers.image.revision={sha}", "--build-context",
                             f"whisper-cache={model_context}"]
-            if runtime_base:
-                # Remove old application trees first, including files deleted in
-                # the new commit. Never carry stale source into the new release.
-                dockerfile = Path(temporary) / "runtime.Dockerfile"
-                dockerfile.write_text(
-                    f"FROM {runtime_base}\nWORKDIR /app\n"
-                    "RUN rm -rf /app/app /app/static\n"
-                    "COPY app ./app\nCOPY static ./static\n"
-                    "COPY config.yaml run.sh ./\nRUN chmod +x run.sh\n")
-                build += ["--file", str(dockerfile)]
-                print("Reusing validated runtime layers:", runtime_commit[:12], flush=True)
             if args.upload_mode == "resumable":
                 oci_archive = Path(temporary) / "image.oci.tar"
                 build += ["--provenance=false", "--output",
                           f"type=oci,dest={oci_archive},oci-mediatypes=false", temporary]
                 subprocess.run(build, check=True)
+                if runtime_base:
+                    thin_archive = Path(temporary) / "release.oci.tar"
+                    rebase_runtime(oci_archive, thin_archive, runtime_base, runtime_commit, sha)
+                    oci_archive = thin_archive
                 subprocess.run([os.sys.executable, ROOT / "scripts/publish_oci.py",
                     "--registry", args.registry, "--repository", f"{args.namespace}/seedance-drama-maker",
                     "--tag", f"git-{sha[:12]}", "--archive", oci_archive,

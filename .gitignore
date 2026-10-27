@@ -57,3 +57,4 @@ temp/
 !/scripts/bundle_video_skills.py
 !/scripts/deploy_byteplus.py
 !/scripts/publish_oci.py
+!/scripts/rebase_oci.py

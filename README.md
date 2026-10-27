@@ -489,7 +489,7 @@ BytePlus `ap-southeast-1` 的 veFaaS 使用常驻最少 `1`、最多 `5` 个实�
 
 若镜像已发布，仅修改部署脚本或文档，可加 `--reuse-published-image` 继续部署。脚本会比较 Dockerfile、应用、skills、静态页面、配置和依赖等构建输入；任何输入发生变化都会拒绝复用。状态分别记录镜像源码 commit 与部署脚本 commit。
 
-仅修改应用代码时，可使用 `--reuse-runtime-layers`：先校验已发布 commit 的 Dockerfile、Python 依赖和 Node runtime 与当前源码一致，再复用已发布运行时层并覆盖新应用、静态文件与配置。构建会先清空旧应用目录，避免已删除的文件继续出现在运行目录；依赖变化时拒绝此模式，必须完整重建。它仍发布当前提交的新镜像，不可与 `--reuse-published-image` 同时使用。
+仅修改应用代码时，可使用 `--reuse-runtime-layers`：先校验已发布 commit 的 Dockerfile、Python 依赖和 Node runtime 与当前源码一致，再校验镜像配置、构建指令与依赖层摘要，直接复用仓库中已发布的运行时层，仅上传新应用、静态文件与配置层，避免重复传输 Whisper 模型。应用层从当前源码完整构建，已删除文件不会残留；依赖变化时拒绝此模式，必须完整重建。它要求 resumable 上传，仍发布当前提交的新镜像，不可与 `--reuse-published-image` 同时使用。
 
 新函数先完成 `Release`，等待状态为 `done`，再设置 `MinInstance=1` / `MaxInstance=5`；平台不允许对尚未发布的函数调整保留实例。
 
