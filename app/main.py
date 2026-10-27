@@ -80,6 +80,21 @@ async def runtime_capabilities():
     from app.services.runtime_service import capabilities
     return await run_interactive(capabilities)
 
+
+runtime_smoke_lock = asyncio.Lock()
+
+
+@app.post("/api/runtime/smoke")
+async def runtime_smoke():
+    """Opt-in deployment check using synthetic media, never user input."""
+    if os.getenv("RUNTIME_SMOKE_ENABLED", "").lower() != "true":
+        raise HTTPException(status_code=404, detail="not found")
+    if runtime_smoke_lock.locked():
+        raise HTTPException(status_code=409, detail="runtime check already running")
+    from app.services.runtime_service import smoke
+    async with runtime_smoke_lock:
+        return await run_generation(smoke)
+
 # 存储WebSocket连接和等待状态
 websocket_connections: Dict[str, WebSocket] = {}
 step_confirmations: Dict[str, asyncio.Event] = {}

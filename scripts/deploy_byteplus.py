@@ -80,7 +80,7 @@ def main():
                      ACCESS_SECRET=env["CLOUD_ACCESS_SECRET"], ACCESS_COOKIE_SECURE="true",
                      VIDEO_SKILLS_ROOT="/app/app/video_skills", VIDEO_TOOLS_RUNTIME_DIR="/opt/video-tools",
                      WHISPER_CACHE_DIR="/opt/whisper-models", VIDEO_OUTPUT_DIR="/tmp/seedance-outputs",
-                     REMOTION_BROWSER_EXECUTABLE="/usr/bin/chromium")
+                     REMOTION_BROWSER_EXECUTABLE="/usr/bin/chromium", RUNTIME_SMOKE_ENABLED="true")
     registry_host = f"{args.registry}-{args.region}.cr.bytepluses.com"
     image = f"{registry_host}/{args.namespace}/seedance-drama-maker:git-{sha[:12]}"
     credentials = api("cr", "GetAuthorizationToken", {"Registry": args.registry})
@@ -108,6 +108,7 @@ def main():
                       Description=f"Seedance Drama Maker v3.0 GitHub {sha[:12]}")
     if function_id:
         api("vefaas", "UpdateFunction", dict(Id=function_id,
+            SourceAccessConfig={"Username": credentials["Username"], "Password": credentials["Token"]},
             **{k: v for k, v in parameters.items() if k != "Command"}))
     else:
         created = api("vefaas", "CreateFunction",

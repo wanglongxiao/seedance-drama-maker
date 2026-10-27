@@ -560,6 +560,8 @@ Cloud settings include `BYTEPLUS_AK/SK`, `TOS_*`, `MODELARK_*`, five model `*_EN
 
 `/healthz` returns health and version only. Authenticated `/api/runtime` reports tools and skills without secrets. Run `python -m app.services.runtime_service --smoke` inside the image to check actual editing, captions, timeline lint, both Whisper models, audio and duration. WebSocket delivery is local to its instance; snapshot polling covers updates made by other instances. Restarting interrupted jobs after instance removal and arbitrating concurrent writes still need a job queue and shared locks; TOS snapshots alone do not provide them.
 
+The deployment script enables `RUNTIME_SMOKE_ENABLED=true`. After login, `POST /api/runtime/smoke` runs the same synthetic media check on the actual cloud instance, cleans its temporary files and makes no paid generation calls. Each instance allows one check at a time. Set the flag to `false` to disable this diagnostic endpoint.
+
 ## Open Source Rules
 
 - Copyright (c) 2026 Alex Wang

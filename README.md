@@ -555,6 +555,8 @@ BytePlus `ap-southeast-1` 的 veFaaS 使用常驻最少 `1`、最多 `5` 个实�
 
 `/healthz` 只返回健康状态与版本；登录后的 `/api/runtime` 返回不含密钥的依赖和 skills 就绪状态。镜像内可用 `python -m app.services.runtime_service --smoke` 验证实际剪辑、字幕渲染、时间线 lint、两种 Whisper 模型及音轨/时长。WebSocket 推送为实例内路由，跨实例通过快照轮询补齐；实例回收后的在途任务重启和跨实例写入仲裁仍需要任务队列与共享锁，TOS 快照本身不是分布式任务队列。
 
+部署脚本显式启用 `RUNTIME_SMOKE_ENABLED=true`，可登录后 `POST /api/runtime/smoke` 在真实云端执行同一套合成测试，使用临时合成媒体并自动清理，不调用付费生成模型。同一实例只允许一项该检查同时运行；设置为 `false` 可关闭此诊断端点。
+
 ## Prompt 与 Skill 统一管理
 
 - 可复用的 LLM prompt、图像/视频生成约束、审核规则与脚本生成规则统一存放在 `app/prompt_skill/*.md`
