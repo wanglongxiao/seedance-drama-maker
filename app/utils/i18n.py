@@ -17,11 +17,11 @@ SUPPORTED_OUTPUT_LANGUAGES: Dict[str, str] = {
 
 BACKEND_TRANSLATIONS = {
     "progress.optimize.generating": {
-        "zh-CN": "正在优化视频并匹配音轨字幕…",
-        "zh-TW": "正在最佳化影片並配對音軌字幕…",
-        "en": "Optimizing video and matching soundtrack subtitles…",
-        "ja": "動画を最適化し、音声に合わせて字幕を作成しています…",
-        "es": "Optimizando el video y creando subtítulos del audio…",
+        "zh-CN": "正在审核、剪辑并同步字幕…",
+        "zh-TW": "正在審核、剪輯並同步字幕…",
+        "en": "Reviewing, editing and syncing subtitles…",
+        "ja": "動画を審査・編集し、字幕を音声に同期しています…",
+        "es": "Revisando, editando y sincronizando subtítulos…",
     },
     "progress.optimize.completed": {
         "zh-CN": "视频优化与字幕完成。",

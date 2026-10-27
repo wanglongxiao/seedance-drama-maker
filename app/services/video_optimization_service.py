@@ -60,6 +60,15 @@ def fast_triage_enabled():
     return bool(config.get("video_optimization.fast_triage", True))
 
 
+def scene_sources_key(project):
+    """Signed URL refreshes keep identity; scene replacements invalidate it."""
+    return hashlib.sha256(json.dumps([
+        (v.scene_number, urlparse(v.url).netloc.lower(), urlparse(v.url).path,
+         getattr(v, "duration", None), getattr(v, "scene_content_hash", None))
+        for v in sorted(getattr(project, "videos", []), key=lambda v: v.scene_number)
+    ]).encode()).hexdigest()
+
+
 def triage_report(report):
     """One observed fault gets one cut/retain/repair decision without another LLM call."""
     result = copy.deepcopy(report)
@@ -502,6 +511,30 @@ class VideoOptimizationService:
         return target
 
     def scene_timeline(self, project, duration, check_active):
+        check_active()
+        previous = getattr(project, "optimization_report", None) or {}
+        old_timeline = previous.get("scene_timeline", [])
+        old_duration = previous.get("input_duration")
+        numbers = sorted(v.scene_number for v in project.videos)
+        try:
+            valid = (previous.get("scene_sources_sha256") == scene_sources_key(project)
+                     and old_duration > 0 and math.isfinite(old_duration)
+                     and bool(old_timeline) and len(set(numbers)) == len(numbers)
+                     and [r["scene_number"] for r in old_timeline] == numbers
+                     and abs(old_timeline[0]["start"]) < .001
+                     and abs(old_timeline[-1]["end"] - old_duration) < .001
+                     and all(math.isfinite(r["start"]) and math.isfinite(r["end"])
+                             and 0 <= r["start"] < r["end"] <= old_duration + .001
+                             for r in old_timeline)
+                     and all(abs(before["end"] - after["start"]) < .001
+                             for before, after in zip(old_timeline, old_timeline[1:])))
+        except (KeyError, TypeError, ValueError):
+            valid = False
+        if valid:
+            logger.info("[OPTIMIZE] Reused verified scene timeline: scenes=%s", len(old_timeline))
+            return [dict(scene_number=r["scene_number"],
+                         start=r["start"] * duration / old_duration,
+                         end=r["end"] * duration / old_duration) for r in old_timeline]
         cache = ensure_project_temp_subdir(project.project_id, "optimization", "sources")
         clips = []
         for video in sorted(project.videos, key=lambda item: item.scene_number):
@@ -1256,6 +1289,7 @@ class VideoOptimizationService:
             picture.unlink(missing_ok=True)
 
     def render_subtitles(self, source, target, segments, info, directory):
+        started = time.monotonic()
         runtime = Path(str(config.get("video_skills.runtime_dir"))).expanduser()
         renderer = runtime / "subtitle-renderer"
         renderer.mkdir(exist_ok=True)
@@ -1288,7 +1322,8 @@ class VideoOptimizationService:
                 if page_break and next_word:
                     line_start, line_length = float(next_word["start"]), 0
         props = {"source": name, "width": int(video["width"]), "height": int(video["height"]),
-                 "fps": 25, "durationInFrames": math.ceil(duration*25), "captions": captions}
+                 "fps": 25, "durationInFrames": math.ceil(duration*25), "captions": captions,
+                 "subtitleRenderer": config.get("video_optimization.subtitle_renderer", "ffmpeg")}
         props_file = directory / "caption-props.json"
         props_file.write_text(json.dumps(props, ensure_ascii=False))
         rendered = directory / "caption-rendered.mp4"
@@ -1308,9 +1343,26 @@ class VideoOptimizationService:
             (public / name).unlink(missing_ok=True)
             rendered.unlink(missing_ok=True)
         (directory / "captions.json").write_text(json.dumps(captions, ensure_ascii=False, indent=2))
+        metrics = {"renderer": props["subtitleRenderer"],
+                   "elapsed_seconds": round(time.monotonic() - started, 3),
+                   "caption_tokens": len(captions)}
+        logger.info("[OPTIMIZE] subtitles renderer=%s elapsed=%.3fs tokens=%s",
+                    metrics["renderer"], metrics["elapsed_seconds"], len(captions))
+        return metrics
 
     def optimize(self, project, check_active, review_only=False, report_progress=None):
-        notify = report_progress or (lambda *args: None)
+        started = time.monotonic()
+        stage_starts, stage_seconds = {}, {}
+        def notify(stage, status):
+            now = time.monotonic()
+            if status == "running":
+                stage_starts.setdefault(stage, now)
+            elif stage in stage_starts:
+                elapsed = now - stage_starts.pop(stage)
+                stage_seconds[stage] = round(stage_seconds.get(stage, 0) + elapsed, 3)
+                logger.info("[OPTIMIZE] stage=%s status=%s elapsed=%.3fs", stage, status, elapsed)
+            if report_progress:
+                report_progress(stage, status)
         fast = fast_triage_enabled()
         check_active()
         notify("source", "running")
@@ -1375,8 +1427,10 @@ class VideoOptimizationService:
                   "pending_faults_sha256": hashlib.sha256(json.dumps(
                       pending_faults, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
                   "pending_faults": pending_faults,
+                  "scene_sources_sha256": scene_sources_key(project),
                   "scene_timeline": timeline, "edit_settings": settings.model_dump(),
                   "dialect_audit": transcript.get("dialect_audit", []),
+                  "stage_seconds": stage_seconds,
                   "subtitle_source": transcript.get("subtitle_source", "whisper"),
                   "subtitle_corrections": subtitle_corrections, "audio_repairs": audio_repairs,
                   "transcription_warning": transcript.get("cloud_asr_error"),
@@ -1470,6 +1524,7 @@ class VideoOptimizationService:
                     report["review_status"], len(issues), len(cuts), review_only)
         (directory/"optimization-checkpoint.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
         if review_only:
+            report["elapsed_seconds"] = round(time.monotonic() - started, 3)
             return None, report
         notify("edit", "running")
         if settings.scene_order:
@@ -1504,7 +1559,7 @@ class VideoOptimizationService:
                     shutil.copyfile(previous, previous.with_name(f"{previous.stem}-{suffix}{previous.suffix}"))
         if settings.subtitles:
             notify("subtitles", "running")
-            self.render_subtitles(edited, final, mapped, info, directory)
+            report["subtitle_render"] = self.render_subtitles(edited, final, mapped, info, directory)
             notify("subtitles", "completed")
         else:
             shutil.copyfile(edited, final)
@@ -1517,8 +1572,10 @@ class VideoOptimizationService:
         if abs(float(output_info["format"]["duration"]) - expected) > .25:
             raise RuntimeError("Rendered timeline duration does not match edit plan")
         content_id = hashlib.sha256(final.read_bytes()).hexdigest()[:12]
+        upload_started = time.monotonic()
         url = tos_service.upload_file(str(final), custom_filename=f"optimized-{content_id}.mp4",
                                       project_id=project.project_id, category="videos/final")
+        stage_seconds["video_upload"] = round(time.monotonic() - upload_started, 3)
         check_active()
         notify("final_review", "running")
         try:
@@ -1550,13 +1607,21 @@ class VideoOptimizationService:
                       subtitle_count=sum("-->" in line for line in (directory/"subtitles.srt").read_text().splitlines()),
                       local_video=str(final), local_subtitles=str(directory/"subtitles.srt"))
         report["repair_history"] = project.optimization_history
+        upload_started = time.monotonic()
         report["subtitle_url"] = tos_service.upload_file(str(directory/"subtitles.srt"),
             custom_filename="subtitles.srt", project_id=project.project_id, category="videos/final")
+        stage_seconds["subtitle_upload"] = round(time.monotonic() - upload_started, 3)
         check_active()
+        report["elapsed_before_report_upload_seconds"] = round(time.monotonic() - started, 3)
         public_report = {k: v for k, v in report.items() if not k.startswith("local_") and not k.endswith("_url")}
+        upload_started = time.monotonic()
         report["report_url"] = tos_service.upload_bytes(json.dumps(public_report, ensure_ascii=False, indent=2).encode(),
             filename="optimization-report.json", content_type="application/json",
             project_id=project.project_id, category="videos/final")
+        stage_seconds["report_upload"] = round(time.monotonic() - upload_started, 3)
+        report["elapsed_seconds"] = round(time.monotonic() - started, 3)
+        logger.info("[OPTIMIZE] completed elapsed=%.3fs stages=%s",
+                    report["elapsed_seconds"], stage_seconds)
         check_active()
         (directory / "optimization-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
         return url, report

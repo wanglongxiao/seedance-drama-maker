@@ -1,6 +1,7 @@
 """Inspect and smoke-test the shipped media tools without model API calls."""
 import importlib.metadata
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -28,10 +29,14 @@ def capabilities():
     tools = {name: bool(shutil.which(name)) for name in ("ffmpeg", "ffprobe", "node")}
     tools["hyperframes"] = (runtime / "node_modules/hyperframes/dist/cli.js").is_file()
     tools["remotion"] = (runtime / "node_modules/@remotion/renderer/package.json").is_file()
-    tools["chromium"] = bool(shutil.which("chromium") or shutil.which("google-chrome"))
+    browser = os.getenv("REMOTION_BROWSER_EXECUTABLE", "")
+    tools["chromium"] = bool(shutil.which("chromium") or shutil.which("google-chrome")
+        or (browser and Path(browser).is_file())
+        or Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome").is_file())
     cached = {name: (models / file).is_file() for name, file in
               (("small", "small.pt"), ("turbo", "large-v3-turbo.pt"))}
     return {"version": __version__, "tools": tools, "python": packages,
+            "subtitle_renderer": config.get("video_optimization.subtitle_renderer", "ffmpeg"),
             "whisper_models": cached, "stages": skills,
             "ready": all(tools.values()) and all(packages.values()) and all(cached.values())
                      and all(skills.values())}
@@ -58,7 +63,7 @@ def smoke():
         assert abs(float(info["format"]["duration"]) - 1.5) < .15
         lint = service.export_timeline(source, root, [(0, .75), (1.25, 2)], probe(source), True)
         final = root / "captioned.mp4"
-        service.render_subtitles(edited, final,
+        subtitle_render = service.render_subtitles(edited, final,
             [{"start": .1, "end": .7, "text": "Runtime ready.", "words": [
                 {"start": .1, "end": .4, "word": "Runtime"}, {"start": .4, "end": .7, "word": " ready."}]}],
             info, root)
@@ -66,6 +71,15 @@ def smoke():
         final_info = probe(final)
         assert any(s["codec_type"] == "audio" for s in final_info["streams"])
         assert abs(float(final_info["format"]["duration"]) - 1.5) < .15
+        import subprocess
+        frame = subprocess.run(["ffmpeg", "-v", "error", "-ss", "0.3", "-i", str(final),
+            "-frames:v", "1", "-pix_fmt", "gray", "-f", "rawvideo", "-"],
+            capture_output=True, check=True).stdout
+        assert (np.frombuffer(frame, dtype=np.uint8) > 180).sum() > 5
+        def audio(path):
+            return subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a:0",
+                "-c", "copy", "-f", "adts", "-"], capture_output=True, check=True).stdout
+        assert audio(edited) == audio(final)
         for name in ("small", "turbo"):
             model = whisper.load_model(name, device="cpu",
                 download_root=str(Path(config.get("video_optimization.whisper_cache_dir")).expanduser()))
@@ -75,6 +89,7 @@ def smoke():
             del model
         return {"passed": True, "edit_duration": float(info["format"]["duration"]),
                 "caption_duration": float(final_info["format"]["duration"]), "timeline_lint": lint,
+                "subtitle_render": subtitle_render, "audio_preserved": True, "subtitle_visible": True,
                 "whisper": ["small", "turbo"]}
 
 

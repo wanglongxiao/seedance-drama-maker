@@ -2,7 +2,7 @@
   "optimization": {
     "taskSummary": "视频优化进度：{done}/{total} 项已处理",
     "roundLabel": "第 {round} 轮", "fragmentLabel": "分镜 {scene} · {start}–{end} 秒",
-    "taskNames": {"triage":"判断关键剧情与局部评分","source":"载入母片与时间轴","transcribe":"识别真实音轨","audio_review":"独立核对异常旁白","audio_edit":"修复局部音轨","review":"审核视频","confirm":"独立确认问题","repair_plan":"安排剪除与必要补拍","fragment_prepare":"准备补片与衔接参考","fragment":"重新生成视频片段","fragment_review":"独立复核补片","replace":"替换问题片段","edit":"剪辑与光影匹配","subtitles":"生成并渲染字幕","final_review":"整片复审"},
+    "taskNames": {"triage":"判断关键剧情与局部评分","source":"载入母片与时间轴","transcribe":"识别真实音轨","audio_review":"独立核对异常旁白","audio_edit":"修复局部音轨","review":"审核视频","confirm":"独立确认问题","repair_plan":"安排剪除与必要补拍","fragment_prepare":"准备补片与衔接参考","fragment":"重新生成视频片段","fragment_review":"独立复核补片","replace":"替换问题片段","edit":"剪辑与光影匹配","subtitles":"同步音轨并合成字幕","final_review":"整片复审"},
     "taskStates": {"queued":"等待中","running":"处理中","completed":"已完成","needs_review":"待检查","unavailable":"审核不可用","failed":"失败","budget_exhausted":"已达补拍次数"},
     "finalConfirm": "独立确认成片问题",
     "fragmentSelect": "选择补片有效动作",

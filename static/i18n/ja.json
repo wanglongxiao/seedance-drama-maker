@@ -2,7 +2,7 @@
   "optimization": {
     "taskSummary": "動画最適化：{done}/{total} 項目を処理",
     "roundLabel": "第 {round} 回", "fragmentLabel": "シーン {scene} · {start}–{end}秒",
-    "taskNames": {"triage":"物語の重要度と部分品質を判断","source":"元動画と時間軸を読み込み","transcribe":"実際の音声を文字起こし","audio_review":"不要なナレーションを確認","audio_edit":"部分音声を修復","review":"動画を審査","confirm":"問題を個別確認","repair_plan":"カットと必要な補修を計画","fragment_prepare":"補修映像と接続参照を準備","fragment":"部分映像を再生成","fragment_review":"補修映像を個別審査","replace":"問題の映像を置換","edit":"編集と光の調整","subtitles":"字幕を作成・描画","final_review":"完成動画を再審査"},
+    "taskNames": {"triage":"物語の重要度と部分品質を判断","source":"元動画と時間軸を読み込み","transcribe":"実際の音声を文字起こし","audio_review":"不要なナレーションを確認","audio_edit":"部分音声を修復","review":"動画を審査","confirm":"問題を個別確認","repair_plan":"カットと必要な補修を計画","fragment_prepare":"補修映像と接続参照を準備","fragment":"部分映像を再生成","fragment_review":"補修映像を個別審査","replace":"問題の映像を置換","edit":"編集と光の調整","subtitles":"音声に同期した字幕を合成","final_review":"完成動画を再審査"},
     "taskStates": {"queued":"待機中","running":"処理中","completed":"完了","needs_review":"要確認","unavailable":"審査利用不可","failed":"失敗","budget_exhausted":"再生成上限"},
     "finalConfirm": "完成動画の問題を個別確認",
     "fragmentSelect": "補修映像の有効な動作を選択",

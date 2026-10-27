@@ -276,7 +276,7 @@ video_optimization:
   native_chinese_asr: true  # 中文/粤语对白优先原生词级 ASR，失败回退 Whisper
   remove_prompt_narration: true  # 无对白镜头中朗读制作说明，须由两种 ASR 确认后局部修复音轨
   whisper_device: "cpu"
-  subtitle_renderer: "remotion"
+  subtitle_renderer: "ffmpeg"  # Remotion 字幕分页/SRT + FFmpeg 静态字幕合成；可切回 remotion 逐帧渲染
   max_review_rounds: 3
   max_repair_scenes_per_round: 4
   max_repair_fragments_per_round: 8

@@ -2,7 +2,7 @@
   "optimization": {
     "taskSummary": "Video optimization: {done}/{total} tasks processed",
     "roundLabel": "Round {round}", "fragmentLabel": "Scene {scene} · {start}–{end}s",
-    "taskNames": {"triage":"Judge story importance and local quality","source":"Load master and timeline","transcribe":"Transcribe actual audio","audio_review":"Verify unintended narration","audio_edit":"Repair local audio","review":"Review video","confirm":"Confirm faults independently","repair_plan":"Plan cuts and essential repairs","fragment_prepare":"Prepare patch and boundary references","fragment":"Regenerate video fragment","fragment_review":"Review patch independently","replace":"Replace faulty fragments","edit":"Edit and match lighting","subtitles":"Create and render subtitles","final_review":"Review final film"},
+    "taskNames": {"triage":"Judge story importance and local quality","source":"Load master and timeline","transcribe":"Transcribe actual audio","audio_review":"Verify unintended narration","audio_edit":"Repair local audio","review":"Review video","confirm":"Confirm faults independently","repair_plan":"Plan cuts and essential repairs","fragment_prepare":"Prepare patch and boundary references","fragment":"Regenerate video fragment","fragment_review":"Review patch independently","replace":"Replace faulty fragments","edit":"Edit and match lighting","subtitles":"Sync and add subtitles to the soundtrack","final_review":"Review final film"},
     "taskStates": {"queued":"Queued","running":"Processing","completed":"Done","needs_review":"Needs review","unavailable":"Review unavailable","failed":"Failed","budget_exhausted":"Repair limit reached"},
     "finalConfirm": "Confirm final film findings",
     "fragmentSelect": "Select the corrected patch action",

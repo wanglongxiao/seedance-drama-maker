@@ -25,7 +25,7 @@ A multi-agent AI video system that turns text, images or voice input into short 
 
 Workflow: input → script → character and backdrop references → scene generation and review → merge → optimization and subtitles.
 
-video-use and vlog-auto-edit guide editing; media-use handles assets; HyperFrames builds the timeline; openai-whisper transcribes audio; remotion-captions and remotion-render create subtitles and export video. The system supports faulty-fragment cuts, local reshoots, lighting correction and final review, preserving original audio and exporting videos, subtitles and review reports.
+video-use and vlog-auto-edit guide editing; media-use handles assets; HyperFrames builds the timeline; openai-whisper transcribes audio; remotion-captions groups subtitles, FFmpeg adds them quickly, and remotion-render supports frame rendering. The system supports faulty-fragment cuts, local reshoots, lighting correction and final review, preserving original audio and exporting videos, subtitles and review reports.
 
 ## Showcase
 
@@ -505,6 +505,10 @@ The deployment script enables `RUNTIME_SMOKE_ENABLED=true`. After login, `POST /
 Cloud verification on 2026-10-27 took 45.54 seconds: editing and caption rendering both produced a 1.52-second video, timeline lint found no errors, and small/turbo inference passed. All five UI languages switched in Chrome without page errors. Authenticated WebSocket connections worked. The application rejects unauthenticated handshakes with 403; the platform proxy may report HTTP 200 for that failed handshake, which still cannot upgrade to WebSocket.
 
 A real Chrome run on the same day generated a 60-second English romantic adventure sample. Its three scenes passed their first reviews with scores of 83/86/88. After fixing the minor-fault retry loop, optimization took about 201 seconds in one round and passed final review. The original and optimized films were 60.171 and 60.200 seconds at 854×480; both played in the browser without page errors. Acceptable minor caption errors remain as advice. This sample does not establish flawless automatic output for every prompt.
+
+Video optimization now defaults to `video_optimization.subtitle_renderer: ffmpeg`. Remotion still groups captions and creates SRT; FFmpeg adds static subtitles without browser decoding and drawing for every frame. Set `remotion` to use the original frame renderer. A local comparison using the same 60-second film and caption input took 112.14 seconds versus 4.48 seconds, with identical SRT text and timestamps. Full local optimization took 79.27 seconds, passed final review, preserved decoded audio, and kept the 60.171-second duration. This includes first-time scene downloads, transcription and upload; results from different machines or cache conditions are not directly comparable.
+
+Optimization reports record processing and upload times. Verified scene timelines persist in project snapshots: renewing signed URLs keeps the cache, while changed scene addresses, numbers, durations or content identifiers invalidate it. Subtitle rendering keeps the input frame rate and original audio. With no caption pages, it copies the video stream. Local media regressions cover landscape and portrait video, five subtitle languages, audio and frame counts.
 
 Builds can reuse local Whisper checkpoints. Only `small.pt` and `large-v3-turbo.pt` enter a separate build context, and Whisper checks their official SHA256 values. Missing models download automatically. User directories and other local files are never copied.
 

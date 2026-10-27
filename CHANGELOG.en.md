@@ -2,6 +2,8 @@
 
 ## [3.0.0] - 2026-10-27
 
+- Default subtitles now use Remotion grouping/SRT and FFmpeg rendering. The same 60-second sample rendered locally in 4.48 seconds versus 112.14 seconds. Keep original audio, input frame rate, final review and the optional Remotion frame renderer.
+- Reuse verified scene timelines and invalidate them when footage changes. Reports include processing and upload times. Added local landscape/portrait, five-language subtitle, audio/frame-count and cache-invalidation checks; refreshed five locale labels and cache versions.
 - Shortened both project overviews; removed unused ending-frame, transition, image-stitching and video-run code plus an obsolete test. Removed duplicate payload and raw model debug output. Keep docs and tests local, retain demo assets in GitHub, and exclude caches and debug output from releases.
 - Added post-merge optimization with local cuts, parallel short repairs, independent patch reviews, original audio, lighting matching, timed subtitles and final review.
 - One fast review judges story importance, local score and viewer acceptance. Cut noncritical faults first; reshoot critical faults only below 40 when clearly unacceptable.
