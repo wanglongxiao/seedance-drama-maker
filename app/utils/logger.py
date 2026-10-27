@@ -100,12 +100,12 @@ class AgentLogger:
     def log_llm_input(self, model: str, prompt: str):
         """记录LLM输入"""
         if self.enabled and self.log_llm_io:
-            self.logger.debug(f"[LLM INPUT] Model: {model} | Prompt: {prompt[:500]}...")
+            self.logger.debug("[LLM INPUT] Model: %s | Characters: %s", model, len(prompt or ""))
     
     def log_llm_output(self, model: str, output: str):
         """记录LLM输出"""
         if self.enabled and self.log_llm_io:
-            self.logger.debug(f"[LLM OUTPUT] Model: {model} | Output: {output[:500]}...")
+            self.logger.debug("[LLM OUTPUT] Model: %s | Characters: %s", model, len(output or ""))
     
     def log_heartbeat(self, component: str, status: str):
         """记录心跳"""

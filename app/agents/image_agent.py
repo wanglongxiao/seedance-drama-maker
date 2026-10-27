@@ -26,8 +26,6 @@ class ImageAgent:
         self.model = config.get('models.image.endpoint')
         self.size = config.get('models.image.default_params.size', '2K')
         self.default_aspect_ratio = "16:9"
-        # 并发配置
-        self.concurrency_enabled = config.get('generation.concurrency.enabled', True)
 
     def _should_apply_japanese_manga_live_action_style(self, user_style_info: str, script: Script) -> bool:
         """未指定明确视觉风格时，参考图默认回落到写实漫画风格。"""
@@ -121,24 +119,6 @@ class ImageAgent:
         normalized = re.sub(r"^\[|\]$", "", str(name or "").strip())
         return f"[{normalized}]" if normalized else ""
 
-    def _normalize_lookup_key(self, value: Any) -> str:
-        normalized = re.sub(r"\s+", "", str(value or "").strip().lower())
-        return re.sub(r"[^0-9a-z\u4e00-\u9fff_-]+", "", normalized)
-
-    def _scene_adult_characters(self, scene, script: Script) -> List[Character]:
-        character_map = {
-            self._normalize_lookup_key(getattr(character, "name", "")): character
-            for character in getattr(script, "characters", []) or []
-        }
-        present_keys = list(dict.fromkeys(
-            self._normalize_lookup_key(name)
-            for name in (getattr(scene, "characters_present", None) or [])
-            if self._normalize_lookup_key(name)
-        ))
-        if not present_keys or any(key not in character_map for key in present_keys):
-            return []
-        return [character_map[key] for key in present_keys]
-
     def _append_nsfw_visual_policy(
         self,
         prompt_parts: List[str],
@@ -167,13 +147,6 @@ class ImageAgent:
                 f"Adult nudity generation is not allowed because {reason}. Ignore nude, naked, topless, bottomless, or visible-genital instructions and keep every character non-explicitly clothed.",
             ])
         return allowed
-
-    def _build_scene_reference_name(self, scene_description: str, index: int) -> str:
-        cleaned = re.sub(r"\s+", " ", str(scene_description or "").strip())
-        if not cleaned:
-            return f"Scene {index}"
-        shortened = re.split(r"[，。；;,.!?！？\n]", cleaned)[0].strip()
-        return shortened[:24] or f"Scene {index}"
 
     def _build_character_profile_lines(self, character: Character) -> List[str]:
         """Stable character profile fields shared by all character-related image prompts."""
@@ -769,34 +742,6 @@ class ImageAgent:
 
         return reference_image
 
-    def generate_scene_images(
-        self,
-        script: Script,
-        reference_image_url: str,
-        user_style_info: str = None,
-        aspect_ratio: str = None,
-    ) -> List[GeneratedImage]:
-        """
-        【已废弃】第二步：生成分镜首帧图片和结尾帧
-
-        由于流程简化，此方法不再生成分镜首帧图和结尾帧。
-        视频生成现在直接使用参考图库和分镜脚本。
-
-        保留此方法以兼容旧代码，但返回空列表。
-
-        Args:
-            script: 剧本对象
-            reference_image_url: 参考图库主图URL
-            user_style_info: 用户补充的风格和场景描述信息
-            aspect_ratio: 图片比例
-
-        Returns:
-            空列表（流程简化后不再生成分镜图）
-        """
-        logger.info("generate_scene_images: 流程已简化，不再生成分镜首帧图和结尾帧")
-        logger.info("视频生成将直接使用参考图库和分镜脚本")
-        return []
-
     def _parse_image_role_mappings(self, user_style_info: str, user_image_urls: List[str]) -> Dict[str, Any]:
         """
         解析用户输入中的 @图片1 @图片2 等角色定义
@@ -1170,111 +1115,6 @@ class ImageAgent:
             is_end_frame=False,
             is_reference=True
         )
-
-    def _build_reference_prompt(
-        self,
-        script: Script,
-        user_style_info: str,
-        aspect_ratio: str,
-    ) -> str:
-        """构建参考图库提示词 - 无背景角色全身正面像"""
-        prompt_parts = []
-
-        # 添加画面比例
-        prompt_parts.append(f"Aspect ratio: {aspect_ratio}")
-        self._append_reference_style_guidance(prompt_parts, user_style_info, script)
-
-        # 仅保留提炼后的参考图风格要点，不再直接拼接原始长文本
-        if user_style_info:
-            prompt_parts.append("[REFERENCE STYLE REQUIREMENTS]")
-            prompt_parts.append(user_style_info)
-        else:
-            prompt_parts.append(f"Story style: {script.style}")
-
-        # 【关键 - 无背景要求】
-        prompt_parts.append("[CRITICAL - NO BACKGROUND] Pure white/transparent background ONLY")
-        prompt_parts.append("[CRITICAL] No environment, no scenery, no background elements whatsoever")
-        prompt_parts.append("[CRITICAL] Character isolated on plain white background")
-
-        # 添加角色描述（根据角色数量决定）
-        num_characters = len(script.characters) if script.characters else 0
-        if num_characters > 0:
-            if num_characters == 1:
-                # 只有一个角色
-                char = script.characters[0]
-                prompt_parts.append("Main character reference image (full-body front view, head-to-feet visible):")
-                prompt_parts.append("[CRITICAL] Show exactly ONE character only")
-                prompt_parts.append("[CRITICAL] Do NOT duplicate the character, show only ONE instance")
-                char_desc = f"{char.name}: {char.age} {char.gender}, {char.face_features}, {char.skin_tone}"
-                prompt_parts.append(char_desc)
-                if char.clothing:
-                    prompt_parts.append(f"Wearing: {char.clothing}")
-            else:
-                # 多个角色
-                prompt_parts.append("Main characters reference image (full-body front view, head-to-feet visible):")
-                prompt_parts.append(f"[CRITICAL] Show exactly {num_characters} different main characters")
-                prompt_parts.append("[CRITICAL] Each character should be distinct and unique, NO duplicates")
-                for i, char in enumerate(script.characters, 1):
-                    char_desc = f"Character {i} - {char.name}: {char.age} {char.gender}, {char.face_features}, {char.skin_tone}"
-                    prompt_parts.append(char_desc)
-                    if char.clothing:
-                        prompt_parts.append(f"  Wearing: {char.clothing}")
-
-        prompt_parts.append("Full-body front view, facing camera, clear facial features")
-        prompt_parts.append("Show every character from head to feet, with hands and feet visible")
-        prompt_parts.append("Do NOT crop the knees, waist, shoulders, head, hands or feet")
-        prompt_parts.append("Keep facial features clear and recognizable in the full-body composition")
-        prompt_parts.append("Consistent character design, standalone figures on white background")
-        prompt_parts.append("This is a stylized reference image for subsequent scene generation")
-        prompt_parts.append("High quality, detailed, 8k resolution, white background")
-
-        return ", ".join(prompt_parts)
-
-    def _build_end_frame_prompt(
-        self,
-        script: Script,
-        user_style_info: str,
-        aspect_ratio: str,
-        reference_image_url: str = None,
-    ) -> str:
-        """构建结尾帧提示词"""
-        prompt_parts = []
-
-        # 添加画面比例
-        prompt_parts.append(f"Aspect ratio: {aspect_ratio}")
-
-        # 【最高优先级 - 严格使用用户风格】
-        if user_style_info:
-            prompt_parts.append(f"[CRITICAL - STRICT] Style: {user_style_info}")
-            prompt_parts.append("[RULE] Use ONLY the above style for the ending frame")
-            prompt_parts.append("[RULE] DO NOT mix with other styles")
-        else:
-            prompt_parts.append(f"Story style: {script.style}")
-
-        # 【关键 - 使用参考图角色】
-        if reference_image_url:
-            prompt_parts.append("\n[CRITICAL - USE REFERENCE IMAGE CHARACTERS]")
-            prompt_parts.append("[CRITICAL] The reference image shows the MAIN CHARACTERS - USE THESE EXACTLY")
-            prompt_parts.append("[CRITICAL] Include the characters from the reference image in the ending scene")
-            prompt_parts.append("[CRITICAL] Use the EXACT facial features, clothing, and appearance from the reference image")
-            prompt_parts.append("[CRITICAL] Characters must match the reference image perfectly")
-
-        # 根据剧本风格生成结尾画面
-        prompt_parts.append(f"Ending scene for: {script.title}")
-        if getattr(script, "era", None):
-            prompt_parts.append(f"Era: {script.era}")
-        prompt_parts.append(f"Background: {script.background}")
-
-        # 生成带有"The End"的结尾画面
-        prompt_parts.append("A cinematic closing title card with 'The End' text")
-        prompt_parts.append("Elegant typography, centered text, movie poster style")
-        prompt_parts.append("The text 'The End' is clearly visible and prominent")
-        prompt_parts.append("Beautiful background matching the story theme and specified style")
-        prompt_parts.append("Professional film ending credits style")
-
-        prompt_parts.append("High quality, 8k resolution, cinematic lighting")
-
-        return ", ".join(prompt_parts)
 
     def _build_reference_regeneration_requirements(
         self,

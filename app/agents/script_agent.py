@@ -2156,7 +2156,7 @@ class ScriptAgent:
                 max_tokens=self.max_tokens, timeout=self.timeout,
             )
             content = response["choices"][0]["message"]["content"]
-            self._log_raw_model_response(stage, attempt, content)
+            self._log_model_response(stage, attempt, content)
             data = self._parse_script(content)
             names_ok = self._validate_uploaded_reference_name_usage(data, uploaded_reference_images)
             # Validate what will actually be returned, including retimed beat boundaries.
@@ -2934,12 +2934,13 @@ class ScriptAgent:
         repaired = self._repair_missing_commas_by_lines(cleaned)
         try:
             return json.loads(cleaned)
-        except json.JSONDecodeError as json_error:
+        except json.JSONDecodeError as error:
+            last_json_error = error
             if repaired != cleaned:
                 try:
                     return json.loads(repaired)
                 except json.JSONDecodeError as repaired_error:
-                    json_error = repaired_error
+                    last_json_error = repaired_error
             python_like = repaired
             python_like = re.sub(r'(?<![A-Za-z0-9_"])\\btrue\\b', 'True', python_like, flags=re.IGNORECASE)
             python_like = re.sub(r'(?<![A-Za-z0-9_"])\\bfalse\\b', 'False', python_like, flags=re.IGNORECASE)
@@ -2947,7 +2948,7 @@ class ScriptAgent:
             try:
                 return ast.literal_eval(python_like)
             except Exception:
-                raise json_error
+                raise last_json_error
 
     def _repair_missing_commas_by_lines(self, content: str) -> str:
         """按行修复常见缺逗号场景：上一行是完整值，下一行直接开始新字段或新对象。"""
@@ -3820,10 +3821,9 @@ class ScriptAgent:
 
         return self.rewrite_script(current_script, feedback)
 
-    def _log_raw_model_response(self, stage: str, attempt: int, content: str) -> None:
+    def _log_model_response(self, stage: str, attempt: int, content: str) -> None:
         logger.info("Script model response: stage=%s attempt=%s chars=%s",
                     stage, attempt, len(content or ""))
-        logger.debug("Script model raw response (%s, attempt %s): %s", stage, attempt, content)
 
     def _fallback_scene_name_from_description(self, description: str, index: int) -> str:
         cleaned = re.sub(r'\s+', ' ', str(description or '').strip())
@@ -4012,30 +4012,6 @@ class ScriptAgent:
 
         candidate = re.sub(r'[：:，,；;。.!！?？]+$', '', candidate).strip()
         return candidate
-
-    def _extract_character_names_from_text_field(self, text: Any) -> List[str]:
-        content = str(text or '')
-        if not content:
-            return []
-
-        matches = []
-        for pattern in [
-            r'(?:^|[\n；;])\s*([^：:\n；;，,]{1,16})\s*[：:]',
-            r'([^\s：:\n；;，,]{1,16})\s*[：:]',
-        ]:
-            matches.extend(re.findall(pattern, content))
-
-        names: List[str] = []
-        seen = set()
-        blocked = {'镜头', '画面', '场景', '情绪', '氛围', '对白', '旁白', '说明'}
-        for item in matches:
-            name = self._sanitize_character_candidate(item)
-            key = self._normalize_character_name_key(name)
-            if not key or key in seen or name in blocked:
-                continue
-            seen.add(key)
-            names.append(name)
-        return names
 
     def _collect_scene_character_names(self, scenes: List[Dict[str, Any]], mutate_scenes: bool = True) -> List[str]:
         ordered_names: List[str] = []

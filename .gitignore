@@ -20,6 +20,7 @@ temp/
 # 调试产物
 .dbg/
 *.log
+/.screenshots/
 /.run/
 /logs/
 /tmp/
@@ -44,6 +45,9 @@ temp/
 
 # Tests (kept local only, excluded from public repo)
 /tests/
+
+# Public demonstration assets stay versioned.
+!/demo/
 
 # Local operational scripts; public release helpers are explicitly allowed.
 /scripts/

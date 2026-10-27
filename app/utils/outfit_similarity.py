@@ -3,7 +3,6 @@
 # @contact https://www.linkedin.com/in/alexwanglx/
 # Open Source Usage: attribution required; preserve this notice in redistributions.
 import re
-from difflib import SequenceMatcher
 from typing import FrozenSet, Iterable, List, Tuple
 
 
@@ -169,10 +168,6 @@ def outfit_identity_signature(value: object) -> FrozenSet[str]:
     stable_parts = _stable_description_parts(value)
     text = "，".join(stable_parts) or str(value or "").strip().lower()
     return _matching_groups(text, _STABLE_VISUAL_GROUPS)
-
-
-def _stable_description_core(value: object) -> str:
-    return normalize_outfit_for_similarity("，".join(_stable_description_parts(value)))
 
 
 _IDENTITY_PREFIXES = ("color:", "garment:", "cut:", "exposure:", "hair:", "injury:")

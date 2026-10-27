@@ -2,6 +2,7 @@
 
 ## [3.0.0] - 2026-10-27
 
+- Shortened both project overviews; removed unused ending-frame, transition, image-stitching and video-run code plus an obsolete test. Removed duplicate payload and raw model debug output. Keep docs and tests local, retain demo assets in GitHub, and exclude caches and debug output from releases.
 - Added post-merge optimization with local cuts, parallel short repairs, independent patch reviews, original audio, lighting matching, timed subtitles and final review.
 - One fast review judges story importance, local score and viewer acceptance. Cut noncritical faults first; reshoot critical faults only below 40 when clearly unacceptable.
 - Raised the default pre-merge review threshold to 80. Service failures remain separate from content rejection.

@@ -3,7 +3,6 @@ import importlib.metadata
 import json
 from pathlib import Path
 import shutil
-import subprocess
 import tempfile
 
 from app import __version__

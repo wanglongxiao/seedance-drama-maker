@@ -168,7 +168,6 @@ class LLMService:
             (payload.get("thinking") or {}).get("type", "default"),
             max_tokens,
         )
-        logger.debug("[LLM_REQUEST][CHAT] url=%s payload=%s", url, payload_json)
         try:
             # 剧本生成 timeout，由 config.yaml limits.script_llm_timeout 控制（默认 600 秒）
             response = requests.post(
@@ -188,7 +187,6 @@ class LLMService:
 
         except requests.exceptions.HTTPError as e:
             logger.error(f"LLM call failed: {str(e)}")
-            logger.debug("LLM request payload: %s", payload_json)
             if e.response is not None and e.response.text:
                 logger.error("LLM response text: %s", e.response.text[:1000])
             raise
@@ -258,7 +256,6 @@ class LLMService:
             len(image_urls or []),
             len(payload_json),
         )
-        logger.debug("[LLM_REQUEST][IMAGE] url=%s payload=%s", url, payload_json)
         
         try:
             # 图片生成 timeout: 900秒
@@ -276,7 +273,6 @@ class LLMService:
             
         except requests.exceptions.HTTPError as e:
             logger.error(f"Image generation failed: {str(e)}")
-            logger.debug("Image request payload: %s", payload_json)
             if e.response is not None and e.response.text:
                 logger.error("Image response text: %s", e.response.text[:1000])
             raise
@@ -387,7 +383,6 @@ class LLMService:
             len(prompt),
             len(payload_json),
         )
-        logger.debug("[LLM_REQUEST][VIDEO_CREATE] url=%s payload=%s", url, payload_json)
 
         try:
             # 视频生成 timeout: 1000秒
@@ -406,7 +401,6 @@ class LLMService:
 
         except requests.exceptions.HTTPError as e:
             logger.error(f"Video task creation failed: {str(e)}")
-            logger.debug("Video task request payload: %s", payload_json)
             if response.text:
                 logger.error("Video task response text: %s", response.text[:1000])
             raise
@@ -496,7 +490,6 @@ class LLMService:
             len(content),
             len(payload_json),
         )
-        logger.debug("[LLM_REQUEST][VIDEO_CREATE_WITH_CONTENT] url=%s payload=%s", url, payload_json)
 
         try:
             # 视频生成 timeout: 1000秒
@@ -515,7 +508,6 @@ class LLMService:
 
         except requests.exceptions.HTTPError as e:
             logger.error(f"Video task creation failed: {str(e)}")
-            logger.debug("Video task request payload: %s", payload_json)
             if response.text:
                 logger.error("Video task response text: %s", response.text[:1000])
             raise

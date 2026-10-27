@@ -21,73 +21,11 @@ Powered by the **SeeDance 2.5** video model — turn one sentence into a cinemat
 
 ## Overview
 
-This project focuses on AI long-video generation with both automatic and manual operating modes. While maintaining generation quality, it minimizes manual work across the entire pipeline, including script planning, character and backdrop alignment, scene continuity, quality review, regeneration control, and final video merge.
+A multi-agent AI video system that turns text, images or voice input into short dramas, comic-style videos and ads. It supports automatic and manual workflows, locally and in the cloud.
 
-Typical use cases include:
+Workflow: input → script → character and backdrop references → scene generation and review → merge → optimization and subtitles.
 
-- generating multi-minute social media advertising videos
-- generating short dramas or comic-style dramas from a single sentence
-- creating continuous long-form videos from text, uploaded references, and voice input
-- running multiple long-video tasks in parallel out of the box
-
-The system automatically coordinates script writing, character definitions, backdrop definitions, dialogue constraints, audio constraints, scene-video generation, AI quality review, and smooth transitions across scenes, turning a simple prompt into a full long-video workflow.
-
-Current primary workflow:
-
-```text
-User Input -> Script Generation -> Reference Library Confirmation -> Character-Outfit/Backdrop-State Variants -> Scene Video Generation And Review -> Merge -> Video Optimization And Subtitles
-```
-
-The fifth step runs locally and in the cloud, reviews the actual merged film and transcribes its soundtrack. `video_optimization.fast_triage` is on by default. One quick review decides whether each faulty fragment is critical to the story, rates its local quality, and judges whether viewers cannot accept it. Explicitly acceptable minor faults remain as advice; other noncritical faults are cut. Critical faults are regenerated only when the score is below `critical_regenerate_below` (default 40) AND `viewer_unacceptable` is true. Other imperfections remain as advice. Key speech is protected; disposable speech is cut as complete utterances. Cuts retain the 20% budget and minimum remaining clip length. If no repair can be performed, the reviewed candidate and pending review state are preserved without rendering it again. Remotion renders timed subtitles; original/final films, SRT, reports and the HyperFrames timeline are saved under `VIDEO_OUTPUT_DIR/<project_id>/` (local default `outputs`, cloud `/tmp/seedance-outputs`). Videos, subtitles and reports are uploaded to private TOS.
-
-Fast mode skips extra reasoning, dense-frame independent confirmation and further causal audits. `fast_review_max_tokens` defaults to 1600. Unchanged source reviews are cached. After independently approved local replacements, untouched observations can be reused; the final film still receives one quick review. The normal path uses two reviews, for the source and final film. Patches still verify the requested fix, soundtrack and adjoining state. A noncritical cut blocked by a timing or speech limit is retained with its reason and never becomes an automatic reshoot. The status bar includes story/quality triage, and logs include review mode and elapsed time. Set `fast_triage: false` to restore detailed review; the independent confirmation and causal-audit rules below apply only in that mode.
-
-After merging, the Web UI offers multiple cuts and local repairs, lighting correction, subtitles and automatic repair. Separate cuts with new lines or commas. Each repair row pairs its start and end times with its own instructions; rows can be added or removed. Scene order and whole-scene reshoots are hidden from this form; older API requests remain supported. Automatic reshoots target confirmed faulty spans, such as 5–7 seconds. Patches generate and review independently in parallel, then replace together in the same master, keeping original audio and checking lip sync and boundary continuity. The bottom status bar stays on one line, centered, using the same 13px font as other steps. It shows the project name, review, issue judgment, repair plan, patch preparation, generation, verification, replacement, editing, subtitles and final review, with status and elapsed time. Scroll sideways through parallel tasks or hover for history. Refresh restores progress. The original merged URL remains available for comparison.
-
-The workflow adopts useful methods from an external film program: matching light within the same set, checking anatomy and prop continuity, and repairing scenes from review checkpoints. Small brightness corrections preserve scripted light switches and other motivated changes. Cuts and scene order use actual media durations to map captions and must not split complete dialogue. If review is unavailable, the current footage is kept and the reason is recorded. Films that still fail after the repair budget are marked clearly; model output cannot be guaranteed free of continuity errors.
-
-For requested Chinese or Cantonese speech, Seed Speech ASR preserves actual words and timestamps. Whisper is the documented fallback, with turbo for Cantonese. Empty time spans are removed, and identical audio can reuse its transcript after picture repairs. A Whisper `zh` label cannot prove Mandarin pronunciation. Script text never replaces the transcript. Pre-merge review uses configurable `video_review.pass_threshold`, default 80. Local repair has its own `fragment_max_attempts` budget (2 per span), `fragment_max_seconds` (6 seconds), and `max_repair_fragments_per_round` (8 spans). Set `video_optimization.repair_workers` for concurrency.
-
-Caption corrections only change equally pronounced Chinese characters in matched spoken lines, retaining word timestamps. If a speechless shot reads production instructions aloud, native ASR and an independent Whisper pass must agree before replacing that local audio with nearby speech-free ambience. Picture and duration stay fixed. Set `remove_prompt_narration` to control this repair. Moderate review preserves genre magic and effects, and does not reshoot tiny framing changes or redundant foreshadowing.
-
-The second review receives time windows without the first review's accusations, reducing repeated false reports. `video_optimization.repair_min_severity` defaults to `major`: minor decoration changes stay in report advice; clear anatomy, contact, identity and key causal failures still require repair. Parallel patches use content hashes as object names so uploads in the same second cannot overwrite another patch before review.
-
-`audit_story_impact` is enabled by default. After independent confirmation, a further audit checks the full film and sequential frames for actual identity, contact or causal failures and saves its observations. An unlisted awakening effect or camera change alone is not a failure. If visible motifs match and recognition works, or an awakening and its later battle remain coherent, a different pattern name or effect style is advisory. Less spectacle or less literal execution alone does not block a film; real anatomy, contact, identity and causal failures still do. Low confidence, unavailable review or invalid results cannot release a blocker. Repair references focus on the visible corrected detail instead of an unrelated portrait or reaction.
-
-Final-film findings also receive independent confirmation from timestamped frames of the actual final film. Failed patch history is not sent as visual evidence. A manual rollback starts a fresh fragment budget while retaining audit history. Incorrect props or anatomy in boundary references must not override the requested correction. Local patches clear full-scene motion and sound directions and focus the camera on the repair. Generated media URLs, durations and boundary references remain in the history.
-
-`repair_reference_after_failure` is on by default. After a text-only patch fails, ImageAgent creates a corrected target frame from actual boundary frames and matching character references. Independent verification checks that the repair is visible, contact is correct, and props are not duplicated. Failed targets are redrawn with observed feedback, up to `repair_reference_max_attempts` (default 2). Only verified targets guide video generation; they are not evidence for passing video review. Target generation and verification both appear in the status bar. An explicit optimization retry starts a new local repair budget while preserving accepted patches in the working master; automatic rounds within one run share that budget.
-
-Each patch first turns the observed fault into an affirmative corrected state, necessary local motion and visible checks. The original complaint and repair goal are saved separately, so an unwanted intact blade cannot become the target for a broken-blade repair. A verified target anchors generation with `first_frame`. Output inherits that image's dimensions and does not mix it with ordinary portraits or flawed boundary references. The actual trimmed patch still needs independent review.
-
-`models.video_review.disable_thinking` is enabled by default so visual reviews directly return observed evidence and conclusions. Set it to `false` to enable model reasoning; an explicit per-call `thinking` setting takes priority. This affects only the review model and keeps thresholds and independent confirmation requirements. Changing this option or the review model invalidates the source review cache.
-
-Hand targets first receive an isolated anatomy check based on fingertip contours, palm attachments and joints: one thumb plus four fingers. Only passing targets receive a separate comparison of visible costume, identity and lighting against boundary frames. A still frame need not prove unseen faces, props, motion or audio. `anatomy_review_thinking` enables reasoning by default, with `anatomy_review_max_tokens` set to 3000. These options also apply to digit repairs, full-film window verification and digit impact audits; changing them invalidates the review cache. Failed or unavailable target verification stops patch generation.
-
-An explicit local repair must pass and be applied before that run can complete, even if the full-film viewer later misses the defect. Outstanding ranges are recorded in `unresolved_manual_repairs`.
-
-When the model's minimum output is longer than a silent repair interval, `select_silent_patch_window` selects the actual corrected action rather than always keeping the setup. The selected window still needs independent repair verification. Original audio and master timing remain fixed. Spoken patches retain the specified starting word timestamps.
-
-Review uses fixed identity, anatomy, contact, prop, plot, lighting and dialogue categories, while accepting translated category names. Independent review can narrow an earlier window to the actual defect. Each issue targets a short occurrence, and patches repair only that interval rather than replaying the background action. After Remotion renders captions, the edited soundtrack is restored and the actual timeline duration is enforced to prevent AAC padding from extending the film.
-
-Overlapping time windows and broad categories alone do not establish independent confirmation. Explicit extra fingers, missing fingers, duplicated limbs, fusion and penetration must agree between the two reports. A different defect discovered in the same window needs its own confirmation before repair.
-
-Set `video_review.sample_fps` and `video_optimization.review_fps` to control sampling, default 3 frames per second, range 0.2–5. Short patches also need several observations to reduce missed contact actions and brief effects. Higher density increases review time and model use. Changing it invalidates cached review evidence.
-
-Independent confirmation also receives sequential frames from the same master, with 0.3 seconds of context on each side, up to 24 frames per window and master timestamps. Footage frames are kept separate from character references. This helps prevent missed short actions. A hidden engraving is not proof of a wrong engraving; the presence of an action and a decorative difference must be judged separately.
-
-A local patch must pass the score gate and provide explicit timed evidence that its required defect is fixed. Matching characters, style or a setup reaction is insufficient. Patch names and timers advance through preparation, generation and review in the status bar. Rolling back optimization starts from the original merge and retains review history.
-
-Skills use the bundled `app/video_skills` references and hashes by default; override with `VIDEO_SKILLS_ROOT`. Node tools use `runtime/package-lock.json`, live at `/opt/video-tools` in the cloud and default to `~/.local/share/seedance-drama-maker/video-tools` locally. The skill from `znyupup/ai-video-editing-skill` is named `vlog-auto-edit`. Install Python tools with `uv pip install --python .venv/bin/python -r requirements-video-tools.txt`. Remotion captions provides subtitles. The v3.0 cloud image includes the full optimization runtime.
-
-The system focuses on:
-
-- Generating script, character definitions, backdrop definitions, and scene scripts together
-- Coordinating multiple reference images for characters and backdrops
-- Keeping auto mode and manual mode consistent at the workflow level
-- Combining automatic retry with manual takeover when video review fails
-- Supporting multilingual UI and isolated multi-tab execution
-- Isolating cloud interactive requests: uploads and speech-to-text use a dedicated thread pool so long image/video generation jobs cannot starve them and trigger gateway timeouts
+video-use and vlog-auto-edit guide editing; media-use handles assets; HyperFrames builds the timeline; openai-whisper transcribes audio; remotion-captions and remotion-render create subtitles and export video. The system supports faulty-fragment cuts, local reshoots, lighting correction and final review, preserving original audio and exporting videos, subtitles and review reports.
 
 ## Showcase
 
@@ -263,7 +201,7 @@ Current rules:
 - `script_generation.validation_max_rounds` defaults to `3`, including the first draft and later fixes. Valid director timing plans are kept before any duration adjustment
 - When all rounds fail, manual mode pauses and offers a full project restart or continuation with the best draft; the choice survives a page refresh. Auto mode continues with the best candidate, ranked by locked settings, executable structure, duration, and confirmed issue count
 - Per-scene special outfits and hairstyle changes are written explicitly to `character_outfits`, while backdrop time/weather state is written explicitly to `scene_state`; both fields appear before the scene description and are persisted for downstream image/video generation
-- Backend `INFO` logs contain only compact metadata such as model, message count, and prompt/payload length; full prompts, request bodies, asset polling results, and heartbeats are limited to `DEBUG` to prevent oversized long-running logs
+- Backend logs record model, message count, request length, timing and error summaries without full prompts, request bodies or raw model output. Heartbeats and asset polling use compact `DEBUG` metadata.
 
 ### 3. Reference Library Generation
 

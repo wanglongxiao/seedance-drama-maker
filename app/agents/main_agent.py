@@ -2896,7 +2896,6 @@ class MainAgent:
         if project.combined_input:
             user_input = project.combined_input
             logger.info(f"Using combined_input for script generation ({len(user_input)} chars)")
-            logger.debug("combined_input content: %s", user_input)
         else:
             user_input = project.user_input
             logger.info(f"Using user_input for script generation (no combined_input found)")
@@ -3779,63 +3778,6 @@ class MainAgent:
             raise ValueError(self._t(project, "error.reference_regeneration_locked_original"))
         _ = feedback
         return await self.generate_reference_image_with_retry(project)
-
-    async def _generate_videos(self, project: VideoProject) -> List[GeneratedVideo]:
-        """调用VideoAgent生成视频 - 简化版本，直接使用参考图"""
-        logger.info(f"Generating videos for project {project.project_id}")
-        self._normalize_project_scene_number_sequence(project)
-
-        # 已有分镜脚本时，视频提示词只使用 script.style（简短），避免塞入初始用户长文本
-        user_style_info = getattr(getattr(project, "script", None), "style", None)
-        if user_style_info:
-            logger.info(f"Using script.style for video generation ({len(user_style_info)} chars)")
-        else:
-            logger.warning("No script.style found for video generation!")
-
-        # 获取参考图库
-        reference_image = getattr(project, 'reference_image', None)
-        if not reference_image:
-            raise ValueError(f"Reference image (参考图库) not found for project {project.project_id}")
-
-        logger.info(f"Using reference image for video generation: {reference_image.url}")
-
-        # 简化流程：直接使用参考图生成分镜视频
-        return self.video_agent.generate_videos(
-            script=project.script,
-            reference_image=reference_image,
-            user_style_info=user_style_info
-        )
-
-    async def _regenerate_video(self, project: VideoProject, scene_number: int, feedback: str):
-        """重新生成视频 - 简化版本"""
-        logger.info(f"Regenerating video for scene {scene_number}")
-        scene = self.get_project_scene(project, scene_number)
-
-        # 已有分镜脚本时，视频提示词只使用 script.style（简短）
-        user_style_info = getattr(getattr(project, "script", None), "style", None)
-
-        # 获取参考图
-        reference_image = getattr(project, 'reference_image', None)
-        if not reference_image:
-            raise ValueError(f"Reference image not found for project {project.project_id}")
-
-        new_video = self.video_agent.regenerate_video(
-            scene_number=scene_number,
-            script=project.script,
-            project_id=project.project_id,
-            reference_image=reference_image,
-            reference_images=self._select_reference_assets_for_scene(project, scene),
-            feedback=feedback,
-            user_style_info=user_style_info,
-            user_requirement_text=getattr(project, "combined_input", None),
-            resolution=getattr(project, "video_resolution", None),
-            aspect_ratio=getattr(project, "aspect_ratio", None),
-            characters=getattr(project.script, "characters", None),
-            scene_definitions=getattr(project.script, "scene_definitions", None),
-            asset_group_id=project.asset_group_id,
-            asset_project_name=project.asset_project_name,
-        )
-        self._upsert_project_video(project, new_video)
 
     async def _merge_videos(self, project: VideoProject) -> str:
         """调用MergeAgent合成视频"""

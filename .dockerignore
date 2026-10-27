@@ -30,6 +30,9 @@ tmp
 outputs
 .DS_Store
 .pytest_cache
+.mypy_cache
+.ruff_cache
+.screenshots
 .idea
 .vscode
 .trae

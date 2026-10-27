@@ -3,7 +3,6 @@
 # @contact https://www.linkedin.com/in/alexwanglx/
 # Open Source Usage: attribution required; preserve this notice in redistributions.
 
-import os
 import json
 from typing import List
 from datetime import datetime
@@ -243,19 +242,3 @@ class MergeAgent:
             logger.info("Temporary files cleaned up")
         except Exception as e:
             logger.error(f"Cleanup failed: {str(e)}")
-    
-    def get_video_info(self, video_url: str) -> dict:
-        """
-        获取视频信息
-        
-        Args:
-            video_url: 视频URL
-        
-        Returns:
-            视频信息字典
-        """
-        # 最终成片统一为 mp4
-        return {
-            "url": video_url,
-            "format": "mp4"
-        }

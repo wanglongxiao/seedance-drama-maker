@@ -375,60 +375,6 @@ class TOSService:
             logger.error(f"Upload failed: {str(e)}")
             raise
 
-    def stitch_images_and_upload(
-        self,
-        image_urls: List[str],
-        filename_prefix: str = "stitched_reference",
-        project_id: Optional[str] = None,
-        category: Optional[str] = None,
-    ) -> str:
-        """按给定顺序横向拼接多张图片并上传到 TOS。"""
-        if not image_urls:
-            raise ValueError("No image urls provided for stitching")
-        if len(image_urls) == 1:
-            return image_urls[0]
-
-        try:
-            from PIL import Image
-        except ImportError as e:
-            raise RuntimeError("Pillow is required for stitching uploaded reference images") from e
-
-        images = []
-        for index, url in enumerate(image_urls, start=1):
-            logger.info(f"Downloading reference image {index} for stitching")
-            content, _ = self._read_url_bytes(url)
-            image = Image.open(io.BytesIO(content)).convert("RGB")
-            images.append(image)
-
-        target_height = max(image.height for image in images)
-        resized_images = []
-        total_width = 0
-        for image in images:
-            if image.height != target_height:
-                target_width = max(1, int(image.width * (target_height / image.height)))
-                image = image.resize((target_width, target_height))
-            resized_images.append(image)
-            total_width += image.width
-
-        stitched = Image.new("RGB", (total_width, target_height), color=(255, 255, 255))
-        current_x = 0
-        for image in resized_images:
-            stitched.paste(image, (current_x, 0))
-            current_x += image.width
-
-        buffer = io.BytesIO()
-        stitched.save(buffer, format="PNG")
-        buffer.seek(0)
-        filename = self.generate_filename(f"{filename_prefix}.png")
-        logger.info(f"Uploading stitched reference image: {filename}")
-        return self.upload_bytes(
-            buffer.getvalue(),
-            filename,
-            content_type="image/png",
-            project_id=project_id,
-            category=category,
-        )
-
     def copy_url_to_tos(
         self,
         source_url: str,
@@ -477,18 +423,6 @@ class TOSService:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         target.write(chunk)
-
-    def get_file_url(self, filename: str) -> str:
-        """
-        获取已上传文件的URL
-
-        Args:
-            filename: 文件名
-
-        Returns:
-            可访问的文件 URL
-        """
-        return self.build_url(filename)
 
     def extract_object_key_from_url(self, file_url: str) -> Optional[str]:
         return self._managed_object_key(file_url)

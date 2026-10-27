@@ -308,7 +308,6 @@ def _scene_regeneration_blocks_merge(project) -> bool:
 
 async def notify_videos_step_complete_if_ready(client_id: str, project, lang: str) -> bool:
     total_scenes = len(getattr(getattr(project, "script", None), "scenes", []) or [])
-    completed_videos = len(getattr(project, "videos", None) or [])
     next_scene_index = int(getattr(project, "next_scene_index", 0) or 0)
     if (
         total_scenes > 0
@@ -1514,24 +1513,6 @@ class ConnectionManager:
             # 发送失败时清理连接
             self.disconnect(client_id)
     
-    async def broadcast(self, message: dict):
-        """广播消息到所有活跃连接"""
-        disconnected_clients = []
-        encoded_message = jsonable_encoder(message)
-        for client_id, connection in list(self.active_connections.items()):
-            try:
-                if connection.client_state.name == "CONNECTED":
-                    await connection.send_json(encoded_message)
-                else:
-                    disconnected_clients.append(client_id)
-            except Exception as e:
-                logger.error(f"Broadcast failed to {client_id}: {str(e)}")
-                disconnected_clients.append(client_id)
-        
-        # 清理断开的连接
-        for client_id in disconnected_clients:
-            self.disconnect(client_id)
-
 manager = ConnectionManager()
 
 

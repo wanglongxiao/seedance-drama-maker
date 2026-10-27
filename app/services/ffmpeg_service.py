@@ -140,7 +140,7 @@ class FFmpegService:
         
         try:
             logger.info(f"Running FFmpeg: {' '.join(cmd)}")
-            result = subprocess.run(
+            subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
@@ -424,109 +424,6 @@ class FFmpegService:
             return float(numerator) / denominator_value
         return float(value)
     
-    def merge_videos_with_transitions(
-        self,
-        video_urls: List[str],
-        output_filename: str,
-        transition_duration: float = 0.5,
-        work_dir: str = None,
-    ) -> str:
-        """
-        合并多个视频片段（带转场效果）
-        
-        Args:
-            video_urls: 视频片段URL列表
-            output_filename: 输出文件名
-            transition_duration: 转场时长（秒）
-        
-        Returns:
-            合并后的视频本地路径
-        """
-        if not video_urls:
-            raise ValueError("视频列表不能为空")
-        
-        if len(video_urls) == 1:
-            # 只有一个视频，直接下载返回
-            output_path = self.temp_dir / output_filename
-            self._download_file(video_urls[0], str(output_path))
-            return str(output_path)
-        
-        logger.info(f"Merging {len(video_urls)} videos with transitions")
-        work_path = self._ensure_work_dir(work_dir)
-        
-        # 下载所有视频片段
-        local_paths = []
-        video_suffix = self._video_suffix()
-        for i, url in enumerate(video_urls):
-            local_path = work_path / f"scene_{i:03d}.{video_suffix}"
-            self._download_file(url, str(local_path))
-            local_paths.append(str(local_path))
-        
-        output_path = work_path / output_filename
-        
-        # 构建复杂的FFmpeg滤镜图
-        # 使用xfade滤镜实现转场效果
-        filter_complex = self._build_xfade_filter(len(local_paths), transition_duration)
-        
-        cmd = [self._require_binary("ffmpeg"), "-y"]
-        
-        # 添加输入文件
-        for path in local_paths:
-            cmd.extend(["-i", path])
-        
-        # 添加滤镜
-        cmd.extend([
-            "-filter_complex", filter_complex,
-            "-vsync", "vfr",
-            str(output_path)
-        ])
-        
-        try:
-            logger.info(f"Running FFmpeg with transitions")
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            logger.info(f"Video merge with transitions successful: {output_path}")
-            return str(output_path)
-            
-        except subprocess.CalledProcessError as e:
-            logger.error(f"FFmpeg error: {e.stderr}")
-            # 回退到简单合并
-            logger.warning("Falling back to simple concat")
-            return self.merge_videos(video_urls, output_filename)
-    
-    def _build_xfade_filter(self, num_videos: int, transition_duration: float) -> str:
-        """
-        构建xfade滤镜字符串
-        
-        Args:
-            num_videos: 视频数量
-            transition_duration: 转场时长
-        
-        Returns:
-            滤镜字符串
-        """
-        if num_videos == 2:
-            return f"[0:v][1:v]xfade=transition=fade:duration={transition_duration}:offset=0[v]"
-        
-        # 多个视频的复杂滤镜
-        filters = []
-        
-        # 第一个转场
-        filters.append(f"[0:v][1:v]xfade=transition=fade:duration={transition_duration}:offset=0[vt0]")
-        
-        # 后续转场
-        for i in range(1, num_videos - 1):
-            filters.append(f"[vt{i-1}][{i+1}:v]xfade=transition=fade:duration={transition_duration}:offset=0[vt{i}]")
-        
-        # 最后一个输出
-        filters[-1] = filters[-1].replace(f"[vt{num_videos-2}]", "")
-        
-        return ";".join(filters)
-    
     def _download_file(self, url: str, local_path: str):
         """
         下载文件到本地
@@ -542,47 +439,6 @@ class FFmpegService:
         
         logger.debug(f"Downloaded to: {local_path}")
 
-    def add_audio_to_video(
-        self,
-        video_path: str,
-        audio_path: str,
-        output_filename: str,
-        work_dir: str = None,
-    ) -> str:
-        """
-        为视频添加音频
-        
-        Args:
-            video_path: 视频文件路径
-            audio_path: 音频文件路径
-            output_filename: 输出文件名
-        
-        Returns:
-            输出视频路径
-        """
-        output_path = self._ensure_work_dir(work_dir) / output_filename
-        
-        cmd = [
-            self._require_binary("ffmpeg"),
-            "-y",
-            "-i", video_path,
-            "-i", audio_path,
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-shortest",
-            str(output_path)
-        ]
-        
-        try:
-            logger.info(f"Adding audio to video")
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
-            logger.info(f"Audio added successfully: {output_path}")
-            return str(output_path)
-            
-        except subprocess.CalledProcessError as e:
-            logger.error(f"FFmpeg error: {e.stderr}")
-            raise
-    
     def cleanup_temp_files(self, work_dir: str = None):
         """清理临时文件"""
         try:
