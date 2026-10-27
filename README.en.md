@@ -562,6 +562,8 @@ Cloud settings include `BYTEPLUS_AK/SK`, `TOS_*`, `MODELARK_*`, five model `*_EN
 
 The deployment script enables `RUNTIME_SMOKE_ENABLED=true`. After login, `POST /api/runtime/smoke` runs the same synthetic media check on the actual cloud instance, cleans its temporary files and makes no paid generation calls. Each instance allows one check at a time. Set the flag to `false` to disable this diagnostic endpoint.
 
+Builds can reuse local Whisper checkpoints. Only `small.pt` and `large-v3-turbo.pt` enter a separate build context, and Whisper checks their official SHA256 values. Missing models download automatically. User directories and other local files are never copied.
+
 ## Open Source Rules
 
 - Copyright (c) 2026 Alex Wang

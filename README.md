@@ -557,6 +557,8 @@ BytePlus `ap-southeast-1` 的 veFaaS 使用常驻最少 `1`、最多 `5` 个实�
 
 部署脚本显式启用 `RUNTIME_SMOKE_ENABLED=true`，可登录后 `POST /api/runtime/smoke` 在真实云端执行同一套合成测试，使用临时合成媒体并自动清理，不调用付费生成模型。同一实例只允许一项该检查同时运行；设置为 `false` 可关闭此诊断端点。
 
+构建可复用本地 Whisper 缓存，仅将 `small.pt` 和 `large-v3-turbo.pt` 传入独立构建上下文并验证官方 SHA256；缓存缺失时自动下载。不复制用户目录或其他本地文件。
+
 ## Prompt 与 Skill 统一管理
 
 - 可复用的 LLM prompt、图像/视频生成约束、审核规则与脚本生成规则统一存放在 `app/prompt_skill/*.md`

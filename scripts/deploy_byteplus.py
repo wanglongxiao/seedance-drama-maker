@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import subprocess
 import tempfile
 import time
@@ -88,12 +89,23 @@ def main():
                              "--password-stdin"], input=credentials["Token"], capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError("Registry login failed; raw output withheld")
-    with tempfile.TemporaryDirectory(prefix="seedance-release-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="seedance-release-") as temporary, \
+         tempfile.TemporaryDirectory(prefix="seedance-model-cache-") as model_context:
         archive = subprocess.check_output(["git", "archive", "HEAD"], cwd=ROOT)
         subprocess.run(["tar", "-xf", "-", "-C", temporary], input=archive, check=True)
+        local_models = Path(env.get("WHISPER_CACHE_DIR") or "~/.cache/whisper").expanduser()
+        for name in ("small.pt", "large-v3-turbo.pt"):
+            source = local_models / name
+            if source.is_file() and not source.is_symlink():
+                target = Path(model_context) / name
+                try:
+                    os.link(source, target)
+                except OSError:
+                    shutil.copy2(source, target)
         subprocess.run(["docker", "buildx", "build", "--builder", args.builder,
                         "--platform", "linux/amd64", "--tag", image, "--label",
-                        f"org.opencontainers.image.revision={sha}", "--push", temporary], check=True)
+                        f"org.opencontainers.image.revision={sha}", "--build-context",
+                        f"whisper-cache={model_context}", "--push", temporary], check=True)
     print("Image published:", image, flush=True)
     state.update(commit=sha, image=image)
     save()
