@@ -25,7 +25,7 @@ def main():
     parser.add_argument("--gateway-id", required=True)
     parser.add_argument("--registry", required=True, help="CR registry name")
     parser.add_argument("--namespace", required=True)
-    parser.add_argument("--function-name", default="seedance-drama-maker-v3")
+    parser.add_argument("--function-name", default="seedance-drama-maker-v3-web")
     parser.add_argument("--service-id", help="Reuse a previously created gateway service")
     parser.add_argument("--builder", default="dmbuilder")
     parser.add_argument("--upload-mode", choices=("resumable", "buildx"), default="resumable")
@@ -157,7 +157,15 @@ def main():
     functions = api("vefaas", "ListFunctions", {})
     items = functions.get("Functions", functions.get("Items", []))
     existing = next((f for f in items if f["Name"] == args.function_name), None)
-    function_id = state.get("function_id") or (existing["Id"] if existing else None)
+    function_id = existing["Id"] if existing else None
+    if state.get("function_id"):
+        previous = api("vefaas", "GetFunction", {"Id": state["function_id"]})
+        if previous["Name"] == args.function_name:
+            function_id = previous["Id"]
+    if function_id:
+        current = api("vefaas", "GetFunction", {"Id": function_id})
+        if current.get("CpuStrategy", "").lower() == "always":
+            raise RuntimeError("Sandbox CPU strategy cannot use ordinary reserved instances; choose a new function name")
     parameters = dict(SourceType="image", Source=image, Command="./run.sh",
                       CpuMilli=4000, MemoryMB=8192, MaxConcurrency=10,
                       InitializerSec=120, RequestTimeout=900,
@@ -170,7 +178,6 @@ def main():
     else:
         created = api("vefaas", "CreateFunction",
                       dict(Name=args.function_name, Runtime="native/v1", ProjectName="default",
-                           CpuStrategy="always",
                            SourceAccessConfig={"Username": credentials["Username"], "Password": credentials["Token"]},
                            **parameters))
         function_id = created["Id"]
@@ -199,7 +206,11 @@ def main():
         time.sleep(5)
     else:
         raise RuntimeError("Function release timed out; inspect release status")
-    api("vefaas", "UpdateFunctionResource", dict(FunctionId=function_id, MinInstance=1, MaxInstance=5))
+    api("vefaas", "UpdateFunctionResource",
+        dict(FunctionId=function_id, MinInstance=1, MaxInstance=5, ReservedFrozenInstance=0))
+    resources = api("vefaas", "GetFunctionResource", {"FunctionId": function_id})["FunctionResource"]
+    if resources.get("MinInstance") != 1 or resources.get("MaxInstance") != 5:
+        raise RuntimeError("Platform did not apply the required 1–5 instance configuration")
     service_id = args.service_id or state.get("service_id")
     if not service_id:
         service_id = api("apig", "CreateGatewayService", dict(
@@ -214,6 +225,10 @@ def main():
             Protocol="HTTP", UpstreamSpec={"VeFaas": {"FunctionId": function_id}}))["Id"]
         state["upstream_id"] = upstream_id
         save()
+    else:
+        api("apig", "UpdateUpstream", dict(
+            Id=upstream_id, Name=args.function_name, SourceType="VeFaas",
+            Protocol="HTTP", UpstreamSpec={"VeFaas": {"FunctionId": function_id}}))
     if not state.get("route_id"):
         route = api("apig", "CreateRoute", dict(
             GatewayId=args.gateway_id, ServiceId=service_id, Name="seedance-v3-main",

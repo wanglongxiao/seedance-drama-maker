@@ -549,7 +549,7 @@ BytePlus `ap-southeast-1` 的 veFaaS 使用常驻最少 `1`、最多 `5` 个实�
   --namespace YOUR_CR_NAMESPACE --builder dmbuilder
 ```
 
-脚本从 `git archive HEAD` 构建 `linux/amd64` 镜像，上传后通过 `PrecacheSandboxImages` 完成平台镜像预缓存，再创建独立 v3 函数与 API 网关服务、VeFaaS upstream 和 `/` 前缀路由，配置 4 vCPU / 8 GiB、900 秒请求超时和 1–5 实例。创建函数设置 `CpuStrategy=always`，使后台视频任务在 HTTP 请求结束后继续使用 CPU。路由 API 使用版本 `2022-11-12`，支持 WebSocket。部署状态保存在被忽略的 `.run/deployment-v3.json`，可重复执行恢复。
+脚本从 `git archive HEAD` 构建 `linux/amd64` 镜像，上传后通过 `PrecacheSandboxImages` 完成平台镜像预缓存，再创建独立的 `seedance-drama-maker-v3-web` 普通 `native/v1` 函数与 API 网关服务、VeFaaS upstream 和 `/` 前缀路由，配置 4 vCPU / 8 GiB、900 秒请求超时和 1–5 实例，并保留 1 个非冻结实例。`CpuStrategy=always` 会选择 Sandbox 函数类型，普通 Web 服务保留实例部署不设置该字段。路由 API 使用版本 `2022-11-12`，支持 WebSocket。部署状态保存在被忽略的 `.run/deployment-v3.json`，可重复执行恢复。
 
 若镜像已发布，仅修改部署脚本或文档，可加 `--reuse-published-image` 继续部署。脚本会比较 Dockerfile、应用、skills、静态页面、配置和依赖等构建输入；任何输入发生变化都会拒绝复用。状态分别记录镜像源码 commit 与部署脚本 commit。
 
