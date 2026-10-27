@@ -144,13 +144,9 @@ ASSET_LIBRARY_REGION=ap-southeast-1
 ASSET_LIBRARY_API_HOST=ark.ap-southeast-1.byteplusapi.com
 ASSET_LIBRARY_PROJECT_NAME=default
 
-# Allow partial/full nudity only for characters explicitly identified as age 18+
-NSFW_ENABLED=off
 ```
 
 Keep placeholders in `config.yaml`; values are injected from `.env` at runtime:
-
-When `NSFW_ENABLED=on`, the script, character reference, outfit reference, and scene-video pipelines consistently enable the adult-nudity policy. When disabled, those pipelines explicitly request non-explicit clothed output. The policy is implemented by shared code and public prompts, with no private prompt directory dependency.
 
 ```yaml
 byteplus:
@@ -207,7 +203,7 @@ Current rules:
 - Generation, rewriting, and targeted fixes share one review flow for locked settings, structure, duration, and story continuity. Semantic findings are checked against script evidence to avoid false failures for inherited camera positions, lighting, or prop inserts
 - `script_generation.validation_max_rounds` defaults to `3`, including the first draft and later fixes. Valid director timing plans are kept before any duration adjustment
 - When all rounds fail, manual mode pauses and offers a full project restart or continuation with the best draft; the choice survives a page refresh. Auto mode continues with the best candidate, ranked by locked settings, executable structure, duration, and confirmed issue count
-- Per-scene special outfits, hairstyle changes, and exposure levels are written explicitly to `character_outfits`, while backdrop time/weather state is written explicitly to `scene_state`. The server checks scene text against each explicitly adult character's outfit state and fills omissions. Both fields appear before the scene description and persist into downstream image/video generation
+- Per-scene special outfits and hairstyle changes are written explicitly to `character_outfits`, while backdrop time/weather state is written explicitly to `scene_state`; both fields appear before the scene description and persist into downstream image/video generation
 - Backend logs record model, message count, request length, timing and error summaries without full prompts, request bodies or raw model output. Heartbeats and asset polling use compact `DEBUG` metadata.
 
 ### 3. Reference Library Generation
@@ -239,7 +235,6 @@ The system now integrates a private virtual portrait library:
 
 - Every project creates its own dedicated asset group with a one-to-one project mapping
 - All character / portrait images in the project, including uploaded originals and generated references, are registered as assets and store their `asset_id`
-- NSFW asset uploads are supported by creating assets with `Moderation.Strategy = Skip`, which turns off Content pre-filter
 - Assets enter the generation chain only after polling `GetAsset.Status = Active`
 
 Authentication notes:
@@ -257,7 +252,7 @@ After all character main images and scene main images are generated, the system 
 - Character-outfit image = the scene's outfit description + the corresponding character main image
 - Backdrop-state image = the scene's time/weather state + the corresponding scene main image
 - Variants across scenes are generated in parallel, bounded by the image concurrency setting (`video_generation.reference_images.max_concurrency`)
-- Character outfits are deduplicated by stable visual traits such as clothing, nudity level, hairstyle, and injuries; backdrop states are normalized by time and weather so minor wording differences do not trigger duplicate generation
+- Character outfits are deduplicated by stable visual traits such as clothing, hairstyle, and injuries; backdrop states are normalized by time and weather so minor wording differences do not trigger duplicate generation
 - Each variant is bound to one or more scenes through `scene_numbers`, and scene videos prefer variants explicitly matched to the current scene number
 - Scene-video reference selection resolves outfit images directly by `scene_numbers`, exact `variant_key`, then visual equivalence, without rebuilding and rescanning the complete scene-variant plan for every character
 
@@ -288,7 +283,6 @@ Key rules:
 - Automatic failure retry counts are controlled by YAML (`video_review.max_retries`, `video_generation.scene_total_generate_limit`)
 - Manual `Regenerate` clicks do not consume the automatic failure budget
 - The video prompt appends a no-background-music constraint by default unless the user explicitly requests a music style
-- When `NSFW_ENABLED=on` and a character is explicitly age 18+, a scene whose text indicates ongoing intimacy inherits the previous scene's partial/full-nudity outfit state; another character image is used only after the script clearly ends that state
 - Scene numbers are normalized to `1..N` from storyboard array order, and every generated result stores a scene-content fingerprint to prevent a correctly numbered video from being attached to the wrong script content
 - Archived scene-video names use a sortable format such as `scene_012_attempt_03.mov`
 
@@ -506,7 +500,7 @@ Use an ordinary `native/v1` function without `CpuStrategy=always`, which selects
 
 For app-only changes, `--reuse-runtime-layers` checks that the published commit has the same Dockerfile, Python dependencies and Node runtime, then validates image settings, build instructions and every runtime layer hash. It reuses runtime layers already in the registry and uploads only fresh app, static and settings layers. App layers are built from current source, so deleted files do not remain. Changed runtime inputs require a full build. This mode requires resumable upload, publishes the current commit and cannot be combined with `--reuse-published-image`.
 
-Cloud settings include `BYTEPLUS_AK/SK`, `TOS_*`, `MODELARK_*`, five model `*_ENDPOINT` / `*_API_KEY` pairs, `SPEECH_*`, `ASR_RESOURCE_ID`, `ASSET_LIBRARY_*`, `NSFW_ENABLED`, and `ACCESS_PASSWORD` / `ACCESS_SECRET` / `ACCESS_COOKIE_SECURE`. Runtime paths are `VIDEO_SKILLS_ROOT=/app/app/video_skills`, `VIDEO_TOOLS_RUNTIME_DIR=/opt/video-tools`, `VIDEO_OUTPUT_DIR=/tmp/seedance-outputs`, and `REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`. Only variables referenced by configuration are copied.
+Cloud settings include `BYTEPLUS_AK/SK`, `TOS_*`, `MODELARK_*`, five model `*_ENDPOINT` / `*_API_KEY` pairs, `SPEECH_*`, `ASR_RESOURCE_ID`, `ASSET_LIBRARY_*`, and `ACCESS_PASSWORD` / `ACCESS_SECRET` / `ACCESS_COOKIE_SECURE`. Runtime paths are `VIDEO_SKILLS_ROOT=/app/app/video_skills`, `VIDEO_TOOLS_RUNTIME_DIR=/opt/video-tools`, `VIDEO_OUTPUT_DIR=/tmp/seedance-outputs`, and `REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`. Only variables referenced by configuration are copied.
 
 `/healthz` returns health and version only. Authenticated `/api/runtime` reports tools, skills and ASR settings without secrets; configured ASR does not prove connectivity. Run `python -m app.services.runtime_service --smoke` inside the image to check actual editing, captions, timeline lint, audio and duration without paid ASR calls. WebSocket delivery is local to its instance; snapshot polling covers updates made by other instances. Restarting interrupted jobs after instance removal and arbitrating concurrent writes still need a job queue and shared locks; TOS snapshots alone do not provide them.
 

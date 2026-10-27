@@ -10,7 +10,6 @@
 - Updated editing, repair-limit and project-end text in all five locales, refreshed static caches and both README files. Removed local monitoring, logs, temporary test output and obsolete unit tests while keeping valid behavior regressions.
 - Local Japanese delivery checks passed for desktop/mobile playback, four downloads, 24 subtitle time ranges and unchanged audio. Minor ASR noise has not been checked line by line.
 - Fixed style keyword extraction so negated or permissive mentions such as “not horror” do not become a horror genre, and character-action detail does not become an action-film genre.
-- Fixed scenes where adult full/partial nudity appeared in story text while `character_outfits` was empty, omitted a character, or retained default clothing. Post-processing now fills “exposure level + hairstyle” from all-character requirements and character-attributed scene text; negated statements and non-adult characters are excluded, and quality validation rejects remaining mismatches.
 - Updated the outfit label and cache version in all five locales, and refreshed the bundled media-use, video-use, and vlog-auto-edit copies plus their manifest. Reduced the legacy reference-image regeneration wrapper, removed first/last-frame video-task compatibility parameters, local tests, and cache directories. All 326 Python regressions passed before cleanup.
 
 ## [3.0.0] - 2026-10-27

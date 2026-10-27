@@ -144,13 +144,9 @@ ASSET_LIBRARY_REGION=ap-southeast-1
 ASSET_LIBRARY_API_HOST=ark.ap-southeast-1.byteplusapi.com
 ASSET_LIBRARY_PROJECT_NAME=default
 
-# 仅允许明确年满18岁的角色生成半裸/裸体内容
-NSFW_ENABLED=off
 ```
 
 `config.yaml` 中对应字段保留占位符即可，运行时会自动从 `.env` 注入：
-
-`NSFW_ENABLED=on` 时，剧本、角色主图、角色装扮图和分镜视频会统一启用成年角色裸露策略；关闭时这些生成链路会明确要求非露骨穿衣内容。该策略由代码和公共提示词统一实现，不再依赖额外私有提示词目录。
 
 ```yaml
 byteplus:
@@ -207,7 +203,7 @@ models:
 - 生成、改稿与定向修正使用统一校验：检查锁定设定、结构、时长与叙事连贯性；语义审稿发现的问题需经事实复核确认，避免因继承的机位、光源或道具插镜产生误判
 - `script_generation.validation_max_rounds` 默认 `3`，包含首次生成与后续修正；已有效的导演时长计划优先保留，必要时再微调
 - 轮次耗尽后，手动模式暂停后续生成，可选择重新启动整个项目或使用最佳候选剧本继续；刷新页面可恢复待选状态。自动模式直接选择最符合要求的候选继续，按锁定设定、结构可执行性、时长与已确认问题数量排序
-- 分镜中的特殊装扮、发型和裸露层级显式写入 `character_outfits`，布景时间/天气状态显式写入 `scene_state`；系统会逐角色核对正文与装扮字段，并为明确成年角色补齐缺失状态。两者均位于“场景描述”之前，并持久化用于后续生图/生视频
+- 分镜中的特殊装扮与发型显式写入 `character_outfits`，布景时间/天气状态显式写入 `scene_state`；两者均位于“场景描述”之前，并持久化用于后续生图/生视频
 - 服务端日志记录模型、消息数量、请求体长度、耗时和错误摘要，不输出完整提示词、请求体或模型原文；心跳与素材轮询仅记录 `DEBUG` 元数据
 
 ### 3. 参考图库生成
@@ -239,7 +235,6 @@ models:
 
 - 每个项目创建独立素材资产组，维持项目与素材资产组一一对应
 - 项目内所有人物/角色图片，包括上传原图与生成参考图，都会注册为素材资产并记录 `asset_id`
-- 支持 NSFW 素材上传，创建素材时使用 `Moderation.Strategy = Skip` 关闭 Content pre-filter
 - 只有当素材状态轮询到 `GetAsset.Status = Active` 后，才会进入视频生成链路
 
 鉴权说明：
@@ -257,7 +252,7 @@ models:
 - 角色装扮图 = 该分镜的角色装扮描述 + 对应角色主图
 - 布景状态图 = 该分镜的时间/天气状态 + 对应场景主图
 - 多个分镜的装扮图/状态图并行生成，受图片生成并发数（`video_generation.reference_images.max_concurrency`）控制
-- 角色装扮按服饰、裸露层级、发型和伤痕等稳定视觉特征去重；布景状态按时间与天气归一化去重，细微措辞变化不会重复生成
+- 角色装扮按服饰、发型和伤痕等稳定视觉特征去重；布景状态按时间与天气归一化去重，细微措辞变化不会重复生成
 - 每张变体图通过 `scene_numbers` 与一个或多个分镜强绑定，分镜视频优先使用当前编号命中的变体
 - 分镜视频选择装扮图时直接按 `scene_numbers`、精确 `variant_key`、视觉等价描述依次匹配，不会为每个角色重复扫描和重建整份分镜变体计划
 
@@ -288,7 +283,6 @@ models:
 - 自动失败重试次数受 YAML 配置限制（`video_review.max_retries`、`video_generation.scene_total_generate_limit`）
 - 人工点击“重新生成”不计入自动失败预算
 - 视频提示词默认追加“限定：不生成背景音乐”，除非用户需求中明确指定背景音乐风格
-- 当 `NSFW_ENABLED=on` 且角色明确年满 18 岁时，若当前分镜语义表明亲密行为仍在继续，会继承上一分镜的半裸/裸体装扮状态；剧情明确结束后才恢复使用当前分镜指定的其他角色图
 - 分镜编号始终按剧本数组顺序规范为 `1..N`；生成结果同时保存分镜内容指纹，防止编号正确但内容错绑
 - 分镜视频归档名使用可排序格式 `scene_012_attempt_03.mov`
 
@@ -503,7 +497,7 @@ BytePlus `ap-southeast-1` 的 veFaaS 使用常驻最少 `1`、最多 `5` 个实�
 
 原生镜像同步包含传输与运行时缓存两个阶段；传输的 `EndTime` 已出现时，`ImageCacheStatus` 仍可能为 `Creating`。脚本同时显示两个状态，等待缓存就绪且整体同步成功后才发布函数。
 
-云端环境变量清单：`BYTEPLUS_AK/SK`、`TOS_*`、`MODELARK_*`、五类模型 `*_ENDPOINT` / `*_API_KEY`、`SPEECH_*`、`ASR_RESOURCE_ID`、`ASSET_LIBRARY_*`、`NSFW_ENABLED`，以及 `ACCESS_PASSWORD` / `ACCESS_SECRET` / `ACCESS_COOKIE_SECURE`。运行时设置 `VIDEO_SKILLS_ROOT=/app/app/video_skills`、`VIDEO_TOOLS_RUNTIME_DIR=/opt/video-tools`、`VIDEO_OUTPUT_DIR=/tmp/seedance-outputs`、`REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`；脚本仅复制配置引用的变量。
+云端环境变量清单：`BYTEPLUS_AK/SK`、`TOS_*`、`MODELARK_*`、五类模型 `*_ENDPOINT` / `*_API_KEY`、`SPEECH_*`、`ASR_RESOURCE_ID`、`ASSET_LIBRARY_*`，以及 `ACCESS_PASSWORD` / `ACCESS_SECRET` / `ACCESS_COOKIE_SECURE`。运行时设置 `VIDEO_SKILLS_ROOT=/app/app/video_skills`、`VIDEO_TOOLS_RUNTIME_DIR=/opt/video-tools`、`VIDEO_OUTPUT_DIR=/tmp/seedance-outputs`、`REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`；脚本仅复制配置引用的变量。
 
 `/healthz` 只返回健康状态与版本；登录后的 `/api/runtime` 返回不含密钥的依赖、skills 和 ASR 配置状态，不代表 ASR 连通性已验证。镜像内可用 `python -m app.services.runtime_service --smoke` 验证实际剪辑、字幕渲染、时间线 lint 及音轨/时长，不调用付费 ASR。WebSocket 推送为实例内路由，跨实例通过快照轮询补齐；实例回收后的在途任务重启和跨实例写入仲裁仍需要任务队列与共享锁，TOS 快照本身不是分布式任务队列。
 
