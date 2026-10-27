@@ -77,7 +77,9 @@ def triage_report(report):
                     and isinstance(issue.get("confidence"), (int, float))
                     and math.isfinite(issue["confidence"]) and issue["confidence"] >= confidence)
         critical = issue.get("essential_story_beat")
-        if credible and critical is False:
+        if issue.get("severity") == "minor" and issue.get("viewer_unacceptable") is False:
+            action, reason = "retain", "acceptable_minor_advisory"
+        elif credible and critical is False:
             action, reason = "cut", "noncritical_story_fragment"
         elif (credible and critical is True and score_valid and score < threshold
               and issue.get("viewer_unacceptable") is True):
@@ -212,7 +214,7 @@ def map_segments(segments, kept):
 
 def review_context_key(script, references):
     value = {"script": script, "references": [urlparse(u).path for u in references],
-             "review_policy_revision": 12,
+             "review_policy_revision": 13,
              "fast_triage": fast_triage_enabled(),
              "critical_regenerate_below": config.get("video_optimization.critical_regenerate_below", 40),
              "fast_review_max_tokens": config.get("video_optimization.fast_review_max_tokens", 1600),

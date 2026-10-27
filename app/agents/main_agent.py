@@ -3930,6 +3930,7 @@ class MainAgent:
             outstanding_manual_repairs = [dict(item) for item in
                 (project.optimization_report or {}).get("unresolved_manual_repairs", [])]
             rounds = max(1, int(config.get("video_optimization.max_review_rounds", 3)))
+            last_render = None
             for round_number in range(rounds):
                 check()
                 prefix = f"round-{round_number+1}"
@@ -3944,6 +3945,15 @@ class MainAgent:
                                                     review_only, notify)
                     return await run_generation(video_optimization_service.optimize, project, check, review_only)
                 _, analysis = await optimize(True)
+                if (last_render and fast_triage_enabled()
+                        and not analysis.get("confirmed_issues") and not analysis.get("cuts")
+                        and not outstanding_manual_repairs
+                        and not project.optimization_settings.repair_ranges
+                        and not project.optimization_settings.regenerate_scenes):
+                    # Dialogue/duration guards can leave final findings unrepairable.
+                    # Preserve the reviewed candidate and failure state without rendering it again.
+                    url, report = last_render
+                    break
                 project.optimization_report = analysis
                 self.save_project_state(project.project_id)
                 await self._optimization_task(project, f"{prefix}:repair_plan",
@@ -4046,6 +4056,7 @@ class MainAgent:
                         "指定的局部修复尚未通过补片审核。 "
                         + report["final_review"].get("summary", ""))
                 project.optimization_report = report
+                last_render = (url, report)
                 project.optimization_history.append({"round": round_number+1, "kind": "final_review",
                     "approved": report["final_review"].get("approved", False),
                     "issues": report["final_review"].get("issues", []), "video_url": url})
