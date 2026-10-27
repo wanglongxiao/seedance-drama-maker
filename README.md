@@ -559,7 +559,7 @@ BytePlus `ap-southeast-1` 的 veFaaS 使用常驻最少 `1`、最多 `5` 个实�
 
 构建可复用本地 Whisper 缓存，仅将 `small.pt` 和 `large-v3-turbo.pt` 传入独立构建上下文并验证官方 SHA256；缓存缺失时自动下载。不复制用户目录或其他本地文件。
 
-默认以 OCI 归档导出镜像，通过 Registry v2 每次 4 MiB 分段上传，持久化续传进度、自动刷新认证，并跳过已发布的镜像层；传输失败仅输出错误类型，不记录认证令牌或上传签名。`.run/oci-upload-checkpoint.json` 权限为 600，不进入 Git 或镜像。稳定网络可用 `--upload-mode buildx` 切换为普通推送。
+默认以 OCI 归档导出镜像，通过 Registry v2 每次 32 MiB 分段上传，持久化已确认分段的进度、自动刷新认证，并跳过已发布的镜像层；服务限制分段大小时自动减半。收到中断信号后完成当前分段再保存进度，已失效的上传状态会重新上传当前层。传输失败仅输出错误类型，不记录令牌或上传签名。`.run/oci-upload-checkpoint.json` 权限为 600，不进入 Git 或镜像。稳定网络可用 `--upload-mode buildx` 切换为普通推送。
 
 ## Prompt 与 Skill 统一管理
 

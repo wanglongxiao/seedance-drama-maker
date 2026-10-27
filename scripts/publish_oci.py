@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import signal
 import subprocess
 import tarfile
 import time
@@ -16,9 +17,12 @@ parser.add_argument("--tag", required=True)
 parser.add_argument("--archive", type=Path, required=True)
 parser.add_argument("--profile", default="seedance-v3")
 parser.add_argument("--region", default="ap-southeast-1")
+parser.add_argument("--chunk-mib", type=int, default=32)
 parser.add_argument("--state-file", type=Path,
                     default=Path(__file__).resolve().parents[1] / ".run/oci-upload-checkpoint.json")
 args = parser.parse_args()
+if not 1 <= args.chunk_mib <= 64:
+    parser.error("--chunk-mib must be between 1 and 64")
 HOST = f"{args.registry}-{args.region}.cr.bytepluses.com"
 BASE = "https://" + HOST
 REPO, TAG = args.repository, args.tag
@@ -27,6 +31,16 @@ STATE.parent.mkdir(parents=True, exist_ok=True)
 state = json.loads(STATE.read_text()) if STATE.exists() else {}
 session = requests.Session()
 session.headers["User-Agent"] = "seedance-v3-resumable-release"
+stop_requested = False
+
+
+def request_stop(signum, frame):
+    global stop_requested
+    stop_requested = True
+
+
+signal.signal(signal.SIGTERM, request_stop)
+signal.signal(signal.SIGINT, request_stop)
 
 
 def save():
@@ -50,7 +64,7 @@ def authenticate():
 def request(method, url, **kwargs):
     for attempt in range(6):
         try:
-            response = session.request(method, url, timeout=(15, 60), **kwargs)
+            response = session.request(method, url, timeout=(30, 60), **kwargs)
             if response.status_code == 401:
                 authenticate()
                 continue
@@ -97,14 +111,8 @@ with tarfile.open(args.archive, "r") as archive:
             continue
         require(exists, (404,), "Blob lookup")
         checkpoint = state.get(digest)
-        if checkpoint:
-            status = request("GET", checkpoint["uri"])
-            if status.status_code == 204:
-                checkpoint["uri"] = location(status, checkpoint["uri"])
-                upper = int(status.headers["Range"].split("-")[-1])
-                checkpoint["offset"] = upper + 1 if upper else 0
-            else:
-                checkpoint = None
+        # Continue using the last acknowledged signed Location. A status GET
+        # with an older offset can be rejected by Harbor as BLOB_UPLOAD_INVALID.
         if not checkpoint:
             created = request("POST", f"{BASE}/v2/{REPO}/blobs/uploads/")
             require(created, (202,), "Start upload")
@@ -115,13 +123,27 @@ with tarfile.open(args.archive, "r") as archive:
         stream = archive.extractfile(member(digest))
         started, initial = time.monotonic(), checkpoint["offset"]
         last_report = checkpoint["offset"]
+        chunk_size = args.chunk_mib * 1024 * 1024
         while checkpoint["offset"] < size:
             offset = checkpoint["offset"]
             stream.seek(offset)
-            data = stream.read(min(4 * 1024 * 1024, size - offset))
+            data = stream.read(min(chunk_size, size - offset))
             response = request("PATCH", checkpoint["uri"], data=data, headers={
                 "Content-Type": "application/octet-stream",
                 "Content-Range": f"{offset}-{offset + len(data) - 1}"})
+            if response.status_code == 413 and chunk_size > 1024 * 1024:
+                chunk_size //= 2
+                print("Reduced upload chunk size:", chunk_size, flush=True)
+                continue
+            if response.status_code in (404, 410):
+                created = request("POST", f"{BASE}/v2/{REPO}/blobs/uploads/")
+                require(created, (202,), "Restart expired upload")
+                checkpoint = {"uri": location(created, ""), "offset": 0}
+                state[digest] = checkpoint
+                save()
+                started, initial, last_report = time.monotonic(), 0, 0
+                print("Upload checkpoint expired; restarting current blob:", digest[:19], flush=True)
+                continue
             if response.status_code == 416:
                 status = request("GET", checkpoint["uri"])
                 require(status, (204,), "Resume upload")
@@ -133,6 +155,9 @@ with tarfile.open(args.archive, "r") as archive:
             checkpoint["uri"] = location(response, checkpoint["uri"])
             checkpoint["offset"] = int(response.headers["Range"].split("-")[-1]) + 1
             save()
+            if stop_requested:
+                print("Checkpoint saved; upload paused:", digest[:19], checkpoint["offset"], flush=True)
+                raise SystemExit(75)
             if checkpoint["offset"] - last_report >= 32 * 1024 * 1024 or checkpoint["offset"] == size:
                 elapsed = max(.01, time.monotonic() - started)
                 print("Progress:", digest[:19], f'{checkpoint["offset"]}/{size}',
