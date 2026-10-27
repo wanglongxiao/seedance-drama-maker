@@ -49,7 +49,9 @@ def main():
         try:
             data = json.loads(result.stdout)
         except ValueError:
-            raise RuntimeError(f"{action} failed; raw output withheld") from None
+            code = re.match(r"([A-Za-z][A-Za-z0-9_.]+):", result.stderr.strip())
+            suffix = f": {code.group(1)}" if code else "; raw output withheld"
+            raise RuntimeError(f"{action} failed{suffix}") from None
         error = data.get("ResponseMetadata", {}).get("Error")
         if result.returncode or error:
             raise RuntimeError(f"{action} failed: {(error or {}).get('Code', 'unknown')}")
@@ -123,6 +125,21 @@ def main():
     print("Image published:", image, flush=True)
     state.update(commit=sha, image=image)
     save()
+    if state.get("precache_image") != image:
+        ticket = api("vefaas", "PrecacheSandboxImages", {"ImageUrls": [image]})
+        state.update(precache_image=image, precache_ticket=ticket["TicketId"])
+        save()
+    for _ in range(120):
+        status = api("vefaas", "GetSandboxImagePrecacheTicket",
+                     {"TicketId": state["precache_ticket"]})["Status"].lower()
+        print("Image pre-cache:", status, flush=True)
+        if status in {"success", "succeeded", "completed"}:
+            break
+        if status not in {"running", "pending"}:
+            raise RuntimeError("Image pre-cache failed")
+        time.sleep(10)
+    else:
+        raise RuntimeError("Image pre-cache timed out; resume deployment")
     functions = api("vefaas", "ListFunctions", {})
     items = functions.get("Functions", functions.get("Items", []))
     existing = next((f for f in items if f["Name"] == args.function_name), None)
