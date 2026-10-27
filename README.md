@@ -120,9 +120,9 @@ Skills 默认使用仓库的 `app/video_skills`，包含七个 skills 实际使�
 - `Seed-Speech`
   用于语音转文字，支持通过录音输入视频创作需求。
 - `DeepSeek-V4.1-Flash`
-  用于主对话 Agent 与剧本分镜生成。
+  用于主对话 Agent 与剧本分镜生成；视频审核已实测并切换到 `deepseek-v4.1-flash-1017`，用于分镜与成片视觉审核。
 - `Seed-2.1-turbo`
-  用于分镜视频审核，评估人物/角色一致性、物理规律和脚本语义一致性。
+  原视频审核模型，可通过 `.env` 的 `VIDEO_REVIEW_ENDPOINT` / `VIDEO_REVIEW_API_KEY` 配置使用。
 - `SeeDream-5.0-flash`
   用于人物/角色参考图与布景参考图生成和重生成。
 - `SeeDance-2.5`
@@ -367,7 +367,7 @@ Web UI 新增“结束项目”按钮，并支持在以下场景触发清理：
 
 ### 4. 视频审核与流程推进
 
-`VideoReviewAgent` 使用 `Seed-2.1-turbo` 做分镜视频审核。
+`VideoReviewAgent` 使用 `.env` 指定的视觉模型做分镜视频审核，当前部署为 `deepseek-v4.1-flash-1017`。同一测试片的快速整片审核中，原模型耗时 16.20 秒，候选模型耗时 5.11 秒，均成功返回结构化报告；这是单片速度对比，不代表通用准确率结论。
 
 审核维度：
 

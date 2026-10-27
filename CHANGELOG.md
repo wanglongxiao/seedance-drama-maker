@@ -5,6 +5,7 @@
 - 增加合成后视频优化与实际音轨字幕：局部剪除、并行短片补拍、独立补片审核、原声保留、光影匹配及成片复审。
 - 快速审核一次判断关键剧情、局部评分和是否无法接受；非关键问题优先剪除，关键剧情仅在评分低于 40 且明确不可接受时自动补拍。
 - 合成前审核默认通过阈值提升到 80；审核不可用与内容拒绝分开处理。
+- 视频审核配置在真实视频与图文输入验证成功后切换到 deepseek-v4.1-flash-1017；单片快速审核对比由 16.20 秒降至 5.11 秒，保留原有审核与修复门槛。
 - 将 HyperFrames、media-use、video-use、vlog-auto-edit、Whisper、Remotion captions/render 的实际参考文件与版本清单随仓库发布；生成模型仅接收适配后的阶段指导。
 - 增加可复用 BytePlus CLI 部署脚本与 linux/amd64 自定义镜像：FFmpeg/FFprobe、Node 22、Chromium、CPU PyTorch、Whisper small/turbo 缓存及固定 Node 依赖。
 - 云端支持 1–5 实例、HTTPS API 网关、共享签名准入 Cookie、HTTP/WebSocket 鉴权和 TOS 快照恢复；本地默认不启用准入密码。

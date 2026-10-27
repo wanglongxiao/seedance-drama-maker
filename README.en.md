@@ -118,9 +118,9 @@ The system focuses on:
 - `Seed-Speech`
   Converts voice input into text for the creation workflow.
 - `DeepSeek-V4.1-Flash`
-  Powers the main conversational agent and scene-script generation.
+  Powers the main conversational agent and scene-script generation. Video review has been tested and switched to `deepseek-v4.1-flash-1017` for scene and full-film visual checks.
 - `Seed-2.1-turbo`
-  Reviews generated scene videos for character consistency, physical plausibility, and script alignment.
+  The previous review model, configurable through `VIDEO_REVIEW_ENDPOINT` / `VIDEO_REVIEW_API_KEY` in `.env`.
 - `SeeDream-5.0-flash`
   Generates and regenerates character and backdrop reference images.
 - `SeeDance-2.5`
@@ -372,7 +372,7 @@ If the project has already produced a final video, the final export under `video
 
 ### 4. Video Review And Flow Control
 
-`VideoReviewAgent` uses `Seed-2.1-turbo` to review each scene video.
+`VideoReviewAgent` uses the visual model configured in `.env`, currently `deepseek-v4.1-flash-1017`. On one shared test film, fast review took 16.20 seconds with the previous model and 5.11 seconds with the candidate; both returned structured reports. This single-film timing does not establish general accuracy.
 
 Review dimensions:
 
