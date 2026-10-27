@@ -100,6 +100,8 @@ scene_number, scene_name, character_outfits, scene_state, description, dialogue,
 8. 裸露层级是必须逐秒段、逐分镜继承的持久状态。角色一旦进入全裸、半裸、上/下身裸露或只穿内衣状态，后续秒段和连续分镜必须保持同一层级；镜头切换、景别变化、机位变化、遮挡、被单覆盖、场景切换、时间跳跃或性爱结束都不会自动让衣物回到身上。
 9. 裸露角色只有在 description 中明确、连续、可见地完成拿起衣物并穿上/套上/披上、扣好或系好的动作后，才可在后续秒段或下一分镜改为更完整的穿衣造型。不得用“镜头一切已穿好”“转场后衣着整齐”等结果句跳过穿衣过程；若本分镜展示穿衣过程，character_outfits 仍描述该分镜开场时继承的裸露造型，穿好后的新造型从下一分镜开始使用。
 10. 连续性爱或亲密动作尚未结束时，即使模型倾向恢复 characters.clothing 中的默认衣服，也必须以当前 character_outfits 的裸露层级为准并逐字复用；默认 clothing 只是角色通常装扮，不得覆盖当前裸露状态。性爱结束本身也不等于已经穿衣。
+11. 若用户要求“所有角色/两人/全员”保持某一裸露层级，必须逐一检查每个分镜的 characters_present：每名明确成年且出场的相关角色都必须有 character_outfits 条目，值中须同时明确裸露层级和发型，例如“全身裸体，姜红色长卷发”。禁止只在 description、character_description、剧情概要或角色特征中写裸体而让 character_outfits 为空、遗漏某个角色或保留默认衣服。
+12. 输出 JSON 前必须对每个分镜执行装扮一致性自检：逐一比较 characters_present、description、character_description 与 character_outfits；正文出现的裸露层级高于 character_outfits 时，必须先修正 character_outfits，再输出。
 
 【画面、对白与声音】
 1. description 必须可直接用于后续视频生成，只描述画面、环境、动作、神态、眼神、情绪、心理和镜头信息；不得写直接对白、引号对白、台词、旁白或内心独白。

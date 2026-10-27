@@ -187,7 +187,7 @@
     "identityBackground": "身份背景",
     "sceneDetails": "🎬 分鏡詳情 ({count}個)",
     "sceneDuration": "({duration}秒)",
-    "characterOutfits": "👗 角色裝扮（含髮型）:",
+    "characterOutfits": "👗 角色裝扮（含髮型與裸露層級）:",
     "sceneState": "🌦️ 布景狀態:",
     "sceneDescription": "🎬 場景描述:",
     "dialogue": "💬 對白／旁白:",

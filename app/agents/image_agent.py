@@ -1111,31 +1111,13 @@ class ImageAgent:
         aspect_ratio: str = None,
         reference_image_url: str = None,
     ) -> GeneratedImage:
-        """
-        根据反馈重新生成某一场景的图片
-        """
-        if not aspect_ratio:
-            aspect_ratio = self.default_aspect_ratio
-
-        logger.log_agent_call("ImageAgent", "regenerate_image", {
-            "scene_number": scene_number,
-            "feedback": feedback,
-            "aspect_ratio": aspect_ratio,
-            "has_reference": bool(reference_image_url)
-        })
-
-        if scene_number == 0:
-            logger.info("Scene 0 regeneration delegated to regenerate_reference_image")
-            return self.regenerate_reference_image(
-                script=script,
-                feedback=feedback,
-                user_style_info=user_style_info,
-                aspect_ratio=aspect_ratio,
-                user_reference_images=[reference_image_url] if reference_image_url else None,
-            )
-
-        else:
-            # 其他场景编号（包括999结尾帧）不再支持重新生成
-            # 因为分镜图和结尾帧生成功能已废弃
-            logger.warning(f"Scene {scene_number} regeneration not supported - feature deprecated")
-            raise ValueError(f"Scene {scene_number} regeneration not supported. Only reference image (scene 0) can be regenerated.")
+        """Keep the legacy API route working for the project reference image."""
+        if scene_number != 0:
+            raise ValueError("Only the project reference image can be regenerated")
+        return self.regenerate_reference_image(
+            script=script,
+            feedback=feedback,
+            user_style_info=user_style_info,
+            aspect_ratio=aspect_ratio or self.default_aspect_ratio,
+            user_reference_images=[reference_image_url] if reference_image_url else None,
+        )

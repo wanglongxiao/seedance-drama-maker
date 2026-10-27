@@ -190,7 +190,7 @@
     "identityBackground": "身份背景",
     "sceneDetails": "🎬 分镜详情 ({count}个)",
     "sceneDuration": "({duration}秒)",
-    "characterOutfits": "👗 角色装扮（含发型）:",
+    "characterOutfits": "👗 角色装扮（含发型与裸露层级）:",
     "sceneState": "🌦️ 布景状态:",
     "sceneDescription": "🎬 场景描述:",
     "dialogue": "💬 对话/旁白:",

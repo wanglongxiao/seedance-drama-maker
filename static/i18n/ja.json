@@ -187,7 +187,7 @@
     "identityBackground": "身分背景",
     "sceneDetails": "🎬 シーン詳細 ({count})",
     "sceneDuration": "({duration}秒)",
-    "characterOutfits": "👗 衣装（髪型を含む）:",
+    "characterOutfits": "👗 衣装（髪型・露出レベルを含む）:",
     "sceneState": "🌦️ 背景セット状態:",
     "sceneDescription": "🎬 シーン説明:",
     "dialogue": "💬 セリフ / ナレーション:",

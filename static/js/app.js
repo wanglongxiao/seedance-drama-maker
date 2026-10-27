@@ -102,8 +102,8 @@ function getPersistedProjectId() {
         return null;
     }
 }
-const I18N_VERSION = '20261028-release';
-const FRONTEND_CONFIG_VERSION = '20261028-release';
+const I18N_VERSION = '20261028-outfit-state';
+const FRONTEND_CONFIG_VERSION = '20261028-outfit-state';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
     'zh-cn': 'zh-CN',

@@ -15,5 +15,6 @@ $style_output_rule
 【强制】character_outfits 只描述稳定造型身份；同一服装款式/主色/固定配饰/发型结构/裸露层级必须逐字复用同一描述。血污、湿透、伤口、局部撕裂/破损、泥污、褶皱、衣料贴身和发丝凌乱等动态状态只写入 description / character_description，不得创建新装扮描述或触发新装扮图。
 【强制】以下裸露状态规则仅在运行时“NSFW 运行策略：已开启”且相关角色明确年满18岁时生效；关闭时不得输出半裸、裸体或可见生殖器内容。
 【强制】全裸/半裸/局部裸露/只穿内衣是跨秒段、跨分镜持久状态；镜头切换、遮挡、被单、换场、时间跳跃、性爱结束及默认 clothing 都不得自动恢复衣物。只有 description 先完整展示拿起并穿好/扣好/系好衣物，后续秒段或下一镜才可降低裸露层级；穿衣过程所在分镜的 character_outfits 仍使用开场裸露造型。
+【强制】若用户要求所有角色/两人/全员处于某一裸露层级，每个分镜必须逐一核对 characters_present，并为每名明确成年且出场的相关角色输出包含“裸露层级 + 发型”的 character_outfits。输出前比较 description、character_description 与 character_outfits，禁止正文写裸体但装扮字段为空、遗漏角色、层级偏低或仍保留默认衣服。
 $output_language_rule
 请直接输出JSON格式的剧本内容，不要包含其他说明文字。

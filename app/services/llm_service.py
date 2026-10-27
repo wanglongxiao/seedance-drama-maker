@@ -284,8 +284,6 @@ class LLMService:
         self,
         prompt: str,
         reference_image_url: str = None,
-        first_frame_url: str = None,
-        last_frame_url: str = None,
         model: str = None,
         duration: int = 10,
         resolution: str = "720p",
@@ -294,13 +292,11 @@ class LLMService:
         **kwargs
     ) -> str:
         """
-        创建视频生成任务 - seedance-2.0 版本
+        创建视频生成任务
 
         Args:
             prompt: 视频生成提示词
-            reference_image_url: 角色参考图URL（seedance-2.0 使用）
-            first_frame_url: 首帧图片URL（旧版本使用，可选）
-            last_frame_url: 尾帧图片URL（可选）
+            reference_image_url: 角色参考图URL
             model: 模型端点
             duration: 视频时长（秒）
             resolution: 视频分辨率 (480p, 720p, 1080p)
@@ -338,7 +334,6 @@ class LLMService:
             }
         ]
 
-        # 优先使用 reference_image_url (seedance-2.0 格式)
         if reference_image_url:
             reference_image_url = tos_service.ensure_accessible_url(reference_image_url)
             content.append({
@@ -347,14 +342,6 @@ class LLMService:
                 "role": "reference_image"
             })
             logger.info(f"Using reference_image for character consistency")
-        elif first_frame_url:
-            first_frame_url = tos_service.ensure_accessible_url(first_frame_url)
-            # 兼容旧版本：使用 first_frame
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": first_frame_url}
-            })
-            logger.info(f"Using first_frame (legacy mode)")
 
         # 构建 payload - seedance-2.5 格式
         payload = {

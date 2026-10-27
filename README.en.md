@@ -207,7 +207,7 @@ Current rules:
 - Generation, rewriting, and targeted fixes share one review flow for locked settings, structure, duration, and story continuity. Semantic findings are checked against script evidence to avoid false failures for inherited camera positions, lighting, or prop inserts
 - `script_generation.validation_max_rounds` defaults to `3`, including the first draft and later fixes. Valid director timing plans are kept before any duration adjustment
 - When all rounds fail, manual mode pauses and offers a full project restart or continuation with the best draft; the choice survives a page refresh. Auto mode continues with the best candidate, ranked by locked settings, executable structure, duration, and confirmed issue count
-- Per-scene special outfits and hairstyle changes are written explicitly to `character_outfits`, while backdrop time/weather state is written explicitly to `scene_state`; both fields appear before the scene description and are persisted for downstream image/video generation
+- Per-scene special outfits, hairstyle changes, and exposure levels are written explicitly to `character_outfits`, while backdrop time/weather state is written explicitly to `scene_state`. The server checks scene text against each explicitly adult character's outfit state and fills omissions. Both fields appear before the scene description and persist into downstream image/video generation
 - Backend logs record model, message count, request length, timing and error summaries without full prompts, request bodies or raw model output. Heartbeats and asset polling use compact `DEBUG` metadata.
 
 ### 3. Reference Library Generation

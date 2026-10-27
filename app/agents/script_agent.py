@@ -8,7 +8,13 @@ import json
 import re
 from typing import Dict, Any, List, Optional
 from app.config import config
-from app.prompt_skill import load_prompt, nsfw_content_requested, nsfw_enabled, render_prompt
+from app.prompt_skill import (
+    is_explicitly_adult,
+    load_prompt,
+    nsfw_content_requested,
+    nsfw_enabled,
+    render_prompt,
+)
 from app.services.llm_service import llm_service
 from app.services.video_skill_service import video_skill_service
 from app.utils.i18n import language_name, translate
@@ -732,6 +738,95 @@ class ScriptAgent:
             return 1
         return 0
 
+    def _positive_nudity_level(self, value: Any) -> int:
+        """Return the highest affirmatively requested exposure level in text."""
+        text = self._normalize_single_line(value).lower()
+        if not text:
+            return 0
+        patterns = (
+            (3, r"全身裸体|全裸|一丝不挂|赤身裸体|全身赤裸|浑身赤裸|正面裸体|完全裸体"),
+            (2, r"半裸|上身全裸|上身赤裸|赤裸上身|裸露上身|下身赤裸|赤裸下身|裸露下身|胸部裸露"),
+            (1, r"只穿内衣|只着内衣|只穿内裤|内衣裤|胸罩|文胸|丁字裤"),
+        )
+        negated_prefix = re.compile(
+            r"(?:不|没|非|无|禁止|避免|不得|不要|不能|不应|无需|无须|拒绝|取消|去掉|排除)"
+            r".{0,10}$"
+        )
+        level = 0
+        for candidate_level, pattern in patterns:
+            for match in re.finditer(pattern, text):
+                if not negated_prefix.search(text[max(0, match.start() - 14):match.start()]):
+                    level = max(level, candidate_level)
+        return level
+
+    def _global_character_nudity_level(self, user_input: str) -> int:
+        """Read explicit all-character wardrobe requirements from the request."""
+        level = 0
+        collective = re.compile(
+            r"(?:所有|全部|全体|全员|每(?:名|个)|各(?:名|个)?|两名|两个|两人|二人|双方)"
+            r"(?:成年)?(?:角色|人物|演员|男女|女孩|女性|男人|男性|人)?"
+            r"|(?:角色|人物|演员)(?:都|均|全部|全都)"
+        )
+        for clause in re.split(r"[。；;！？!?\n]+", self._normalize_single_line(user_input)):
+            if not collective.search(clause):
+                continue
+            level = max(level, self._positive_nudity_level(clause))
+        return level
+
+    def _scene_character_nudity_level(
+        self,
+        scene: Dict[str, Any],
+        character_name: str,
+        present_names: List[str],
+    ) -> int:
+        """Attribute affirmative scene nudity text to one present character."""
+        text = " ".join(
+            self._normalize_single_line(scene.get(field))
+            for field in ("description", "character_description", "camera_angle")
+            if self._normalize_single_line(scene.get(field))
+        )
+        if not text:
+            return 0
+        if len(present_names) <= 1:
+            return self._positive_nudity_level(text)
+        collective_markers = (
+            "两人", "二人", "双方", "他们", "她们", "众人", "全员", "所有角色",
+            "全部角色", "每名角色", "各自", "角色均", "人物均",
+        )
+        level = 0
+        for clause in re.split(r"[，,。；;！？!?\n]+", text):
+            clause_level = self._positive_nudity_level(clause)
+            if not clause_level:
+                continue
+            if (
+                character_name in clause
+                or f"[{character_name}]" in clause
+                or any(marker in clause for marker in collective_markers)
+            ):
+                level = max(level, clause_level)
+        return level
+
+    def _nudity_outfit_description(
+        self,
+        level: int,
+        character: Optional[Dict[str, Any]],
+        *outfit_context: str,
+    ) -> str:
+        label = {1: "只穿内衣", 2: "半裸", 3: "全身裸体"}.get(level, "")
+        if not label:
+            return ""
+        hairstyle = next(
+            (
+                self._extract_hairstyle_fragment(value)
+                for value in outfit_context
+                if self._extract_hairstyle_fragment(value)
+            ),
+            "",
+        )
+        if not hairstyle and character:
+            hairstyle = self._normalize_single_line(character.get("hairstyle"))
+        return f"{label}，{hairstyle}" if hairstyle else label
+
     def _scene_nudity_level(self, scene: Optional[Dict[str, Any]]) -> int:
         if not scene:
             return 0
@@ -936,6 +1031,7 @@ class ScriptAgent:
         self,
         scenes: List[Dict[str, Any]],
         characters: List[Dict[str, Any]],
+        user_input: str = "",
     ) -> None:
         if not scenes:
             return
@@ -946,6 +1042,9 @@ class ScriptAgent:
             if isinstance(character, dict) and self._normalize_single_line(character.get('name'))
         }
         active_nudity_outfits: Dict[str, str] = {}
+        global_nudity_level = (
+            self._global_character_nudity_level(user_input) if nsfw_enabled() else 0
+        )
 
         for idx, scene in enumerate(scenes):
             current_outfits = self._normalize_character_outfits(scene.get('character_outfits'))
@@ -971,6 +1070,27 @@ class ScriptAgent:
                 prev_outfit = prev_outfits.get(char_name, "")
                 next_outfit = next_outfits.get(char_name, "") if char_name in next_present else ""
                 current_outfit = current_outfits.get(char_name, "")
+                required_nudity_level = 0
+                if nsfw_enabled() and character and is_explicitly_adult(character.get("age")):
+                    required_nudity_level = max(
+                        global_nudity_level,
+                        self._scene_character_nudity_level(scene, char_name, present_names),
+                    )
+                if required_nudity_level > self._outfit_nudity_level(current_outfit):
+                    current_outfit = self._nudity_outfit_description(
+                        required_nudity_level,
+                        character,
+                        current_outfit,
+                        prev_outfit,
+                        next_outfit,
+                    )
+                    current_outfits[char_name] = current_outfit
+                    logger.warning(
+                        "Repaired missing character_outfit nudity in scene %s: %s=%s",
+                        scene.get("scene_number", idx + 1),
+                        char_name,
+                        current_outfit,
+                    )
                 current_categories = self._effective_scene_context_categories(
                     scene,
                     prev_scene=prev_scene,
@@ -2074,6 +2194,48 @@ class ScriptAgent:
 
         return issues
 
+    def _collect_missing_nudity_outfit_issues(
+        self,
+        scenes: List[Dict[str, Any]],
+        characters: List[Dict[str, Any]],
+        user_input: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Detect scene nudity that is absent from the authoritative outfit field."""
+        if not nsfw_enabled():
+            return []
+        characters_by_name = {
+            self._strip_character_name_markers(character.get("name")): character
+            for character in characters or []
+            if isinstance(character, dict) and self._strip_character_name_markers(character.get("name"))
+        }
+        global_level = self._global_character_nudity_level(user_input)
+        issues: List[Dict[str, Any]] = []
+        for index, scene in enumerate(scenes or [], start=1):
+            outfits = self._normalize_character_outfits(scene.get("character_outfits"))
+            present_names = [
+                self._strip_character_name_markers(name)
+                for name in (scene.get("characters_present") or [])
+                if self._strip_character_name_markers(name)
+            ]
+            for character_name in present_names:
+                character = characters_by_name.get(character_name)
+                if not character or not is_explicitly_adult(character.get("age")):
+                    continue
+                required_level = max(
+                    global_level,
+                    self._scene_character_nudity_level(scene, character_name, present_names),
+                )
+                actual_level = self._outfit_nudity_level(outfits.get(character_name, ""))
+                if required_level > actual_level:
+                    issues.append({
+                        "scene": int(scene.get("scene_number") or index),
+                        "character": character_name,
+                        "required_level": required_level,
+                        "actual_level": actual_level,
+                        "reason": "nudity_missing_from_character_outfits",
+                    })
+        return issues
+
     def _serialize_script_for_revision(self, script_data: Dict[str, Any]) -> str:
         """Serialize the normalized prior result without parser-only metadata."""
         public_data = {
@@ -2204,6 +2366,11 @@ class ScriptAgent:
             content = response["choices"][0]["message"]["content"]
             self._log_model_response(stage, attempt, content)
             data = self._parse_script(content)
+            self._enforce_character_outfit_continuity(
+                data.get("scenes") or [],
+                data.get("characters") or [],
+                user_input=user_input,
+            )
             names_ok = self._validate_uploaded_reference_name_usage(data, uploaded_reference_images)
             # Validate what will actually be returned, including retimed beat boundaries.
             self._fit_scene_durations_to_target(data["scenes"], target_duration)
@@ -2352,6 +2519,16 @@ class ScriptAgent:
                 f"角色 [{issue.get('character', '?')}] 在裸露状态后没有可见穿衣动作却恢复了衣着；"
                 "请保持上一秒段及上一分镜的裸露层级，或先完整写出拿起衣物并穿好/扣好/系好的连续动作，"
                 "再在后续秒段或下一分镜切换为穿衣造型。"
+            )
+        for issue in self._collect_missing_nudity_outfit_issues(
+            scenes,
+            script_data.get("characters") or [],
+            user_input,
+        )[:10]:
+            feedback.append(
+                f"分镜 {issue.get('scene', '?')} 的角色 [{issue.get('character', '?')}] "
+                "在正文或用户要求中具有裸露状态，但 character_outfits 缺失或裸露层级偏低；"
+                "请把同一裸露层级和该角色发型明确写入 character_outfits。"
             )
         # Wording similarity is only advisory; evidence-based director review
         # decides whether a reprise actually repeats an already completed arc.
@@ -2521,6 +2698,20 @@ class ScriptAgent:
                     issue["scene"],
                     issue["character"],
                     issue["reason"],
+                )
+            return False
+
+        missing_nudity_outfit_issues = self._collect_missing_nudity_outfit_issues(
+            scenes,
+            script_data.get("characters") or [],
+            user_input,
+        )
+        if missing_nudity_outfit_issues:
+            for issue in missing_nudity_outfit_issues[:5]:
+                logger.warning(
+                    "Script quality check failed: scene %s character %s omits required nudity from character_outfits",
+                    issue["scene"],
+                    issue["character"],
                 )
             return False
 

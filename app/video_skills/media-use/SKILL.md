@@ -25,7 +25,7 @@ It prints one line, `resolved <id> → <path> (<type>, <metadata>)`. List reusab
 | Logos (`logo`) | | theSVG, GitHub avatar, favicon; never redrawn |
 | Voiceover (`voice`) | HeyGen voices, voice cloning | `npx hyperframes tts` (Kokoro on device; Python 3.10+ with `pip install kokoro-onnx soundfile`) |
 | A presenter speaking | Avatar video (`--type video`) | Local LTX for generic clips, if installed |
-| Transcripts | Project BytePlus Seed Speech service | Native word and utterance timestamps |
+| Transcripts | | `npx hyperframes transcribe` (Parakeet or whisper) |
 | Cutouts | `heygen background-removal` | `npx hyperframes remove-background` |
 | Grades, LUTs, looks | | `npx hyperframes media-treatment` |
 

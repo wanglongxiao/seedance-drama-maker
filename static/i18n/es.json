@@ -188,7 +188,7 @@
     "identityBackground": "Contexto de identidad",
     "sceneDetails": "🎬 Detalles de Escenas ({count})",
     "sceneDuration": "({duration}s)",
-    "characterOutfits": "👗 Vestuario del personaje (incl. peinado):",
+    "characterOutfits": "👗 Vestuario del personaje (incl. peinado y nivel de exposición):",
     "sceneState": "🌦️ Estado de escenografía:",
     "sceneDescription": "🎬 Descripción de la escena:",
     "dialogue": "💬 Diálogo / Narración:",
