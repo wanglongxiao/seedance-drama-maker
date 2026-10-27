@@ -184,8 +184,10 @@ def main():
     state["function_id"] = function_id
     save()
     for _ in range(120):
-        status = api("vefaas", "GetImageSyncStatus", dict(FunctionId=function_id, Source=image))["Status"]
-        print("Image synchronization:", status, flush=True)
+        synchronization = api("vefaas", "GetImageSyncStatus", dict(FunctionId=function_id, Source=image))
+        status = synchronization["Status"]
+        print("Image synchronization:", status, "cache:",
+              synchronization.get("ImageCacheStatus", "unavailable"), flush=True)
         if status.lower() in {"success", "succeeded"}:
             break
         if status.lower() not in {"running", "pending"}:

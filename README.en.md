@@ -556,11 +556,15 @@ Install the official [BytePlus CLI](https://github.com/byteplus-sdk/byteplus-cli
 
 The script builds `linux/amd64` from `git archive HEAD`, creates an isolated v3 function, APIG service, VeFaaS upstream and `/` prefix route, and sets 4 vCPU / 8 GiB, a 900-second request timeout, and 1–5 instances. The route API uses version `2022-11-12`. Local state in ignored `.run/deployment-v3.json` allows resuming deployment.
 
+Use an ordinary `native/v1` function without `CpuStrategy=always`, which selects the Sandbox function type. Image transfer can finish while `ImageCacheStatus` is still `Creating`; wait for the cache and overall synchronization to succeed. Release the function and wait for `done` before setting and reading back `MinInstance=1`, `MaxInstance=5` and zero frozen reserved instances. The deployment helper prints both synchronization and cache status.
+
 Cloud settings include `BYTEPLUS_AK/SK`, `TOS_*`, `MODELARK_*`, five model `*_ENDPOINT` / `*_API_KEY` pairs, `SPEECH_*`, `ASR_RESOURCE_ID`, `ASSET_LIBRARY_*`, `NSFW_ENABLED`, and `ACCESS_PASSWORD` / `ACCESS_SECRET` / `ACCESS_COOKIE_SECURE`. Runtime paths are `VIDEO_SKILLS_ROOT=/app/app/video_skills`, `VIDEO_TOOLS_RUNTIME_DIR=/opt/video-tools`, `WHISPER_CACHE_DIR=/opt/whisper-models`, `VIDEO_OUTPUT_DIR=/tmp/seedance-outputs`, and `REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`. Only variables referenced by configuration are copied.
 
 `/healthz` returns health and version only. Authenticated `/api/runtime` reports tools and skills without secrets. Run `python -m app.services.runtime_service --smoke` inside the image to check actual editing, captions, timeline lint, both Whisper models, audio and duration. WebSocket delivery is local to its instance; snapshot polling covers updates made by other instances. Restarting interrupted jobs after instance removal and arbitrating concurrent writes still need a job queue and shared locks; TOS snapshots alone do not provide them.
 
 The deployment script enables `RUNTIME_SMOKE_ENABLED=true`. After login, `POST /api/runtime/smoke` runs the same synthetic media check on the actual cloud instance, cleans its temporary files and makes no paid generation calls. Each instance allows one check at a time. Set the flag to `false` to disable this diagnostic endpoint.
+
+Cloud verification on 2026-10-27 took 45.54 seconds: editing and caption rendering both produced a 1.52-second video, timeline lint found no errors, and small/turbo inference passed. All five UI languages switched in Chrome without page errors. Authenticated WebSocket connections worked. The application rejects unauthenticated handshakes with 403; the platform proxy may report HTTP 200 for that failed handshake, which still cannot upgrade to WebSocket.
 
 Builds can reuse local Whisper checkpoints. Only `small.pt` and `large-v3-turbo.pt` enter a separate build context, and Whisper checks their official SHA256 values. Missing models download automatically. User directories and other local files are never copied.
 
