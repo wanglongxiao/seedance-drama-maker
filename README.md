@@ -551,6 +551,10 @@ BytePlus `ap-southeast-1` 的 veFaaS 使用常驻最少 `1`、最多 `5` 个实�
 
 脚本从 `git archive HEAD` 构建 `linux/amd64` 镜像，上传后通过 `PrecacheSandboxImages` 完成平台镜像预缓存，再创建独立 v3 函数与 API 网关服务、VeFaaS upstream 和 `/` 前缀路由，配置 4 vCPU / 8 GiB、900 秒请求超时和 1–5 实例。创建函数设置 `CpuStrategy=always`，使后台视频任务在 HTTP 请求结束后继续使用 CPU。路由 API 使用版本 `2022-11-12`，支持 WebSocket。部署状态保存在被忽略的 `.run/deployment-v3.json`，可重复执行恢复。
 
+若镜像已发布，仅修改部署脚本或文档，可加 `--reuse-published-image` 继续部署。脚本会比较 Dockerfile、应用、skills、静态页面、配置和依赖等构建输入；任何输入发生变化都会拒绝复用。状态分别记录镜像源码 commit 与部署脚本 commit。
+
+新函数先完成 `Release`，等待状态为 `done`，再设置 `MinInstance=1` / `MaxInstance=5`；平台不允许对尚未发布的函数调整保留实例。
+
 云端环境变量清单：`BYTEPLUS_AK/SK`、`TOS_*`、`MODELARK_*`、五类模型 `*_ENDPOINT` / `*_API_KEY`、`SPEECH_*`、`ASR_RESOURCE_ID`、`ASSET_LIBRARY_*`、`NSFW_ENABLED`，以及 `ACCESS_PASSWORD` / `ACCESS_SECRET` / `ACCESS_COOKIE_SECURE`。运行时设置 `VIDEO_SKILLS_ROOT=/app/app/video_skills`、`VIDEO_TOOLS_RUNTIME_DIR=/opt/video-tools`、`WHISPER_CACHE_DIR=/opt/whisper-models`、`VIDEO_OUTPUT_DIR=/tmp/seedance-outputs`、`REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`；脚本仅复制配置引用的变量。
 
 `/healthz` 只返回健康状态与版本；登录后的 `/api/runtime` 返回不含密钥的依赖和 skills 就绪状态。镜像内可用 `python -m app.services.runtime_service --smoke` 验证实际剪辑、字幕渲染、时间线 lint、两种 Whisper 模型及音轨/时长。WebSocket 推送为实例内路由，跨实例通过快照轮询补齐；实例回收后的在途任务重启和跨实例写入仲裁仍需要任务队列与共享锁，TOS 快照本身不是分布式任务队列。

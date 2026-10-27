@@ -29,6 +29,8 @@ def main():
     parser.add_argument("--service-id", help="Reuse a previously created gateway service")
     parser.add_argument("--builder", default="dmbuilder")
     parser.add_argument("--upload-mode", choices=("resumable", "buildx"), default="resumable")
+    parser.add_argument("--reuse-published-image", action="store_true",
+                        help="Resume without rebuilding when all image inputs match the published commit")
     parser.add_argument("--state-file", type=Path, default=ROOT / ".run/deployment-v3.json")
     args = parser.parse_args()
     state_path = args.state_file
@@ -86,44 +88,56 @@ def main():
                      WHISPER_CACHE_DIR="/opt/whisper-models", VIDEO_OUTPUT_DIR="/tmp/seedance-outputs",
                      REMOTION_BROWSER_EXECUTABLE="/usr/bin/chromium", RUNTIME_SMOKE_ENABLED="true")
     registry_host = f"{args.registry}-{args.region}.cr.bytepluses.com"
-    image = f"{registry_host}/{args.namespace}/seedance-drama-maker:git-{sha[:12]}"
+    image_sha = state.get("commit") if args.reuse_published_image else sha
+    if args.reuse_published_image:
+        inputs = ["Dockerfile", ".dockerignore", "app", "static", "config.yaml", "run.sh",
+                  "requirements.txt", "requirements-video-tools.txt", "runtime"]
+        if not image_sha or not state.get("image"):
+            raise RuntimeError("No published image in deployment state")
+        changed = subprocess.run(["git", "diff", "--quiet", image_sha, sha, "--", *inputs], cwd=ROOT)
+        if changed.returncode:
+            raise RuntimeError("Image inputs changed; rebuild instead of reusing")
+    image = f"{registry_host}/{args.namespace}/seedance-drama-maker:git-{image_sha[:12]}"
+    if args.reuse_published_image and state["image"] != image:
+        raise RuntimeError("Published image does not match the requested registry and namespace")
     credentials = api("cr", "GetAuthorizationToken", {"Registry": args.registry})
     result = subprocess.run(["docker", "login", registry_host, "--username", credentials["Username"],
                              "--password-stdin"], input=credentials["Token"], capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError("Registry login failed; raw output withheld")
-    with tempfile.TemporaryDirectory(prefix="seedance-release-") as temporary, \
-         tempfile.TemporaryDirectory(prefix="seedance-model-cache-") as model_context:
-        Path(model_context).chmod(0o755)
-        archive = subprocess.check_output(["git", "archive", "HEAD"], cwd=ROOT)
-        subprocess.run(["tar", "-xf", "-", "-C", temporary], input=archive, check=True)
-        local_models = Path(env.get("WHISPER_CACHE_DIR") or "~/.cache/whisper").expanduser()
-        for name in ("small.pt", "large-v3-turbo.pt"):
-            source = local_models / name
-            if source.is_file() and not source.is_symlink():
-                target = Path(model_context) / name
-                try:
-                    os.link(source, target)
-                except OSError:
-                    shutil.copy2(source, target)
-        build = ["docker", "buildx", "build", "--builder", args.builder,
-                        "--platform", "linux/amd64", "--tag", image, "--label",
-                        f"org.opencontainers.image.revision={sha}", "--build-context",
-                        f"whisper-cache={model_context}"]
-        if args.upload_mode == "resumable":
-            oci_archive = Path(temporary) / "image.oci.tar"
-            build += ["--provenance=false", "--output",
-                      f"type=oci,dest={oci_archive},oci-mediatypes=false", temporary]
-            subprocess.run(build, check=True)
-            subprocess.run([os.sys.executable, ROOT / "scripts/publish_oci.py",
-                "--registry", args.registry, "--repository", f"{args.namespace}/seedance-drama-maker",
-                "--tag", f"git-{sha[:12]}", "--archive", oci_archive,
-                "--profile", args.profile, "--region", args.region,
-                "--state-file", state_path.parent / "oci-upload-checkpoint.json"], check=True)
-        else:
-            subprocess.run(build + ["--push", temporary], check=True)
+    if not args.reuse_published_image:
+        with tempfile.TemporaryDirectory(prefix="seedance-release-") as temporary, \
+             tempfile.TemporaryDirectory(prefix="seedance-model-cache-") as model_context:
+            Path(model_context).chmod(0o755)
+            archive = subprocess.check_output(["git", "archive", "HEAD"], cwd=ROOT)
+            subprocess.run(["tar", "-xf", "-", "-C", temporary], input=archive, check=True)
+            local_models = Path(env.get("WHISPER_CACHE_DIR") or "~/.cache/whisper").expanduser()
+            for name in ("small.pt", "large-v3-turbo.pt"):
+                source = local_models / name
+                if source.is_file() and not source.is_symlink():
+                    target = Path(model_context) / name
+                    try:
+                        os.link(source, target)
+                    except OSError:
+                        shutil.copy2(source, target)
+            build = ["docker", "buildx", "build", "--builder", args.builder,
+                            "--platform", "linux/amd64", "--tag", image, "--label",
+                            f"org.opencontainers.image.revision={sha}", "--build-context",
+                            f"whisper-cache={model_context}"]
+            if args.upload_mode == "resumable":
+                oci_archive = Path(temporary) / "image.oci.tar"
+                build += ["--provenance=false", "--output",
+                          f"type=oci,dest={oci_archive},oci-mediatypes=false", temporary]
+                subprocess.run(build, check=True)
+                subprocess.run([os.sys.executable, ROOT / "scripts/publish_oci.py",
+                    "--registry", args.registry, "--repository", f"{args.namespace}/seedance-drama-maker",
+                    "--tag", f"git-{sha[:12]}", "--archive", oci_archive,
+                    "--profile", args.profile, "--region", args.region,
+                    "--state-file", state_path.parent / "oci-upload-checkpoint.json"], check=True)
+            else:
+                subprocess.run(build + ["--push", temporary], check=True)
     print("Image published:", image, flush=True)
-    state.update(commit=sha, image=image)
+    state.update(commit=image_sha, image=image, deployment_commit=sha)
     save()
     if state.get("precache_image") != image:
         ticket = api("vefaas", "PrecacheSandboxImages", {"ImageUrls": [image]})
@@ -162,19 +176,30 @@ def main():
         function_id = created["Id"]
     state["function_id"] = function_id
     save()
-    api("vefaas", "UpdateFunctionResource", dict(FunctionId=function_id, MinInstance=1, MaxInstance=5))
     for _ in range(120):
         status = api("vefaas", "GetImageSyncStatus", dict(FunctionId=function_id, Source=image))["Status"]
         print("Image synchronization:", status, flush=True)
-        if status == "Success":
+        if status.lower() in {"success", "succeeded"}:
             break
-        if status not in {"Running", "Pending"}:
+        if status.lower() not in {"running", "pending"}:
             raise RuntimeError("Image synchronization failed")
         time.sleep(10)
     else:
         raise RuntimeError("Image synchronization timed out; resume deployment")
     api("vefaas", "Release", dict(FunctionId=function_id, RevisionNumber=0,
         TargetTrafficWeight=100, MaxInstance=5, Description=f"v3.0 {sha[:12]}"))
+    for _ in range(120):
+        release = api("vefaas", "GetReleaseStatus", {"FunctionId": function_id})
+        status = release["Status"].lower()
+        print("Function release:", status, flush=True)
+        if status == "done":
+            break
+        if status in {"failed", "error", "aborted"}:
+            raise RuntimeError("Function release failed")
+        time.sleep(5)
+    else:
+        raise RuntimeError("Function release timed out; inspect release status")
+    api("vefaas", "UpdateFunctionResource", dict(FunctionId=function_id, MinInstance=1, MaxInstance=5))
     service_id = args.service_id or state.get("service_id")
     if not service_id:
         service_id = api("apig", "CreateGatewayService", dict(
