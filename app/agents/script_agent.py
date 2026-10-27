@@ -1451,22 +1451,58 @@ class ScriptAgent:
         if not user_input:
             return None
 
-        # 风格关键词映射
+        # 摘要只收录肯定的风格要求，不能把否定、话题许可或动作描写变成类型。
         style_keywords = [
             "水墨", "油画", "水彩", "素描", "卡通", "动漫", "写实", "抽象",
             "赛博朋克", "蒸汽波", "复古", "怀旧", "未来", "科幻",
             "温馨", "治愈", "悬疑", "恐怖", "搞笑", "轻松", "史诗", "宏大",
             "武打", "武侠", "动作", "情爱", "爱情", "冒险", "文艺", "战争", "都市",
-            "黑白", "彩色", "暖色调", "冷色调", "暗调", "明亮",
+            "黑白", "彩色", "暖色调", "冷色调", "暗调", "明亮", "明快",
             "中国风", "日式", "欧美", "韩式",
-            "电影感", "纪录片", "MV", "广告",
+            "电影感", "真人电影", "纪录片", "MV", "广告",
             "皮影戏", "剪纸", "泥塑", "木偶"
         ]
-
+        keyword_pattern = "|".join(
+            re.escape(keyword) for keyword in sorted(style_keywords, key=len, reverse=True)
+        )
+        negated_style = re.compile(
+            r"(?:不要|不想|不希望|不需要|不允许|不能|不应|不许|不得|禁止|避免|排除|去掉|取消|拒绝|非|无|别|不)"
+            r"(?:任何|一点|带有|包含|出现|采用|使用|添加|加入|呈现|营造|写成|做成|拍成|生成|制作|"
+            r"明显|浓重|浓厚|强烈|过于|刻意|具有|允许|拍|写|做|太|偏|走|以|要|是|有|的|\s|[：:])*"
+            rf"(?:{keyword_pattern})"
+        )
+        permission_mention = re.compile(
+            r"(?:无需|无须|不必|不用|不需要|不要|不能|不)(?:刻意|特意)?(?:回避|避讳|避开|限制)"
+            r"|(?:不限|不限制)(?:任何)?(?:题材|风格|话题)"
+            r"|(?:可以|允许)(?:讨论|提及|涉及)"
+        )
+        rejected_list = re.compile(
+            r"(?:都|一律)?(?:不要|不需要|不采用|不使用|排除|去掉|取消)\s*$"
+        )
+        clauses = re.split(
+            r"[，,。.!！?？;；\n（）()]|但是|不过|而是|改为|但", user_input
+        )
         found_styles = []
         for keyword in style_keywords:
-            if keyword in user_input:
-                found_styles.append(keyword)
+            pattern = re.escape(keyword)
+            if keyword.isascii():
+                pattern = rf"(?<![A-Za-z0-9_]){pattern}(?![A-Za-z0-9_])"
+            for clause in clauses:
+                if permission_mention.search(clause) or rejected_list.search(clause):
+                    continue
+                # “人物动作细节 / 镜头动作”描述调度，不等于“动作片”。
+                if keyword == "动作" and not (
+                    clause.strip() == keyword
+                    or re.search(
+                        r"动作(?:片|电影|短片|风格|题材|类型|喜剧|冒险)"
+                        r"|(?:风格|类型|题材)\s*[：:为是]?\s*动作", clause
+                    )
+                ):
+                    continue
+                matches = re.finditer(pattern, clause, re.IGNORECASE)
+                if any(not negated_style.search(clause[:match.end()]) for match in matches):
+                    found_styles.append(keyword)
+                    break
 
         if found_styles:
             return "、".join(found_styles)
@@ -1613,7 +1649,14 @@ class ScriptAgent:
             prompt_parts.append("- style 优先保留用户明确指定的完整风格；题材须落实在行动、困境和关系变化中。")
         else:
             prompt_parts.append("\n【风格要求】")
-            prompt_parts.append("用户未指定风格，请根据故事内容自动生成合适的风格")
+            prompt_parts.append(
+                "请从用户原文和语音补充中识别完整风格；未提取到关键词不代表用户未指定风格。"
+                "只有确实未指定时，才根据故事内容选择合适的风格。"
+            )
+        prompt_parts.append(
+            "- 否定或排除的风格、泛泛的话题许可不能作为肯定风格要求；"
+            "人物动作与镜头调度的细节不能自动归类为动作片。"
+        )
 
         if reference_images:
             prompt_parts.append(f"\n【参考图片】\n用户提供了{len(reference_images)}张参考图片，请根据图片内容理解用户的视觉风格意图")
