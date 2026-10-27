@@ -24,6 +24,7 @@ temp/
 /logs/
 /tmp/
 /outputs/
+/.remotion/
 /.trae-html-share-packages/
 *.pem
 *.key
@@ -34,6 +35,8 @@ temp/
 # IDE
 .vscode/
 .idea/
+/.trae/
+/node_modules/
 
 # Local planning and private integration docs
 /plan.md
@@ -42,8 +45,10 @@ temp/
 # Tests (kept local only, excluded from public repo)
 /tests/
 
-# Deployment artifacts (kept local only, excluded from public repo)
+# Local operational scripts; public release helpers are explicitly allowed.
 /scripts/
-/Dockerfile
-/run.sh
-/.dockerignore
+!/scripts/
+/scripts/*
+!/scripts/audit_secrets.py
+!/scripts/bundle_video_skills.py
+!/scripts/deploy_byteplus.py

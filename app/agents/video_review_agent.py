@@ -8,14 +8,18 @@
 使用LLM的视频理解能力审核生成的视频是否符合剧本要求
 通过语义分析对比计算分数，只要文字表达的意思相似即可
 """
+import json
+import re
 import time
 from typing import Dict, Any, List, Optional, Tuple
 import requests
 from app.config import config
 from app.prompt_skill import render_prompt
 from app.services.llm_service import llm_service
+from app.services.video_skill_service import video_skill_service, review_video_input
 from app.utils.i18n import language_name, translate
 from app.utils.logger import get_logger
+from app.utils.visual_review import DIGIT_EVIDENCE, concerns_digits, anatomy_review_options
 
 logger = get_logger("video_review_agent")
 
@@ -31,7 +35,7 @@ class VideoReviewAgent:
         # 使用 YAML 中当前启用的视频审核模型
         self.model = config.get('models.video_review.endpoint')
         # 审核通过阈值（0-100分）
-        self.pass_threshold = config.get('video_review.pass_threshold', 70)
+        self.pass_threshold = config.get('video_review.pass_threshold', 80)
         self.temperature = config.get('models.video_review.temperature', 0.3)
         self.max_tokens = config.get('models.video_review.max_tokens', 1000)
         self.request_retry_count = max(0, int(config.get('video_review.request_retry_count', 2)))
@@ -86,6 +90,7 @@ class VideoReviewAgent:
         reference_image_url: str = None,
         output_language: str = "zh-CN",
         reference_image_urls: Optional[List[str]] = None,
+        repair_requirement: Optional[str] = None,
     ) -> Tuple[bool, str, int]:
         """
         审核视频是否符合剧本要求
@@ -108,8 +113,8 @@ class VideoReviewAgent:
             if normalized_url and normalized_url not in normalized_reference_urls:
                 normalized_reference_urls.append(normalized_url)
 
-        logger.info(f"[REVIEW] Starting video review for: {video_url[:100]}...")
-        logger.info(f"[REVIEW] Script description: {script_scene_description[:200]}...")
+        logger.info("[REVIEW] Starting video review: description_chars=%s",
+                    len(script_scene_description or ""))
         logger.info(f"[REVIEW] Character reference image count: {len(normalized_reference_urls)}")
 
         reference_image_section = ""
@@ -136,6 +141,42 @@ class VideoReviewAgent:
             script_semantic_consistency_weight=f"{self.weights['script_semantic_consistency']:.2f}",
         )
         logger.info(f"[REVIEW] Review prompt built, length: {len(prompt)} chars")
+        prompt += video_skill_service.guidance("review")
+        prompt += (
+            "\nInclude an optional JSON field hard_failures: an array of concrete timecoded evidence "
+            "for clearly visible extra limbs/fingers, fused hands, impossible object contact or core causal "
+            "contradictions. Use [] when none is confirmed. Each entry must be an object with evidence "
+            "and confirmed=true. A confirmed hard failure requires approved=false regardless of average score."
+            "\nMODERATE STORY SEMANTICS: judge the character's actual identity, motivation, "
+            "central action and outcome. Harmless camera moves, redundant gestures and alternative "
+            "prop positions are advisory when the same causal story remains understandable. "
+            "Do not fail a coherent scene merely because paper was picked up from a desk instead "
+            "of a printer, or hidden differently. A prop change that contradicts an indispensable "
+            "next action is a real continuity defect and must still be reported with timed evidence. "
+            "Do not infer missing fingers from occlusion or duplicate characters from plausible "
+            "glass reflections. Require observable contradictory contours or events."
+        )
+        if repair_requirement:
+            prompt += (
+                "\nMANDATORY LOCAL REPAIR VERIFICATION: " + repair_requirement
+                + "\nAlso return repair_verified:boolean and repair_evidence:string. "
+                "repair_verified may be true ONLY when the specified defect is visibly corrected "
+                "inside this short patch and the boundary constraints remain coherent. Describe "
+                "the actual corrected object/action with local timestamps in repair_evidence. "
+                "Matching characters, style or a related reaction is insufficient. A patch which "
+                "omits the required prop close-up or merely replays a setup must not pass."
+                "\nMODERATE LOCAL FINISHING: distinguish the actual defect from background "
+                "choreography. A harmless camera-path, grip, pose, spark or light-sweep variation "
+                "must not block a coherent repair or lower its score below the threshold. "
+                "A limb behind another limb is normal occlusion, not object penetration. "
+                "A hidden finger is not proof of a missing finger. Require visible abnormal "
+                "attachment, contours or contact across timed frames before asserting anatomy "
+                "or penetration failure; speculative 'risk' is not a confirmed defect. Still "
+                "require affirmative evidence of the requested correction and coherent incoming "
+                "and outgoing state. Never pass an obscured repair site or an unrelated reaction."
+            )
+            if concerns_digits(repair_requirement):
+                prompt += DIGIT_EVIDENCE
 
         # 构建消息，包含视频URL
         content = []
@@ -147,12 +188,7 @@ class VideoReviewAgent:
         })
 
         # 添加视频
-        content.append({
-            "type": "video_url",
-            "video_url": {
-                "url": video_url
-            }
-        })
+        content.append(review_video_input(video_url))
 
         # 添加当前分镜的全部角色参考图
         for reference_url in normalized_reference_urls:
@@ -180,7 +216,8 @@ class VideoReviewAgent:
                         model=self.model,
                         messages=messages,
                         temperature=self.temperature,
-                        max_tokens=self.max_tokens
+                        **(anatomy_review_options() if concerns_digits(repair_requirement)
+                           else {"max_tokens": self.max_tokens})
                     )
                     break
                 except requests.exceptions.HTTPError as e:
@@ -198,16 +235,20 @@ class VideoReviewAgent:
                 raise RuntimeError("video review returned no result")
 
             if 'choices' not in result or len(result['choices']) == 0:
-                logger.error(f"[REVIEW] Video review failed: no choices in response")
-                return False, translate(output_language, "error.generation_failed", error="review returned no choices"), 0
+                raise VideoReviewUnavailableError("review returned no choices")
 
             output = result['choices'][0]['message']['content']
-            logger.info(f"[REVIEW] Raw LLM output: {output[:500]}...")
+            logger.info("[REVIEW] Response received: chars=%s", len(output or ""))
 
             # 解析JSON输出
-            import json
             try:
-                review_result = json.loads(output)
+                text = str(output or "").strip()
+                if text.startswith("```"):
+                    text = re.sub(r"^```(?:json)?\s*", "", text, count=1, flags=re.I)
+                    text = re.sub(r"\s*```\s*$", "", text, count=1)
+                review_result = json.loads(text)
+                if not isinstance(review_result, dict) or not isinstance(review_result.get("details"), dict):
+                    raise VideoReviewUnavailableError("review returned invalid scoring schema")
                 is_approved = review_result.get('approved', False)
                 feedback = review_result.get('feedback', '')
                 details = review_result.get('details', {})
@@ -218,10 +259,19 @@ class VideoReviewAgent:
                 logger.info(f"[REVIEW] Parsed result - score: {score}, approved: {is_approved}")
                 logger.info(f"[REVIEW] Details: {details}")
 
-                # 如果LLM没有正确设置approved，根据分数判断
-                if not isinstance(is_approved, bool):
-                    is_approved = score >= self.pass_threshold
-                    logger.info(f"[REVIEW] Recalculated approved based on score: {is_approved}")
+                # Apply the configured weighted gate in both directions; explicit,
+                # evidenced hard failures and repair verification remain vetoes.
+                is_approved = score >= self.pass_threshold
+                hard_failures = review_result.get("hard_failures", [])
+                if isinstance(hard_failures, list) and any(
+                       isinstance(issue, dict) and issue.get("confirmed") is True and issue.get("evidence")
+                       for issue in hard_failures):
+                    is_approved = False
+                if repair_requirement and not (
+                        review_result.get("repair_verified") is True
+                        and str(review_result.get("repair_evidence", "")).strip()):
+                    is_approved = False
+                    feedback = "指定修复点未得到可见证据验证。 " + feedback
 
                 if is_approved:
                     logger.info(f"[REVIEW] Video review PASSED with score {score}/{self.pass_threshold}")
@@ -231,10 +281,11 @@ class VideoReviewAgent:
                     return False, feedback, score
 
             except json.JSONDecodeError as e:
-                logger.error(f"[REVIEW] Failed to parse review result: {e}, output: {output}")
-                # 如果解析失败，保守起见认为不通过
-                return False, translate(output_language, "error.generation_failed", error="review result parse failed"), 0
+                logger.warning("[REVIEW] Invalid review JSON: %s", e)
+                raise VideoReviewUnavailableError("review result parse failed") from e
 
+        except VideoReviewUnavailableError:
+            raise
         except requests.exceptions.RequestException as e:
             logger.error(f"[REVIEW] Video review failed: {str(e)}")
             raise VideoReviewUnavailableError(str(e)) from e

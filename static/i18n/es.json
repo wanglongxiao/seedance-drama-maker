@@ -1,4 +1,37 @@
 {
+  "optimization": {
+    "taskSummary": "Optimización: {done}/{total} tareas procesadas",
+    "roundLabel": "Ronda {round}", "fragmentLabel": "Escena {scene} · {start}–{end}s",
+    "taskNames": {"triage":"Evaluar importancia y calidad local","source":"Cargar máster y tiempos","transcribe":"Transcribir audio real","audio_review":"Verificar narración no prevista","audio_edit":"Reparar audio local","review":"Revisar video","confirm":"Confirmar errores por separado","repair_plan":"Planificar cortes y reparaciones esenciales","fragment_prepare":"Preparar fragmento y referencias","fragment":"Regenerar fragmento","fragment_review":"Revisar fragmento por separado","replace":"Reemplazar fragmentos con errores","edit":"Editar y ajustar luz","subtitles":"Crear y renderizar subtítulos","final_review":"Revisar película final"},
+    "taskStates": {"queued":"En espera","running":"Procesando","completed":"Listo","needs_review":"Por revisar","unavailable":"Revisión no disponible","failed":"Falló","budget_exhausted":"Límite de reparación"},
+    "finalConfirm": "Confirmar hallazgos del video final",
+    "fragmentSelect": "Seleccionar la acción corregida",
+    "fragmentReference": "Crear referencia corregida",
+    "fragmentReferenceReview": "Verificar referencia corregida",
+    "reviewPassed": "Revisión final aprobada. Se eliminaron {seconds}s.", "needsReview": "El video está listo. Revisa los problemas de calidad o la disponibilidad de la revisión.",
+    "downloadSubtitles": "Descargar subtítulos (SRT)", "downloadReport": "Descargar informe de revisión",
+    "beforeVideo": "Ver montaje antes de optimizar", "editTitle": "Cortes y regeneración local",
+    "editHint": "Mira el montaje y escribe los tiempos que quieres cortar o regenerar. Los tiempos se refieren al máster antes de los cortes. Deja vacíos los campos que no uses.",
+    "cutsHint": "Un intervalo por línea: 5-7 en la primera, 12.5-14 en la siguiente. También puedes usar comas: 5-7, 12.5-14. Los tiempos son segundos y admiten decimales. Los subtítulos se ajustan al corte y se protege el diálogo.",
+    "repairsHint": "Cada fragmento necesita inicio, fin e instrucciones propias. Añade filas para más fragmentos, de hasta {seconds} segundos dentro de una escena. Se generan y revisan en paralelo; tras aprobarse, reemplazan sus intervalos originales. Se conserva el audio y se revisan identidad, luz y continuidad.",
+    "startSeconds": "Inicio (segundos)", "endSeconds": "Fin (segundos)",
+    "repairInstructions": "Instrucciones para este fragmento", "repairPlaceholder": "Ejemplo: Corregir los dedos extra de la mano derecha. Mantener acción, ropa y luz, y conectar con las imágenes anterior y posterior.",
+    "repairItem": "Fragmento {number}", "addRepair": "＋ Añadir fragmento", "remove": "Quitar",
+    "removeRepair": "Quitar fragmento {number}",
+    "rangeOrder": "Los tiempos deben cumplir: 0 ≤ inicio < fin.",
+    "rangeDuration": "El fin no puede superar la duración del máster de {seconds} segundos.",
+    "rangeOverlap": "Los intervalos del mismo tipo no pueden solaparse.",
+    "cutRepairOverlap": "No puedes cortar y regenerar el mismo intervalo. Elige una acción.",
+    "repairIncomplete": "Cada fragmento necesita inicio, fin e instrucciones propias. Quita las filas que no uses.",
+    "repairMax": "Cada fragmento admite hasta {seconds} segundos. Divídelo en más filas.",
+    "repairScene": "Cada fragmento debe estar dentro de una escena. Divídelo en los límites de escena.",
+    "cutLimit": "Puedes cortar hasta 50 intervalos a la vez.", "instructionLimit": "Cada instrucción admite hasta 4000 caracteres.",
+    "cuts": "Intervalos a eliminar (segundos)", "sceneOrder": "Orden de escenas, por ejemplo 2,1,3",
+    "regenerateScenes": "Escenas a regenerar, por ejemplo 2,3", "repairRanges": "Regeneración local (segundos)",
+    "instructions": "Instrucciones de edición", "matchLighting": "Igualar luz y color en cada lugar", "subtitles": "Subtitular el audio real",
+    "autoRepair": "Revisar y reparar errores automáticamente", "apply": "Optimizar video",
+    "rangeFormat": "Escribe inicio-fin en segundos, por ejemplo 5-7. Separa los intervalos con saltos de línea o comas.", "applyError": "No se puede editar: {error}"
+  },
   "scriptQuality": {
     "paused": "La revisión del guion falló. Generación pausada.",
     "restart": "Reiniciar todo el proyecto",
@@ -32,6 +65,7 @@
     "recording": "Grabando..."
   },
   "progress": {
+    "optimize": {"generating": "Optimizando el video y creando subtítulos...", "completed": "Optimización completada"},
     "overall": "📋 Progreso General",
     "emptyState": "El contenido generado aparecerá aquí después de comenzar",
     "waiting": "En espera...",
@@ -57,6 +91,8 @@
     }
   },
   "steps": {
+    "optimize": "Optimizar",
+    "optimizeTitle": "Optimización del video",
     "script": "Guion",
     "referenceImage": "Referencia",
     "videos": "Videos",

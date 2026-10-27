@@ -5,12 +5,16 @@
 
 import random
 import re
+import json
+import math
 from typing import List, Dict, Any, Optional
 from app.config import config
 from app.prompt_skill import is_explicitly_adult, load_prompt, nsfw_content_requested, nsfw_enabled
+from app.services.video_skill_service import video_skill_service
 from app.services.llm_service import llm_service
 from app.utils.logger import get_logger
 from app.models.schemas import Script, GeneratedImage, Character
+from app.utils.visual_review import DIGIT_EVIDENCE, concerns_digits, anatomy_review_options
 
 logger = get_logger("image_agent")
 
@@ -41,6 +45,7 @@ class ImageAgent:
         return True
 
     def _append_reference_style_guidance(self, prompt_parts: List[str], user_style_info: str, script: Script) -> None:
+        prompt_parts.append(video_skill_service.guidance("reference"))
         if self._should_apply_japanese_manga_live_action_style(user_style_info, script):
             prompt_parts.extend(load_prompt("image_reference_style_guidance.md").splitlines())
 
@@ -391,6 +396,13 @@ class ImageAgent:
         if user_reference_images:
             prompt_parts.append("[CRITICAL] Preserve the major environment layout and landmark details from uploaded images.")
         prompt_parts.extend(load_prompt("scene_reference_image.md").splitlines())
+        prompt_parts.append(video_skill_service.guidance("reference"))
+        prompt_parts.append("[INITIAL BACKDROP STATE — HARD CONSTRAINT]")
+        prompt_parts.append(scene_description)
+        prompt_parts.append("Honor the INITIAL prop and practical-light states above over aesthetic lighting. "
+                            "An initially unlit/off lamp emits NO light. Use the specified ambient sources "
+                            "instead. Do not switch it on to beautify the image or move a paper from under a cup. "
+                            "This is an environment reference: do not draw actors or later actions.")
 
         prompt = "\n".join(prompt_parts)
         response = llm_service.generate_image(
@@ -467,6 +479,156 @@ class ImageAgent:
             reference_type="character_outfit",
         )
 
+    def generate_repair_reference_image(self, scene, script, requirement, local_action,
+                                       boundary_urls, character_references, aspect_ratio,
+                                       retry_feedback=""):
+        """Make a corrected shot anchor after text-only repair has failed."""
+        from app.services.video_skill_service import video_skill_service
+        image_urls = list(boundary_urls)
+        parts = [video_skill_service.guidance("reference"),
+                 f"Aspect ratio: {aspect_ratio}. Style: {script.style}",
+                 "Create ONE cinematic reference frame for a localized video repair. "
+                 "Show the desired CORRECTED state clearly, focusing on the specified defect. "
+                 "Do not create a collage, labels, captions or explanatory text.",
+                 "Images 1 and 2 are incoming/outgoing frames from the original flawed film. "
+                 "Preserve their identities, costumes, environment, lighting and palette. "
+                 "They are continuity references; do NOT copy their named defect. "
+                 "A closer insert may reveal the repaired object/contact while remaining in the same scene.",
+                 "Required visible correction (show this corrected state): " + requirement,
+                 "Background storyboard action (not a list of actions to depict): " + local_action]
+        for reference in character_references:
+            image_urls.append(reference.url)
+            parts.append(f"Image {len(image_urls)} is the identity/outfit reference for {reference.name}.")
+        present = set(getattr(scene, "characters_present", []) or [])
+        for character in script.characters:
+            if character.name in present:
+                parts.extend(self._build_character_profile_lines(character))
+        parts.append("Current scene outfits override default clothing: "
+                     + str(getattr(scene, "character_outfits", {}) or {})
+                     + ". Preserve the actual boundary outfit and appearance.")
+        parts.append("Correct only the named fault; preserve every other visible state. "
+                     "Keep hands anatomically valid and object contact physically coherent. "
+                     "The repaired detail must be visible rather than hidden behind a hand or reaction shot. "
+                     "The correction is the main subject: use a readable close insert if needed; "
+                     "do not keep the broken detail tiny in the background to preserve a portrait. "
+                     "Preserve the number of physical objects. When moving a prop into its corrected "
+                     "position, remove its old instance; never depict both positions as two copies. "
+                     "Show the contact surface and the requested engraving together when repairing "
+                     "a joining action. Boundary images constrain identity and light, not the faulty "
+                     "object position or an unrelated reaction shot.")
+        if retry_feedback:
+            parts.append("The previous proposed target failed visual verification. "
+                         "Correct these observed problems in this new target: " + retry_feedback)
+        parts.append(
+            "FINAL SHOT PRIORITY: the named corrected detail fills most of the frame. "
+            "Match the original shot size when it is already a prop close-up. "
+            "Identity portraits and reaction shots are inappropriate for a prop/detail correction; "
+            "faces may stay entirely outside this insert. Identity reference images provide "
+            "costume context, not the required composition. Make the correction visibly different "
+            "from the original fault while retaining the same physical object, material and colour.")
+        if re.search(r"手指|指头|指頭|finger|digit", requirement, re.IGNORECASE):
+            parts.append(
+                "HAND ANATOMY DETAIL: compose the affected hand so the whole wrist, palm and "
+                "all FIVE fingertips are inside the frame. ONE short thumb branches sideways "
+                "from the base of the palm; FOUR separate longer fingers form a natural fan. "
+                "The thumb is anatomically distinct from the four fingers, clearly separated "
+                "by the thumb-index web. Show the thumb's side branch and tip, not just four "
+                "parallel fingers. Keep all five digit contours readable against the ground, "
+                "without overlap, cropped tips or soil hiding a digit. Retain the existing "
+                "sleeve, armour and supporting action; do not add a second hand to make up "
+                "the count. A modest higher viewing angle may reveal the thumb while keeping "
+                "the same hand, set and light.")
+        if "云雷纹" in requirement:
+            parts.append(
+                "云雷纹 / yunleiwen means an ANGULAR squared-spiral meander engraving, "
+                "with repeated right-angle key patterns. Rounded curling cloud scrolls alone "
+                "are not yunleiwen. Retain the existing jade pendant's silhouette and suspension, "
+                "but replace its surface decoration with crisp carved squared-spiral meanders; "
+                "make the angular engraving the dominant readable subject of this insert.")
+        prompt = "\n".join(parts)
+        response = llm_service.generate_image(prompt=prompt, model=self.model, size=self.size,
+                                              image_urls=image_urls, ratio=aspect_ratio)
+        return GeneratedImage(scene_number=scene.scene_number, url=response["data"][0]["url"],
+                              prompt=prompt, is_reference=True, name="repair-target",
+                              reference_type="scene")
+
+    def review_repair_reference_image(self, target_url, requirement, local_action, boundary_urls):
+        """Do not use an obscured or duplicated prop as a corrected video anchor."""
+        anatomy = None
+        if concerns_digits(requirement):
+            anatomy = self._review_repair_image(
+                "Inspect ONLY the prominent repair hand in this single target image. "
+                "Independently inspect its visible anatomy without inferring a fault. "
+                "Do not evaluate a face, pose, sword, background action or audio. "
+                "Return ONLY JSON {\"approved\":boolean,\"confidence\":0..1,"
+                "\"digit_count\":integer,\"thumb_present\":boolean,\"evidence\":string}. "
+                "Approve only a clearly readable anatomically valid hand with one thumb "
+                "and four other fingers. Describe contours, joints and attachments."
+                + DIGIT_EVIDENCE, [target_url], **anatomy_review_options())
+            anatomy["approved"] = (anatomy["approved"] is True
+                                   and anatomy.get("digit_count") == 5
+                                   and anatomy.get("thumb_present") is True)
+            if not anatomy["approved"]:
+                return dict(anatomy, stages={"anatomy": dict(anatomy)})
+            # Digit counting has already passed on the isolated target. Boundary
+            # images may contain the original fault and must not contaminate it.
+            continuity = self._review_repair_image(
+                "Image 1 is a corrected hand insert; images 2 and 3 are original "
+                "incoming/outgoing boundaries. Compare ONLY visible continuity of "
+                "skin, sleeve/costume, character identity where actually visible, "
+                "set, prop identity if visible, and motivated light. The target's "
+                "anatomy is checked separately; do not recount boundary-image digits "
+                "or require the target to preserve an original hand defect. "
+                "A close insert can omit a head/sword and use a nearby camera angle. "
+                "Unseen elements, motion and original audio are assessed on the video. "
+                "A background opponent must not be mistaken for the owner of the "
+                "foreground hand. Reject actual visible identity/costume/light "
+                "contradictions; do not infer them from absent faces or props. "
+                "Return ONLY JSON {\"approved\":boolean,\"confidence\":0..1,"
+                "\"evidence\":string}.", [target_url, *boundary_urls[:2]])
+            return {
+                "approved": continuity["approved"],
+                "confidence": min(anatomy["confidence"], continuity["confidence"]),
+                "evidence": anatomy["evidence"] + "\nContinuity: " + continuity["evidence"],
+                "stages": {"anatomy": anatomy, "continuity": continuity},
+            }
+        instructions = (
+            load_prompt("repair_reference_review.md")
+            + "\nRequired corrected state:\n" + requirement
+            + "\nDesired local action/state:\n" + local_action
+            + "\nSTILL-FRAME SCOPE: verify the named repaired detail in image 1 and compatibility "
+            "of what is actually visible. Motion, original audio, unseen surrounding props and "
+            "a background head-raising action are validated on the VIDEO, not this still frame. "
+            "Do not reject a readable hand insert because it excludes a face or a sword that "
+            "is not the repair subject. For a five-digit hand, identify the thumb by its lateral "
+            "branch from the palm base and the thumb-index web, rather than projected length "
+            "alone: perspective and flexion can make an ordinary thumb look longer. Name each "
+            "actual fingertip and its palm attachment before asserting extra or missing digits. "
+            "Reject real abnormal attachments, missing digits or an unreadable repair site; "
+            "allow normal perspective and ordinary finger flexion."
+        )
+        return self._review_repair_image(instructions, [target_url, *boundary_urls[:2]])
+
+    def _review_repair_image(self, instructions, urls, **options):
+        result = llm_service.chat_completion(
+            model=config.get("models.video_review.endpoint"),
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": instructions},
+                *[{"type": "image_url", "image_url": {"url": url}}
+                  for url in urls],
+            ]}], temperature=.1, **({"max_tokens": 800} | options))
+        text = result["choices"][0]["message"]["content"].strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0]
+        review = json.loads(text)
+        certainty = float(review.get("confidence", -1))
+        if (not isinstance(review.get("approved"), bool) or not review.get("evidence")
+                or not math.isfinite(certainty) or not 0 <= certainty <= 1):
+            raise ValueError("Repair reference review returned invalid evidence")
+        if certainty < float(config.get("video_optimization.confidence_threshold", .85)):
+            review["approved"] = False
+        return review
+
     def generate_scene_state_image(
         self,
         scene_name: str,
@@ -505,6 +667,7 @@ class ImageAgent:
         if state_parts:
             prompt_parts.append(f"[STATE REQUIREMENT] Adjust ONLY the time of day and weather to reflect: {', '.join(state_parts)}")
         prompt_parts.extend(load_prompt("backdrop_state_image.md").splitlines())
+        prompt_parts.append(video_skill_service.guidance("reference"))
 
         prompt = "\n".join(prompt_parts)
         base_url = getattr(base_reference_image, "url", None)
@@ -896,7 +1059,7 @@ class ImageAgent:
 
         prompt = "\n".join(prompt_parts)
 
-        logger.info(f"Processing {num_user_images} user image(s) with prompt: {prompt[:300]}...")
+        logger.info("Processing user images: count=%s prompt_length=%s", num_user_images, len(prompt))
         logger.info(f"Using aspect ratio: {aspect_ratio}")
 
         # 使用所有用户图片作为参考进行处理（最多9张）
@@ -986,7 +1149,7 @@ class ImageAgent:
 
         prompt = ", ".join(prompt_parts)
 
-        logger.info(f"Generating reference library image with prompt: {prompt[:200]}...")
+        logger.info("Generating reference library image: prompt_length=%s", len(prompt))
         logger.info(f"Using aspect ratio: {aspect_ratio}")
 
         response = llm_service.generate_image(

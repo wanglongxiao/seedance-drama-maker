@@ -12,6 +12,7 @@ from app.prompt_skill import is_explicitly_adult, load_prompt, nsfw_content_requ
 from app.services.llm_service import llm_service
 from app.utils.logger import get_logger
 from app.utils.scene_identity import scene_content_fingerprint
+from app.utils.dialogue_language import requests_cantonese, dialogue_language_instruction
 from app.models.schemas import Script, GeneratedImage, GeneratedVideo
 
 logger = get_logger("video_agent")
@@ -593,7 +594,15 @@ class VideoAgent:
         结合用户补充的风格/场景描述信息和剧本分镜的完整文本
         （包括描述、对话、时长、角色动作、声音描述、情绪、镜头角度、出场角色等）
         """
-        parts = []
+        from app.services.video_skill_service import video_skill_service
+        parts = [video_skill_service.guidance("video")]
+        cantonese = requests_cantonese(user_requirement_text, user_style_info)
+        if cantonese:
+            parts.insert(0, "AUDIO LANGUAGE LOCK: Native Hong Kong Cantonese (yue-HK). "
+                "Speak every dialogue line with authentic Cantonese pronunciation and Cantonese "
+                "grammar. Preserve the written Cantonese particles and words exactly. "
+                "Chinese characters are Cantonese speech here, never Mandarin readings. "
+                "Match the visible speaker's lips to this Cantonese audio.")
 
         reference_specs = self._build_reference_specs(reference_images)
         if reference_specs:
@@ -656,9 +665,32 @@ class VideoAgent:
                 )
         parts.append(f"场景描述：{getattr(scene, 'description', '')}")
         parts.append(load_prompt("video_scene_static_rules.md"))
+        parts.append(
+            "连续性状态锁：角色定义与剧本中明确发生的事件决定皮肤、伤痕、污渍和道具状态。"
+            "不得仅为营造恐怖氛围，凭空增加脸部伤口、血痕、红漆或改变污渍的所在人物、"
+            "身体部位和面积；新增痕迹必须来自剧本明确要求且画面可解释的接触事件。"
+            "已发生的状态变化应延续，不因切镜恢复或转移。灯光变化必须来自本布景"
+            "明确的窗、门、灯具或剧本事件，不得把相邻单位的门窗和灯源搬入当前布景。"
+        )
 
         dialogue = getattr(scene, 'dialogue', '') or ''
         parts.append(f"对白/旁白：{dialogue if dialogue else '无'}")
+        language_lock = dialogue_language_instruction(user_requirement_text, user_style_info)
+        if language_lock:
+            parts.append(language_lock)
+        parts.append(
+            "音轨内容锁：只有对白/旁白字段允许发声说话。场景描述、角色动作、"
+            "声音状态和镜头说明都是制作指令，绝对不可朗读、唱出或改写为旁白。"
+            "对白/旁白为无时，只生成现场环境音、非语言呼吸和指定音效，"
+            "不增加解释画面或复述制作指令的人声。"
+        )
+        if dialogue:
+            parts.append(
+                "对白执行锁：以上对白/旁白字段是唯一台词清单，按列出的角色与顺序各说一次，"
+                "不得把场景描述中重复引用的同一句台词再说一遍，不朗读角色名、镜头说明或"
+                "修改意见；不交换说话人，不倒置问答、不提前播放后面的回答。每句分配"
+                "清楚的发音与口型时间，句间保留自然停顿，片尾不要新增台词。"
+            )
 
         character_desc = getattr(scene, 'character_description', '') or ''
         if character_desc:
@@ -699,6 +731,10 @@ class VideoAgent:
         )
 
         parts.append(self._extract_background_music_instruction(user_requirement_text))
+        if cantonese and dialogue:
+            parts.append("最终声音约束：全程地道香港粤语发音。逐字说出以上粤语台词，"
+                "保留啲、嘅、喺、嗰、哋、咗等粤语词，不改写成普通话句子。"
+                "Native Cantonese speech only; dialogue timing and speaker identity must remain correct.")
 
         return "\n".join(parts)
 
@@ -1000,13 +1036,37 @@ class VideoAgent:
         resolution = (resolution or "").strip().lower() or self._parse_resolution(user_style_info)
         aspect_ratio = aspect_ratio or "9:16"
 
-        task_id = self._create_video_task_with_references(
-            prompt=prompt,
-            reference_image_urls=reference_urls,
-            duration=duration,
-            resolution=resolution,
-            aspect_ratio=aspect_ratio,
-        )
+        target = next((image for image in prepared_reference_images
+                       if str(image.name or "").startswith("repair-target-")), None)
+        if target is not None:
+            # A verified correction must determine the opening picture, rather than
+            # compete with unrelated portraits or flawed boundary reference images.
+            from app.services.video_skill_service import video_skill_service
+            prompt = (
+                video_skill_service.guidance("video")
+                + f"\nStyle: {script.style}\nLocalized repair: {scene.description}\n"
+                + "Animate the provided CORRECTED FIRST FRAME as one continuous local insert. "
+                "Keep its visible corrected detail, object inventory, composition, identity, "
+                "costume and lighting readable from the first frame onward. Perform only the "
+                "necessary local motion; do not replay the background scene or substitute "
+                "a reaction shot. No transitions, added objects, titles or captions.\n"
+                + f"Required corrected state and visible checks: {feedback}")
+            reference_image_url = target.url
+            task_id = llm_service.create_video_task_with_content(
+                model=self.model,
+                content=[{"type": "text", "text": prompt},
+                         {"type": "image_url", "role": "first_frame",
+                          "image_url": {"url": self._get_generation_reference_url(target)}}],
+                duration=duration, resolution=resolution)
+            logger.info("[REPAIR] generation mode=corrected_first_frame scene=%s", scene_number)
+        else:
+            task_id = self._create_video_task_with_references(
+                prompt=prompt,
+                reference_image_urls=reference_urls,
+                duration=duration,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+            )
 
         video_result = self._wait_for_video(task_id)
 

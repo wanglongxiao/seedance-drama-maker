@@ -74,6 +74,7 @@ body {
 /* 左侧聊天区 (30%) */
 .chat-section {
     width: 30%;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     background: #fff;
@@ -364,6 +365,7 @@ body {
 
 .text-input {
     flex: 1;
+    min-width: 0;
     padding: 8px 14px;
     border: 1px solid #d9d9d9;
     border-radius: 18px;
@@ -1059,9 +1061,11 @@ body {
     padding: 12px 16px;
     border-top: 1px solid #e8e8e8;
     background: #fff !important;
+    font-size: 13px;
+    line-height: 1.4;
     text-align: center;
     flex-shrink: 0;
-    min-height: 61px;
+    min-height: 46px;
     box-sizing: border-box;
     position: relative;
     z-index: 50;
@@ -1099,10 +1103,13 @@ body {
 }
 
 .status-text {
-    font-size: 13px;
+    font-size: inherit;
     color: #1890ff;
     margin: 0;
-    line-height: 1.4;
+    line-height: inherit;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 /* 生成等待转转效果 - 在预览区域内，不覆盖聊天区 */
@@ -1341,6 +1348,13 @@ body {
     background: #5568d3;
 }
 
+#final-video-card > a,
+#merged-video-card > a {
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
 /* 全局加载遮罩 - 仅用于初始化 */
 .loading-overlay {
     position: fixed;
@@ -1387,4 +1401,70 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
     background: #a8a8a8;
+}
+
+#optimization-progress-list {
+    display: flex; align-items: center; justify-content: center; gap: 12px;
+    width: fit-content; max-width: 100%; min-width: 0;
+    font: inherit; text-align: center; white-space: nowrap;
+}
+.optimization-task-summary {
+    flex: 0 1 auto; max-width: 34%; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; font-weight: 600; color: #595959;
+}
+.optimization-task-list {
+    display: flex; gap: 18px; flex: 0 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden;
+    scrollbar-width: none;
+}
+.optimization-task-list::-webkit-scrollbar { display: none; }
+.optimization-task-row {
+    flex: 0 0 auto;
+}
+.optimization-task-row[data-status="running"] { color: #1677ff; }
+.optimization-task-row[data-status="completed"] { color: #389e0d; }
+.optimization-task-row[data-status="needs_review"],
+.optimization-task-row[data-status="failed"] { color: #ad6800; }
+
+.optimization-editor {
+    margin-top: 18px;
+    padding: 14px;
+    border: 1px solid #e8e8e8;
+    border-radius: 8px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #333;
+}
+.optimization-editor summary { cursor: pointer; font-weight: 600; }
+.optimization-editor input,
+.optimization-editor textarea,
+.optimization-editor button { font-family: inherit; font-size: 14px; line-height: 1.5; }
+.optimization-field { display: block; margin: 12px 0 6px; }
+.optimization-field input,
+.optimization-field textarea {
+    display: block; width: 100%; margin-top: 6px; padding: 8px 10px;
+    border: 1px solid #d9d9d9; border-radius: 6px; background: #fff; color: #333;
+}
+.optimization-field textarea { resize: vertical; min-height: 78px; }
+.optimization-field input:focus,
+.optimization-field textarea:focus { outline: 2px solid #91caff; outline-offset: 1px; }
+.optimization-field [aria-invalid="true"] { border-color: #cf1322; }
+.optimization-editor .optimization-help { margin: 8px 0; color: #666; font-size: 13px; line-height: 1.6; }
+.optimization-repairs { margin-top: 18px; }
+.optimization-repairs h5 { font-size: 14px; font-weight: 600; }
+.optimization-repair-row { margin: 12px 0; padding: 12px; border: 1px solid #e8e8e8; border-radius: 8px; background: #fafafa; }
+.optimization-repair-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.optimization-repair-times { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.optimization-secondary-btn,
+.optimization-remove-repair { padding: 5px 10px; border: 1px solid #d9d9d9; border-radius: 6px; background: #fff; color: #333; cursor: pointer; }
+.optimization-secondary-btn { color: #1677ff; }
+.optimization-options { margin-top: 16px; }
+.optimization-checkbox { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0; }
+.optimization-checkbox input { margin-top: 4px; }
+.optimization-editor .optimization-edit-error { margin-top: 12px; color: #cf1322; overflow-wrap: anywhere; }
+.optimization-apply-btn { padding: 10px 16px; background: #1890ff; color: white; border: 0; border-radius: 6px; margin-top: 12px; cursor: pointer; }
+.optimization-editor button:disabled { opacity: .55; cursor: default; }
+@media (max-width: 480px) {
+    .optimization-editor { padding: 10px; }
+    .optimization-repair-row { padding: 10px; }
+    .optimization-repair-times { gap: 8px; }
 }

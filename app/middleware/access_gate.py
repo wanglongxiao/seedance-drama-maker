@@ -149,7 +149,9 @@ class AccessGateMiddleware(BaseHTTPMiddleware):
     async def _handle_auth(self, request: Request) -> Response:
         form = await request.form()
         supplied = (form.get("password") or "").strip()
-        next_url = form.get("next") or "/"
+        next_url = str(form.get("next") or "/")
+        if not next_url.startswith("/") or next_url.startswith("//") or "\\" in next_url:
+            next_url = "/"
         if hmac.compare_digest(supplied, _access_password()):
             resp = RedirectResponse(url=next_url, status_code=303)
             resp.set_cookie(
@@ -157,6 +159,7 @@ class AccessGateMiddleware(BaseHTTPMiddleware):
                 _issue_cookie_value(),
                 max_age=_COOKIE_MAX_AGE,
                 httponly=True,
+                secure=os.getenv("ACCESS_COOKIE_SECURE", "").lower() == "true" or request.url.scheme == "https",
                 samesite="lax",
                 path="/",
             )

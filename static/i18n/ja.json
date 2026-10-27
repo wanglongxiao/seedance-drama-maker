@@ -1,4 +1,36 @@
 {
+  "optimization": {
+    "taskSummary": "動画最適化：{done}/{total} 項目を処理",
+    "roundLabel": "第 {round} 回", "fragmentLabel": "シーン {scene} · {start}–{end}秒",
+    "taskNames": {"triage":"物語の重要度と部分品質を判断","source":"元動画と時間軸を読み込み","transcribe":"実際の音声を文字起こし","audio_review":"不要なナレーションを確認","audio_edit":"部分音声を修復","review":"動画を審査","confirm":"問題を個別確認","repair_plan":"カットと必要な補修を計画","fragment_prepare":"補修映像と接続参照を準備","fragment":"部分映像を再生成","fragment_review":"補修映像を個別審査","replace":"問題の映像を置換","edit":"編集と光の調整","subtitles":"字幕を作成・描画","final_review":"完成動画を再審査"},
+    "taskStates": {"queued":"待機中","running":"処理中","completed":"完了","needs_review":"要確認","unavailable":"審査利用不可","failed":"失敗","budget_exhausted":"再生成上限"},
+    "finalConfirm": "完成動画の問題を個別確認",
+    "fragmentSelect": "補修映像の有効な動作を選択",
+    "fragmentReference": "修正後の参照画像を作成",
+    "fragmentReferenceReview": "修正後の参照画像を確認",
+    "reviewPassed": "最終審査に合格。{seconds}秒削除。", "needsReview": "動画を作成しました。品質の指摘または審査の利用状況を確認してください。",
+    "downloadSubtitles": "字幕をダウンロード（SRT）", "downloadReport": "審査レポートをダウンロード",
+    "beforeVideo": "最適化前の結合動画", "editTitle": "カットと部分再生成",
+    "editHint": "結合動画を確認し、削除または再生成する時間を入力してください。時間はカット前の元動画が基準です。不要な項目は空欄にしてください。",
+    "cutsHint": "1行に1区間：1行目に 5-7、次の行に 12.5-14。カンマ区切りの 5-7, 12.5-14 も使えます。単位は秒で小数も入力できます。字幕はカットに合わせて調整され、台詞は保護されます。",
+    "repairsHint": "各項目に開始秒・終了秒と、その部分の修正指示を入力します。「部分再生成を追加」で複数指定できます。各区間は同じシーン内で最大 {seconds} 秒。並行生成・審査し、合格後に元の位置へ置換します。元の音声を保持し、人物・光・前後のつながりを確認します。",
+    "startSeconds": "開始時間（秒）", "endSeconds": "終了時間（秒）",
+    "repairInstructions": "この部分の修正指示", "repairPlaceholder": "例：右手の余分な指を修正。動作・衣装・光を保ち、前後の映像とつなげる。",
+    "repairItem": "部分再生成 {number}", "addRepair": "＋ 部分再生成を追加", "remove": "削除",
+    "removeRepair": "部分再生成 {number} を削除",
+    "rangeOrder": "0 ≤ 開始時間 < 終了時間で入力してください。",
+    "rangeDuration": "終了時間は元動画の長さ {seconds} 秒以内にしてください。",
+    "rangeOverlap": "同じ種類の時間区間は重複できません。",
+    "cutRepairOverlap": "同じ区間の削除と再生成は同時にできません。",
+    "repairIncomplete": "各項目に開始時間・終了時間・修正指示が必要です。不要な項目は削除してください。",
+    "repairMax": "1区間は最大 {seconds} 秒です。複数に分けてください。",
+    "repairScene": "各区間は同じシーン内にしてください。シーンの境界で分けてください。",
+    "cutLimit": "削除は一度に最大50区間です。", "instructionLimit": "修正指示は各項目4000文字以内です。",
+    "cuts": "削除区間（秒）", "sceneOrder": "シーン順序（例 2,1,3）", "regenerateScenes": "再生成するシーン（例 2,3）",
+    "repairRanges": "部分映像の再生成（秒）", "instructions": "修正・編集の指示", "matchLighting": "同じ場所の光と色を合わせる",
+    "subtitles": "実際の音声から字幕を作る", "autoRepair": "残った問題を自動審査・修正",
+    "apply": "動画を最適化", "rangeFormat": "開始秒-終了秒（例 5-7）で入力し、複数区間は改行またはカンマで区切ってください。", "applyError": "編集を実行できません：{error}"
+  },
   "scriptQuality": {
     "paused": "脚本の審査が不合格です。生成を一時停止しました。",
     "restart": "プロジェクト全体を再開始",
@@ -32,6 +64,7 @@
     "recording": "録音中..."
   },
   "progress": {
+    "optimize": {"generating": "動画を最適化し字幕を作成しています…", "completed": "最適化完了"},
     "overall": "📋 進行状況",
     "emptyState": "作成を開始すると、ここに生成内容が表示されます",
     "waiting": "待機中...",
@@ -57,6 +90,8 @@
     }
   },
   "steps": {
+    "optimize": "最適化",
+    "optimizeTitle": "動画の最適化",
     "script": "脚本",
     "referenceImage": "参照画像",
     "videos": "動画",

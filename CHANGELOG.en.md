@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## [3.0.0] - 2026-10-27
+
+- Added post-merge optimization with local cuts, parallel short repairs, independent patch reviews, original audio, lighting matching, timed subtitles and final review.
+- One fast review judges story importance, local score and viewer acceptance. Cut noncritical faults first; reshoot critical faults only below 40 when clearly unacceptable.
+- Raised the default pre-merge review threshold to 80. Service failures remain separate from content rejection.
+- Ship bounded references and hashes for seven video skills. Generation models receive adapted stage guidance.
+- Added a reusable BytePlus CLI deployment script and linux/amd64 image with FFmpeg/FFprobe, Node 22, Chromium, CPU PyTorch, cached Whisper small/turbo and locked Node packages.
+- Cloud setup uses 1–5 instances, an HTTPS API gateway, shared signed access cookies, HTTP/WebSocket authentication and TOS snapshot recovery. Local access stays open by default.
+- Updated all five UI languages, 13px download links, centered single-line progress and static cache versions.
+- Scan source, staged files and Git history before release. Build from committed source; exclude secrets, logs, tests, IDE files and local output. Redact keys, endpoints and signed URLs from logs.
 
 - Added a director review for generated and revised scripts, with scene evidence for cause and effect, repeated story beats, pacing, tone, genre, and ending payoff.
 - Check candidate findings against the script before requesting edits. Allow implied actions, object inserts, and continuing camera and light setups without padding descriptions to a fixed sentence count.

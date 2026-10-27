@@ -2,8 +2,8 @@
 
 简体中文文档。English version: `README.en.md`
 
-- 🌐 在线体验：<https://s0sij5su2u6qe1sds1et0.apigateway-ap-southeast-1.apigw-byteplus.com/>
-- 当前版本：`2.0.0`
+- 🌐 在线体验：<https://sd6npkalgt0sthatn3doa.apigateway-ap-southeast-1.apigw-byteplus.com/>
+- 当前版本：`3.0.0`
 - 技术栈：`FastAPI`、`WebSocket`、多 Agent 协作、`FFmpeg`
 - 产品能力：`TOS`、`Seed-Speech`、`DeepSeek-V4.1-Flash`、`Seed-2.1-turbo`、`SeeDream-5.0-flash`、`SeeDance-2.5`
 - AI 开发工具：`Trae.ai`、`DeepSeek-V4.1-Flash`、`GPT-5.5`
@@ -35,8 +35,52 @@
 当前主流程为：
 
 ```text
-需求输入 -> 剧本生成 -> 参考图库确认 -> 角色装扮/布景状态变体 -> 分镜视频生成与审核 -> 最终合成
+需求输入 -> 剧本生成 -> 参考图库确认 -> 角色装扮/布景状态变体 -> 分镜视频生成与审核 -> 视频合成 -> 视频优化与字幕
 ```
+
+独立的第五步“视频优化”支持本地与云端，结合真实成片视觉审核和 Whisper 音轨识别。默认 `video_optimization.fast_triage: true`，一次快速审核同时判断问题片段是否为关键剧情、局部质量分和是否无法接受：非关键问题直接剪除；关键剧情只有局部评分低于 `critical_regenerate_below`（默认 40）且明确无法接受时才自动补拍，其余保留并记录建议。剪切保护关键对白，冗余对白需整句剪除，保留总删除比例 20% 和最短剩余片段限制。Remotion 按剪后时间轴渲染实际音轨语言的字幕，同时输出 SRT、原片、优化片、审核报告及可编辑的 HyperFrames 时间线到 `VIDEO_OUTPUT_DIR/<project_id>/`（本地默认 `outputs`，云端为 `/tmp/seedance-outputs`）；视频、字幕和报告上传到私有 TOS。
+
+快速模式关闭整片审核的额外推理、连续帧独立确认和重复因果审核，审核输出上限由 `fast_review_max_tokens` 控制（默认 1600）。同一母片复用审核；通过独立补片审核的局部替换，只复用未修改区域的判断，最终成片再快速复核一次。正常路径只有母片和成片两次审核，补拍仍检查指定修复点、原声与前后连续性。非关键片段剪除受完整对白或时长限制时记录保留原因，不转为自动补拍。底栏显示关键剧情与局部评分判断，日志记录审核模式、耗时及处理决定。关闭 `fast_triage` 可恢复详审流程；以下独立确认与因果审核说明仅适用于详审模式。
+
+合成后可在 Web UI 指定多个剪除区间、多个局部补拍条目、光影校正、字幕和自动修复。删除片段支持换行或逗号分隔；每条补拍将开始秒、结束秒与独立修复要求配对，并支持添加与移除。自动补拍以审核确认的局部时间段为单位，例如 5–7 秒；多个补片并行生成与独立审核，再统一替换到同一版母片，保留原声轨并检查口型与前后衔接。分镜重排与整镜补拍不再显示于优化表单，后端仍兼容旧请求。底部状态栏固定一行，使用与其他步骤一致的 13px 字体并整体居中，显示项目名、当前审核、问题判断、修复方案、补片准备、重新生成、复核、替换、剪辑、字幕和整片复审的状态及耗时。并行项目横向滚动查看，悬停查看任务历史，支持刷新恢复。原始合成链接独立保留用于对比。
+
+`video_optimization.fast_triage` 默认启用：一次审核同时判断问题是否涉及关键剧情、局部质量评分与观众是否无法接受。非关键问题优先剪除并同步调整字幕；关键剧情仅在评分低于 `critical_regenerate_below`（默认 40）且明确无法接受时自动补拍。可接受的瑕疵保留为建议，不重复深度确认。已审核母片与音轨转写可复用，合成后的成片再执行一次快速复审。
+
+参考外部制作程序中的同场景色调统一、肢体与道具连续性检查、逐镜检查点补拍方法，加入幅度受限的同场景亮度校正，并保留剧本明确要求的开关灯等变化。剪辑与重组按实际媒体时长映射字幕，禁止切断完整对白。审核不可用时保留当前视频并记录原因；超过修复预算仍未通过的结果会明确标记，不能保证模型绝无穿帮。
+
+明确要求中文或粤语对白时优先使用已配置的 Seed Speech ASR，保留真实用词和词级时间码；不可用时回退 Whisper（粤语使用 turbo）并记录不确定性，不用剧本台词替代真实识别，过滤空白时间段。相同音轨的转写缓存可用于仅改画面的新母片。Whisper 的 `zh` 标签不能单独证明普通话发音。合成前阈值由 `video_review.pass_threshold` 配置，默认 80；局部补拍使用独立的 `fragment_max_attempts` 预算（默认每段 2 次）、`fragment_max_seconds` 时长（默认 6 秒）、`max_repair_fragments_per_round` 数量（默认 8 段），并发由 `video_optimization.repair_workers` 配置。
+
+字幕仅对与已匹配台词发音相同的中文错字进行校正，保留原词级时间码。无对白镜头若把制作说明朗读为旁白，需由原生 ASR 与独立 Whisper 复核一致后，局部替换为邻近无对白环境音，保留画面和时长；由 `remove_prompt_narration` 配置控制。整体优化采用适度审核尺度，保留题材允许的法术与特效，不因微小构图变化或重复铺垫缺失补拍。
+
+独立问题确认只接收需检查的时间区间，不接收首轮的指控文字，避免重复误判。`video_optimization.repair_min_severity` 默认 `major`：轻微装饰差异保留在报告建议中；明确的肢体畸变、接触错误、身份跳变和关键因果缺失仍需修复。并行补片按内容哈希独立上传，防止同一秒上传时覆盖另一补片，确保复核读取对应片段。
+
+`audit_story_impact` 默认启用：独立确认后，再根据完整影片与连续帧检查问题是否造成实际身份、接触或因果错误，保留观测记录。合理觉醒特效或镜头变化不因“角色设定未列出”而判错；纹样互相匹配且识别成立、觉醒与战斗因果完整时，不因纹样名称或特效形式不同阻断成片。减少爽感、仪式感或文字还原度只能作为建议，实际肢体、接触、身份及因果矛盾仍需修复。低置信度、审核不可用或格式错误均不能放行原有阻断问题。道具修复参考图优先展示清楚可见的修正细节，避免用人物肖像或反应镜头替代修复。
+
+成片复审发现的问题也使用实际成片的连续时间码帧独立确认，失败补拍记录不作为画面证据传给复审模型。手动退回优化后重新计算本轮片段预算，保留历史报告；补拍参考中的错误道具或肢体不应覆盖文字修复要求。
+
+`repair_reference_after_failure` 默认启用：文字补拍失败后，ImageAgent 先根据实际边界帧与匹配角色参考生成修正目标图，并独立验证修复部位是否清楚可见、接触正确、没有重复道具；不合格时根据实际反馈重绘，次数由 `repair_reference_max_attempts` 控制（默认 2 次）。验证通过后才用于补拍；目标图不作为视频审核通过的证据。生成和验证过程均显示在一行底栏中。手动再次执行优化开启新的局部补拍预算，并保留已通过补片的工作母片；同一次执行的自动复审轮次共享预算。
+
+每段补拍先把错误观测转为正向修复目标、必要局部动作和可见验收项，分别保留原始错误与修复目标，防止把“完整剑而非断剑”等错误描述当作生成要求。验证通过的修正目标图使用 `first_frame` 锁定补片首帧，视频比例沿用该图片，不与普通人物/错误边界参考混合；生成的实际短片仍需独立审核。
+
+模型的最短输出可能长于待修区间。无对白补片可由 `select_silent_patch_window` 启用有效动作窗口选择，跳过模型额外铺垫，再按原母片区间替换；原声和母片时间轴不变，选出的短片仍须通过独立修复复核。有对白的补片保留提示词规定的起始词级时间轴。局部补拍清除整镜角色动作和声音指令，并使用聚焦问题部位的机位；生成素材链接、时长和边界参考保留在历史中。
+
+审核使用统一的身份、肢体、接触、道具、剧情、光影、对白类别，并兼容模型返回的中英文类别名称；独立复核可以把首轮区间收窄到实际问题发生的位置。每项问题定位单次出现的短区间，补片只修复该区间，不重演整段背景动作。Remotion 字幕渲染后重新挂接剪后原声并约束实际时长，避免 AAC 编码填充延长成片。
+
+时间段与大类重叠不能单独证明独立确认。对可明确识别的额外手指、缺失手指、重复肢体、融合和穿透等不同缺陷，复核必须与首轮指控一致；同一区间中新发现的另一种缺陷留待单独确认，避免误把新问题当作旧问题已证实。
+
+合成前审核与优化审核分别通过 `video_review.sample_fps` 和 `video_optimization.review_fps` 配置抽帧密度，默认每秒 3 帧，范围 0.2–5；短补片也需要多个动作观测，减少因稀疏抽帧漏看接触动作或短特效的误判。提高密度会增加审核耗时与模型用量；修改密度后不会复用旧审核缓存。
+
+`models.video_review.disable_thinking` 默认启用，使视觉审核直接输出画面证据与结论，降低额外推理耗时；设为 `false` 可启用模型推理，单次调用显式设置 `thinking` 时优先使用该设置。此项仅作用于审核模型，审核阈值和独立确认要求不变；切换模型或此设置后会重新审核，避免复用旧模式的缓存。
+
+手指修复目标先单独审核目标图，依据指尖轮廓、掌部连接与关节识别一根拇指及四根手指；通过后再对照边界图检查服装、身份与光影连续性，避免原错误手部污染数指结论。单帧不需要证明画外人物、道具、动作或音轨。`anatomy_review_thinking` 默认开启推理，`anatomy_review_max_tokens` 默认 3000，也用于局部手指补片、整片区间复核和手指问题的影响审核；修改后旧审核缓存失效。目标验证异常或失败不会继续生成补片。
+
+用户指定的局部补拍未通过且未替换时，整片审核即使未再次发现问题，也不会把本次优化标为完成；未完成区间保存在 `unresolved_manual_repairs` 中。
+
+独立确认会额外读取同一版母片的连续画面，每个疑点含前后 0.3 秒上下文、最多 24 帧并标注母片时间码；这些画面与角色参考图分开传入，减少把已经出现的短动作判为缺失。纹路被遮挡不能作为纹路错误的证据，动作存在与装饰差异需要分开判断。
+
+局部补片除总分达到阈值外，还必须返回指定修复点已验证的结论和时间码证据；仅人物、风格或前置反应匹配不能通过。底栏的补片任务会随准备、生成、审核切换名称和阶段计时。退回“视频优化”从原始合成片重新开始，保留历史审核记录用于追溯。
+
+Skills 默认使用仓库的 `app/video_skills`，包含七个 skills 实际使用的参考文件和哈希清单，可通过 `VIDEO_SKILLS_ROOT` 覆盖。Node 运行库由 `runtime/package-lock.json` 固定版本，云端位于 `/opt/video-tools`，本地默认位于 `~/.local/share/seedance-drama-maker/video-tools`。`znyupup/ai-video-editing-skill` 的技能名为 `vlog-auto-edit`。Python 依赖使用 `uv pip install --python .venv/bin/python -r requirements-video-tools.txt`。Remotion captions 实现字幕；完整优化运行时包含在 v3.0 云端镜像内。
 
 系统重点解决以下问题：
 
@@ -96,7 +140,7 @@
 
 ### 环境要求
 
-- Python `3.9+`
+- Python `3.11`、Node `22+`、Chromium；Whisper 使用 CPU PyTorch
 - 运行环境可执行 `ffmpeg` 与 `ffprobe`（本地、Docker、云端 veFaaS 镜像均需要安装）
 - 网络可访问 BytePlus / ModelArk / Seed-Speech / TOS
 
@@ -335,7 +379,7 @@ Web UI 新增“结束项目”按钮，并支持在以下场景触发清理：
 
 当前默认审核配置：
 
-- `video_review.pass_threshold = 60`
+- `video_review.pass_threshold = 80`
 - `video_review.max_retries = 2`
 - `video_review.default_mode = auto`
 
@@ -431,8 +475,14 @@ Services
 ### 安装依赖
 
 ```bash
-pip install -r requirements.txt
+uv venv --python 3.11
+uv pip install --python .venv/bin/python -r requirements.txt -r requirements-video-tools.txt
+npm ci --prefix runtime
+mkdir -p ~/.local/share/seedance-drama-maker/video-tools
+cp -R runtime/node_modules ~/.local/share/seedance-drama-maker/video-tools/
 ```
+
+系统安装 FFmpeg/FFprobe 和 Chromium。首次使用 Whisper 会下载模型；云端镜像预置 `small` 和 `turbo`。本地 Mac 可使用 Remotion 自动下载的浏览器；Linux 建议设置 `REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`。
 
 ### 启动服务
 
@@ -485,9 +535,25 @@ http://localhost:8888
 
 ### 云端发布
 
-发布顺序为 `git commit → git push → 重建镜像 → 发布 veFaaS`。镜像基于已提交代码构建，包含 Python、FFmpeg/FFprobe 与字体；真实凭证通过 veFaaS 环境变量注入，禁止使用 Docker `ARG` 或 `ENV` 写入密钥。
+发布顺序为 `git commit → git push → 重建镜像 → 发布 veFaaS`。`Dockerfile` 基于 Python 3.11 与 Node 22，包含 FFmpeg/FFprobe、Chromium、Noto 字体、CPU PyTorch、Whisper `small` / `turbo` 缓存及固定版本 HyperFrames、Remotion 和 captions。所有提示词和有限 skills 参考文件均随镜像发布。启动命令为 `./run.sh`，监听 `_FAAS_RUNTIME_PORT`（默认 8000），单进程 Uvicorn；后台任务状态通过私有 TOS 持久化。
 
 BytePlus `ap-southeast-1` 的 veFaaS 使用常驻最少 `1`、最多 `5` 个实例。新版本就绪后切换全部流量，保留上一版本用于回滚，并验证云端页面、多语言文件、私有 TOS 签名访问与发布状态。
+
+安装官方 [BytePlus CLI](https://github.com/byteplus-sdk/byteplus-cli)，使用 `bp configure --profile seedance-v3` 私下填写 AK/SK 和 region。`.env` 中填写模型、TOS、ASR 配置，以及 `CLOUD_ACCESS_PASSWORD`；部署脚本将其映射为云端 `ACCESS_PASSWORD`，自动生成共享 `ACCESS_SECRET` 并设置 HTTPS Secure Cookie。本地 `ACCESS_PASSWORD` 留空。真实凭证只注入函数环境变量，不进入 Git、构建参数或镜像层。
+
+```bash
+.venv/bin/python scripts/audit_secrets.py
+.venv/bin/python scripts/deploy_byteplus.py \
+  --profile seedance-v3 --region ap-southeast-1 \
+  --gateway-id YOUR_GATEWAY_ID --registry YOUR_CR_REGISTRY \
+  --namespace YOUR_CR_NAMESPACE --builder dmbuilder
+```
+
+脚本从 `git archive HEAD` 构建 `linux/amd64` 镜像，创建独立 v3 函数与 API 网关服务、VeFaaS upstream 和 `/` 前缀路由，配置 4 vCPU / 8 GiB、900 秒请求超时和 1–5 实例。路由 API 使用版本 `2022-11-12`，支持 WebSocket。部署状态保存在被忽略的 `.run/deployment-v3.json`，可重复执行恢复。
+
+云端环境变量清单：`BYTEPLUS_AK/SK`、`TOS_*`、`MODELARK_*`、五类模型 `*_ENDPOINT` / `*_API_KEY`、`SPEECH_*`、`ASR_RESOURCE_ID`、`ASSET_LIBRARY_*`、`NSFW_ENABLED`，以及 `ACCESS_PASSWORD` / `ACCESS_SECRET` / `ACCESS_COOKIE_SECURE`。运行时设置 `VIDEO_SKILLS_ROOT=/app/app/video_skills`、`VIDEO_TOOLS_RUNTIME_DIR=/opt/video-tools`、`WHISPER_CACHE_DIR=/opt/whisper-models`、`VIDEO_OUTPUT_DIR=/tmp/seedance-outputs`、`REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`；脚本仅复制配置引用的变量。
+
+`/healthz` 只返回健康状态与版本；登录后的 `/api/runtime` 返回不含密钥的依赖和 skills 就绪状态。镜像内可用 `python -m app.services.runtime_service --smoke` 验证实际剪辑、字幕渲染、时间线 lint、两种 Whisper 模型及音轨/时长。WebSocket 推送为实例内路由，跨实例通过快照轮询补齐；实例回收后的在途任务重启和跨实例写入仲裁仍需要任务队列与共享锁，TOS 快照本身不是分布式任务队列。
 
 ## Prompt 与 Skill 统一管理
 

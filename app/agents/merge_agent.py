@@ -10,6 +10,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 from app.config import config
 from app.services.ffmpeg_service import ffmpeg_service
+from app.services.video_skill_service import video_skill_service
 from app.services.tos_service import tos_service
 from app.utils.logger import get_logger
 from app.utils.scene_identity import scene_content_fingerprint
@@ -120,6 +121,7 @@ class MergeAgent:
             "project_id": project_id
         })
         temporary_edge_trim_enabled = self._is_temporary_edge_trim_enabled()
+        video_skill_service.manifest("merge")
         
         # 严格按剧本编号映射，拒绝重复、缺失、额外或内容身份不匹配的分镜视频。
         sorted_videos = self.order_videos_for_script(script, videos)

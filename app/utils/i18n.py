@@ -16,6 +16,27 @@ SUPPORTED_OUTPUT_LANGUAGES: Dict[str, str] = {
 
 
 BACKEND_TRANSLATIONS = {
+    "progress.optimize.generating": {
+        "zh-CN": "正在优化视频并匹配音轨字幕…",
+        "zh-TW": "正在最佳化影片並配對音軌字幕…",
+        "en": "Optimizing video and matching soundtrack subtitles…",
+        "ja": "動画を最適化し、音声に合わせて字幕を作成しています…",
+        "es": "Optimizando el video y creando subtítulos del audio…",
+    },
+    "progress.optimize.completed": {
+        "zh-CN": "视频优化与字幕完成。",
+        "zh-TW": "影片最佳化與字幕完成。",
+        "en": "Video optimization and subtitles complete.",
+        "ja": "動画の最適化と字幕作成が完了しました。",
+        "es": "Optimización y subtítulos completados.",
+    },
+    "progress.optimize.needs_review": {
+        "zh-CN": "视频复审尚未通过，已保留视频与审核记录，请在优化编辑器中继续修复。",
+        "zh-TW": "影片複審尚未通過，已保留影片與審核紀錄，請在最佳化編輯器中繼續修復。",
+        "en": "Final review has not passed. Video and review records are saved. Continue in the optimization editor.",
+        "ja": "最終審査が未合格です。動画と審査記録を保存しました。最適化エディターで修正を続けてください。",
+        "es": "La revisión final no ha aprobado el video. Se guardaron el video y los registros. Continúa en el editor.",
+    },
     "script_quality.paused": {
         "zh-CN": "剧本校验未通过，请选择恢复方式后继续。",
         "zh-TW": "劇本校驗未通過，請選擇恢復方式後繼續。",

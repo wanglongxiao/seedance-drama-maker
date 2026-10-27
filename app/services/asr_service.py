@@ -167,14 +167,15 @@ class ASRService:
             logger.error(f"ASR task query error: {str(e)}")
             raise
 
-    def recognize(
+    def recognize_result(
         self,
         audio_url: str,
         language: Optional[str] = None,
         poll_interval: Optional[int] = None,
         max_wait_time: Optional[int] = None,
+        check_active=None,
         **kwargs
-    ) -> str:
+    ) -> Dict[str, Any]:
         """
         识别音频文件并返回文本结果
 
@@ -193,29 +194,27 @@ class ASRService:
         if max_wait_time is None:
             max_wait_time = config.get('limits.asr_max_wait_time', 300)
 
+        active = check_active or (lambda: None)
+        active()
         # 提交任务
         task_id, log_id = self.submit_task(audio_url, language=language, **kwargs)
 
         # 轮询等待结果
         elapsed = 0
         while elapsed < max_wait_time:
+            active()
             query_response = self.query_task(task_id, log_id)
             code = query_response.headers.get("X-Api-Status-Code", "")
 
             if code == "20000000":  # 任务完成
                 result = query_response.json()
 
-                # 提取文本
-                text = ""
-                if "result" in result:
-                    if "text" in result["result"]:
-                        text = result["result"]["text"]
-                    elif "utterances" in result["result"]:
-                        texts = [u.get("text", "") for u in result["result"]["utterances"]]
-                        text = " ".join(texts)
-
-                logger.info(f"ASR recognition successful: {text[:100]}...")
-                return text
+                data = result.get("result")
+                if not isinstance(data, dict):
+                    raise ValueError("ASR returned no structured result")
+                logger.info("ASR recognition successful: chars=%s utterances=%s",
+                    len(data.get("text", "")), len(data.get("utterances", [])))
+                return data
 
             elif code not in ["20000001", "20000002"]:  # 任务失败
                 error_msg = f"ASR task failed with code: {code}"
@@ -228,6 +227,14 @@ class ASRService:
             elapsed += poll_interval
 
         raise TimeoutError("ASR recognition timeout")
+
+    def recognize(self, audio_url: str, language: Optional[str] = None,
+                  poll_interval: Optional[int] = None, max_wait_time: Optional[int] = None,
+                  **kwargs) -> str:
+        """Keep the existing text API while exposing native word timestamps separately."""
+        result = self.recognize_result(audio_url, language=language,
+            poll_interval=poll_interval, max_wait_time=max_wait_time, **kwargs)
+        return result.get("text") or " ".join(u.get("text", "") for u in result.get("utterances", []))
 
 # 全局服务实例
 asr_service = ASRService()

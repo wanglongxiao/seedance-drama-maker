@@ -1,4 +1,39 @@
 {
+  "optimization": {
+    "taskSummary": "视频优化进度：{done}/{total} 项已处理",
+    "roundLabel": "第 {round} 轮", "fragmentLabel": "分镜 {scene} · {start}–{end} 秒",
+    "taskNames": {"triage":"判断关键剧情与局部评分","source":"载入母片与时间轴","transcribe":"识别真实音轨","audio_review":"独立核对异常旁白","audio_edit":"修复局部音轨","review":"审核视频","confirm":"独立确认问题","repair_plan":"安排剪除与必要补拍","fragment_prepare":"准备补片与衔接参考","fragment":"重新生成视频片段","fragment_review":"独立复核补片","replace":"替换问题片段","edit":"剪辑与光影匹配","subtitles":"生成并渲染字幕","final_review":"整片复审"},
+    "taskStates": {"queued":"等待中","running":"处理中","completed":"已完成","needs_review":"待检查","unavailable":"审核不可用","failed":"失败","budget_exhausted":"已达补拍次数"},
+    "finalConfirm": "独立确认成片问题",
+    "fragmentSelect": "选择补片有效动作",
+    "fragmentReference": "生成修正目标参考图",
+    "fragmentReferenceReview": "验证修正目标参考图",
+    "reviewPassed": "成片复审通过，删除 {seconds} 秒。",
+    "needsReview": "成片已生成；仍有质量问题或审核不可用，请检查优化报告。",
+    "downloadSubtitles": "下载字幕（SRT）", "downloadReport": "下载优化报告",
+    "beforeVideo": "查看视频合成版本（优化前）", "editTitle": "剪辑与局部补拍",
+    "editHint": "先查看优化前的合成视频，再填写要删除或补拍的时间。所有时间以未剪辑母片为准，不按剪辑后的成片计时；无须修改的项目留空。",
+    "cutsHint": "多个片段每行一个，例如第一行 5-7，第二行 12.5-14；也可写成 5-7, 12.5-14。单位为秒，支持小数。删除后字幕同步调整；与对白重叠的片段会受到保护。",
+    "repairsHint": "每条先填写开始与结束秒数，再写这一段的补拍要求。可点击「添加补拍片段」填写多个；每段最多 {seconds} 秒，且须位于同一分镜。补片并行生成和审核，通过后替换原位置，保留原声并检查人物、光影及前后衔接。",
+    "startSeconds": "开始时间（秒）", "endSeconds": "结束时间（秒）",
+    "repairInstructions": "这段的补拍要求", "repairPlaceholder": "例如：修正右手多余手指，保留原动作、人物服装与光影，衔接前后画面。",
+    "repairItem": "补拍片段 {number}", "addRepair": "＋ 添加补拍片段", "remove": "移除",
+    "removeRepair": "移除补拍片段 {number}",
+    "rangeOrder": "时间须满足：0 ≤ 开始时间 < 结束时间。",
+    "rangeDuration": "结束时间不能超过母片时长 {seconds} 秒。",
+    "rangeOverlap": "同类时间段不能重叠，请调整开始或结束时间。",
+    "cutRepairOverlap": "同一段画面不能同时删除和补拍，请选择一种操作。",
+    "repairIncomplete": "每条补拍须填写开始时间、结束时间和对应要求；不需要的条目可移除。",
+    "repairMax": "每条补拍最多 {seconds} 秒，请拆成多个条目。",
+    "repairScene": "每条补拍须位于同一分镜，请按分镜边界拆成多个条目。",
+    "cutLimit": "一次最多删除 50 个片段。", "instructionLimit": "每条补拍要求最多 4000 个字符。",
+    "cuts": "删除片段（秒）", "sceneOrder": "分镜顺序，例如 2,1,3",
+    "regenerateScenes": "整镜补拍编号，例如 2,3", "repairRanges": "局部画面补拍（秒）",
+    "instructions": "补拍与优化要求", "matchLighting": "匹配同场景光影与色调",
+    "subtitles": "根据真实音轨添加字幕", "autoRepair": "自动审核并修复剩余问题",
+    "apply": "执行视频优化", "rangeFormat": "删除片段请填写「开始秒-结束秒」，例如 5-7；多个片段用换行或逗号分隔。",
+    "applyError": "优化方案无法执行：{error}"
+  },
   "scriptQuality": {
     "paused": "剧本校验未通过，后续生成已暂停",
     "restart": "重新启动整个项目",
@@ -32,6 +67,7 @@
     "recording": "正在录音..."
   },
   "progress": {
+    "optimize": {"generating": "正在优化视频并匹配字幕…", "completed": "视频优化完成"},
     "overall": "📋 整体进度",
     "emptyState": "开始创作后，这里将显示生成的内容",
     "waiting": "等待中...",
@@ -57,6 +93,8 @@
     }
   },
   "steps": {
+    "optimize": "优化",
+    "optimizeTitle": "视频优化",
     "script": "剧本",
     "referenceImage": "参考图",
     "videos": "视频",

@@ -1,0 +1,46 @@
+# 版本控制 / 本地环境
+.git
+.gitignore
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+
+# 敏感凭证：严禁打包进镜像（改由 veFaaS 环境变量注入）
+.env
+.env.*
+!.env.example
+
+# 大体积 / 无关运行时的资源
+demo
+docs
+tests
+plan.md
+*.md
+!README.md
+!app/prompt_skill/*.md
+!app/video_skills/**/*.md
+server.log
+*.log
+logs
+temp
+tmp
+outputs
+.DS_Store
+.pytest_cache
+.idea
+.vscode
+.trae
+node_modules
+.trae-html-share-packages
+.dbg
+.run
+scripts
+runtime/node_modules
+*.pem
+*.key
+*.p12
+*.pfx
+dm_vefaas*.json

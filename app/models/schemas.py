@@ -3,7 +3,7 @@
 # @contact https://www.linkedin.com/in/alexwanglx/
 # Open Source Usage: attribution required; preserve this notice in redistributions.
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime
 from enum import Enum
@@ -155,6 +155,33 @@ class VideoSceneState(BaseModel):
     accepted_over_retry: bool = False
     completed: bool = False
 
+class EditRange(BaseModel):
+    start: float = Field(ge=0, allow_inf_nan=False)
+    end: float = Field(gt=0, allow_inf_nan=False)
+
+
+class RepairRange(EditRange):
+    instructions: str = Field(default="", max_length=4000)
+
+
+class OptimizationSettings(BaseModel):
+    cuts: List[EditRange] = Field(default_factory=list, max_length=50)
+    scene_order: List[int] = Field(default_factory=list, max_length=200)
+    regenerate_scenes: List[int] = Field(default_factory=list, max_length=20)
+    repair_ranges: List[RepairRange] = Field(default_factory=list, max_length=20)
+    match_lighting: bool = True
+    subtitles: bool = True
+    auto_repair: bool = True
+    instructions: str = Field(default="", max_length=4000)
+
+    @field_validator("repair_ranges", mode="before")
+    @classmethod
+    def upgrade_legacy_repair_ranges(cls, value):
+        if isinstance(value, list):
+            return [item.model_dump() if isinstance(item, EditRange) else item for item in value]
+        return value
+
+
 class VideoProject(BaseModel):
     """视频项目数据模型"""
     project_id: str
@@ -168,6 +195,12 @@ class VideoProject(BaseModel):
     images: List[GeneratedImage] = Field(default_factory=list)
     videos: List[GeneratedVideo] = Field(default_factory=list)
     final_video_url: Optional[str] = None
+    merged_video_url: Optional[str] = None
+    optimization_report: Dict[str, Any] = Field(default_factory=dict)
+    optimization_settings: OptimizationSettings = Field(default_factory=OptimizationSettings)
+    optimization_source_url: Optional[str] = None
+    optimization_history: List[Dict[str, Any]] = Field(default_factory=list)
+    optimization_tasks: List[Dict[str, Any]] = Field(default_factory=list)
     status: str = "pending"
     current_step: str = "init"
     progress: int = 0

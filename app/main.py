@@ -25,7 +25,7 @@ from app.agents.script_agent import ScriptQualityExhausted
 from app.services.asset_library_service import asset_library_service
 from app.services.tos_service import tos_service
 from app.services.asr_service import asr_service
-from app.models.schemas import UploadResponse, ASRResponse
+from app.models.schemas import UploadResponse, ASRResponse, OptimizationSettings
 from app import __version__
 
 logger = get_logger("main")
@@ -68,6 +68,18 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 from app.middleware.access_gate import AccessGateMiddleware
 app.add_middleware(AccessGateMiddleware)
 
+
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok", "version": __version__}
+
+
+@app.get("/api/runtime")
+async def runtime_capabilities():
+    """Authenticated runtime readiness; never return environment values."""
+    from app.services.runtime_service import capabilities
+    return await run_interactive(capabilities)
+
 # 存储WebSocket连接和等待状态
 websocket_connections: Dict[str, WebSocket] = {}
 step_confirmations: Dict[str, asyncio.Event] = {}
@@ -75,6 +87,7 @@ project_client_owners: Dict[str, str] = {}
 disconnect_cleanup_tasks: Dict[str, asyncio.Task] = {}
 # 视频单分镜重生成按 project + scene 去重；不同分镜仍可并发执行。
 video_scene_regeneration_tasks: Dict[str, asyncio.Task] = {}
+video_optimization_tasks: Dict[str, asyncio.Task] = {}
 
 
 class ReconnectingWebSocketProxy:
@@ -108,6 +121,7 @@ def get_reconnecting_websocket(client_id: Optional[str]):
 @app.on_event("shutdown")
 async def _shutdown_thread_pools() -> None:
     """进程退出时优雅关闭交互式/生成线程池。"""
+    await main_agent.cancel_optimizations()
     shutdown_pools()
 
 
@@ -624,6 +638,7 @@ async def restore_project_snapshot(project_id: str):
         "success": True,
         "snapshot": {
             "project_id": project.project_id,
+            "state_version": project.state_version,
             "is_ended": bool(getattr(project, "is_ended", False)),
             "current_step": getattr(project, "current_step", "") or "",
             "status": getattr(project, "status", "") or "",
@@ -650,6 +665,11 @@ async def restore_project_snapshot(project_id: str):
             "next_scene_index": int(getattr(project, "next_scene_index", 0) or 0),
             "regenerating_scene_numbers": list(getattr(project, "regenerating_scene_numbers", []) or []),
             "final_video_url": getattr(project, "final_video_url", None),
+            "merged_video_url": getattr(project, "merged_video_url", None),
+            "optimization_report": getattr(project, "optimization_report", {}),
+            "optimization_settings": project.optimization_settings.model_dump(),
+            "optimization_history": project.optimization_history,
+            "optimization_tasks": project.optimization_tasks,
             # 是否仍有分镜在重新生成/未通过审核（用于恢复后判断能否进入合成）。
             "merge_blocked": _scene_regeneration_blocks_merge(project),
         }
@@ -670,6 +690,7 @@ async def get_frontend_config():
             "reference_image_max_count": max(1, int(reference_config.get("upload_max_count", 40))),
             "character_reference_max_count": max(1, int(reference_config.get("upload_character_max_count", 20))),
             "scene_reference_max_count": max(1, int(reference_config.get("upload_scene_max_count", 20))),
+            "optimization_fragment_max_seconds": float(config.get("video_optimization.fragment_max_seconds", 6)),
         }
     }
 
@@ -907,6 +928,8 @@ async def regenerate(
             }
 
         elif type == "video":
+            if project.processing_phase in {"merge", "optimize"} or project_id in video_optimization_tasks:
+                return {"success": False, "error": translate(ui_language, "progress.optimize.generating")}
             logger.info(f"Regenerating video for scene {scene_number}")
             logger.info(f"Total scenes in script: {len(project.script.scenes)}")
             logger.info(f"Total videos: {len(project.videos)}")
@@ -1309,7 +1332,7 @@ async def rollback_step(request: Request):
         project = main_agent.get_project(project_id)
 
         #// 步骤顺序
-        step_order = ['script', 'reference_image', 'videos', 'merge']
+        step_order = ['script', 'reference_image', 'videos', 'merge', 'optimize']
         if target_step not in step_order:
             return {"success": False, "error": translate(ui_language, "error.invalid_step", step=target_step)}
 
@@ -1345,11 +1368,22 @@ async def rollback_step(request: Request):
         # 清空合成视频（如果是退回合成或更早）
         if target_index <= step_order.index('merge'):
             project.final_video_url = None
+            project.merged_video_url = None
+            project.optimization_report = {}
+            project.optimization_source_url = None
+            project.optimization_history = []
+            if target_index <= step_order.index('videos'):
+                project.optimization_settings = OptimizationSettings()
+        elif target_step == "optimize":
+            project.final_video_url = None
+            project.optimization_report = {}
+            project.optimization_source_url = None
+            project.optimization_history.append({"kind": "restore_original", "reason": "rollback_optimize"})
 
         # 更新当前步骤
         project.current_step = target_step
         project.status = f"rolled_back_to_{target_step}"
-        project.progress = max(0, target_index * 25)
+        project.progress = max(0, target_index * 20)
         # 退回步骤时清空生成中标记，避免快照残留旧阶段导致状态栏误显示「生成中」。
         project.processing_phase = ""
         main_agent.save_project_state(project_id)
@@ -1690,6 +1724,11 @@ async def resolve_script_quality_choice(project_id: str, request: Request):
         project.images = []
         project.videos = []
         project.final_video_url = None
+        project.merged_video_url = None
+        project.optimization_report = {}
+        project.optimization_source_url = None
+        project.optimization_history = []
+        project.optimization_settings = OptimizationSettings()
         project.character_reference_images = []
         project.scene_reference_images = []
         project.character_outfit_images = []
@@ -1714,6 +1753,61 @@ async def resolve_script_quality_choice(project_id: str, request: Request):
     main_agent.save_project_state(project_id)
     return {"success": True, "next_step": next_step,
             "script": project.script.model_dump() if project.script else None}
+
+@app.post("/project/{project_id}/optimize")
+async def request_video_optimization(project_id: str, request: Request):
+    from pydantic import ValidationError
+    data = await request.json()
+    project = main_agent.get_project_for_read(project_id)
+    if not project or project.is_ended:
+        raise HTTPException(404, "Project is unavailable")
+    client_id = data.get("client_id")
+    access_error = validate_project_client_access(project_id, client_id)
+    if access_error:
+        raise HTTPException(403, access_error)
+    client_id, client_error = resolve_regenerate_client_id(project_id, client_id)
+    if client_error:
+        raise HTTPException(400, "An active project client is required")
+    if project.processing_phase or project_id in video_optimization_tasks or _scene_regeneration_blocks_merge(project):
+        raise HTTPException(409, "Project is already processing")
+    if not project.merged_video_url:
+        raise HTTPException(409, "Merge the storyboard videos first")
+    try:
+        settings = OptimizationSettings.model_validate(data.get("settings", {}))
+        numbers = [s.scene_number for s in project.script.scenes]
+        if settings.scene_order and (len(settings.scene_order) != len(numbers) or set(settings.scene_order) != set(numbers)):
+            raise ValueError("Scene order must contain every scene exactly once")
+        if any(n not in numbers for n in settings.regenerate_scenes):
+            raise ValueError("Unknown scene number")
+        if settings.regenerate_scenes and settings.repair_ranges:
+            raise ValueError("Choose whole-scene regeneration or local repairs in one edit")
+        if any(r.start >= r.end for r in settings.cuts + settings.repair_ranges):
+            raise ValueError("Range end must be after its start")
+        maximum = float(config.get("video_optimization.fragment_max_seconds", 6))
+        if any(r.end-r.start > maximum + .001 for r in settings.repair_ranges):
+            raise ValueError(f"Local repairs are limited to {maximum:g} seconds")
+        for ranges in (settings.cuts, settings.repair_ranges):
+            ordered = sorted(ranges, key=lambda r: r.start)
+            if any(b.start < a.end for a, b in zip(ordered, ordered[1:])):
+                raise ValueError("Edit ranges overlap")
+        if any(c.start < r.end and c.end > r.start for c in settings.cuts for r in settings.repair_ranges):
+            raise ValueError("The same time range cannot be deleted and reshot")
+    except (ValidationError, ValueError) as error:
+        raise HTTPException(422, str(error)[:400]) from error
+    project.optimization_settings = settings
+    # A submitted form replaces the user's pending list, including rows they removed.
+    project.optimization_report["unresolved_manual_repairs"] = [
+        r.model_dump(exclude_defaults=True) for r in settings.repair_ranges]
+    project.final_video_url = None
+    project.status = "optimization_requested"
+    main_agent.save_project_state(project_id)
+    async def execute():
+        try:
+            await execute_step_with_websocket(client_id, project_id, "optimize")
+        finally:
+            video_optimization_tasks.pop(project_id, None)
+    video_optimization_tasks[project_id] = asyncio.create_task(execute())
+    return {"success": True, "step": "optimize"}
 
 
 async def execute_step_with_websocket(client_id: str, project_id: str, step: str, review_mode: Optional[str] = None):
@@ -1759,6 +1853,8 @@ async def execute_step_with_websocket(client_id: str, project_id: str, step: str
             await execute_videos_step(client_id, project_id, review_mode=review_mode)
         elif step == "merge":
             await execute_merge_step(client_id, project_id)
+        elif step == "optimize":
+            await execute_optimize_step(client_id, project_id)
         else:
             await manager.send_message(client_id, {
                 "type": "error",
@@ -1771,6 +1867,10 @@ async def execute_step_with_websocket(client_id: str, project_id: str, step: str
         })
     except Exception as e:
         logger.error(f"Step execution failed: {str(e)}")
+        if step in {"merge", "optimize"} and not project.is_ended:
+            project.processing_phase = ""
+            project.status = "optimization_failed" if step == "optimize" else "merge_failed"
+            main_agent.save_project_state(project_id)
         await manager.send_message(client_id, {
             "type": "error",
             "data": {"message": translate(lang, "error.step_execute_failed", error=str(e))}
@@ -2366,6 +2466,8 @@ async def execute_videos_step(client_id: str, project_id: str, review_mode: Opti
 async def execute_merge_step(client_id: str, project_id: str):
     """执行视频合成步骤"""
     project = main_agent.get_project(project_id)
+    if not project or project.is_ended or project.processing_phase in {"merge", "optimize"}:
+        return
     if await _script_quality_blocks_generation(client_id, project):
         return
     lang = normalize_locale(getattr(project, "output_language", "zh-CN"))
@@ -2399,14 +2501,14 @@ async def execute_merge_step(client_id: str, project_id: str):
         )
         return
 
+    # 合成阶段开始即置位并持久化：兜底云端多实例下的推送丢失（状态栏空白）。
+    project.processing_phase = "merge"
+    main_agent.save_project_state(project_id)
+
     await manager.send_message(client_id, {
         "type": "status",
         "data": {"agent": "merge_agent", "message": translate(lang, "progress.merge.generating")}
     })
-
-    # 合成阶段开始即置位并持久化：兜底云端多实例下的推送丢失（状态栏空白）。
-    project.processing_phase = "merge"
-    main_agent.save_project_state(project_id)
 
     await manager.send_message(client_id, {
         "type": "progress",
@@ -2415,8 +2517,10 @@ async def execute_merge_step(client_id: str, project_id: str):
 
     # 合成视频
     final_url = await main_agent._merge_videos(project)
-    project.final_video_url = final_url
-    project.status = "completed"
+    main_agent._raise_if_project_ended(project)
+    project.merged_video_url = final_url
+    project.status = "merged"
+    project.current_step = "merge"
     project.processing_phase = ""
     main_agent.save_project_state(project_id)
 
@@ -2429,7 +2533,7 @@ async def execute_merge_step(client_id: str, project_id: str):
         "type": "agent_output",
         "data": {
             "agent": "merge_agent",
-            "output": {"final_video_url": final_url}
+            "output": {"merged_video_url": final_url}
         }
     })
 
@@ -2438,11 +2542,43 @@ async def execute_merge_step(client_id: str, project_id: str):
         "type": "step_complete",
         "data": {
             "step": "merge",
-            "message": translate(lang, "message.all_videos_completed")
+            "next_step": "optimize",
+            "message": translate(lang, "progress.merge.completed")
         }
     })
 
-    # 清理TOS中的临时文件（图片和录音）
+    if project.auto_run and project.video_review_mode == "auto" and not project.is_ended:
+        asyncio.create_task(execute_step_with_websocket(client_id, project_id, "optimize"))
+
+
+async def execute_optimize_step(client_id: str, project_id: str):
+    project = main_agent.get_project(project_id)
+    if not project or project.is_ended or project.processing_phase in {"merge", "optimize"}:
+        return
+    if project.final_video_url and project.status == "completed":
+        return
+    if not project.merged_video_url or _scene_regeneration_blocks_merge(project):
+        raise ValueError("Optimization requires an approved merged master")
+    lang = normalize_locale(project.output_language)
+    project.processing_phase = "optimize"
+    main_agent.save_project_state(project_id)
+    await manager.send_message(client_id, {"type": "status", "data": {
+        "agent": "optimization_agent", "message": translate(lang, "progress.optimize.generating")}})
+    url = await main_agent._optimize_video(project, get_reconnecting_websocket(client_id))
+    main_agent._raise_if_project_ended(project)
+    await manager.send_message(client_id, {"type": "agent_output", "data": {
+        "agent": "optimization_agent", "output": {"final_video_url": url, "optimization_report": project.optimization_report}}})
+    if project.status != "completed":
+        await manager.send_message(client_id, {"type": "optimization_progress", "data": {
+            "project_id": project_id, "status": project.status,
+            "tasks": project.optimization_tasks, "state_version": project.state_version}})
+        await manager.send_message(client_id, {"type": "error", "data": {
+            "message": translate(lang, "progress.optimize.needs_review")}})
+        return
+    await manager.send_message(client_id, {"type": "progress", "data": {
+        "agent": "optimization_agent", "progress": 100, "message": translate(lang, "progress.optimize.completed")}})
+    await manager.send_message(client_id, {"type": "step_complete", "data": {
+        "step": "optimize", "message": translate(lang, "message.all_videos_completed")}})
     await cleanup_project_files(project)
 
 
@@ -2454,19 +2590,19 @@ async def cleanup_project_files(
 ):
     """
     清理项目相关的临时文件
-    - TOS 中仅保留角色/场景参考图、分镜视频、合成视频
+    - TOS 保留参考图、视频；未结束项目保留状态供重启恢复
     - 完全删除本地任务 temp 子目录
     """
     logger.info(f"Starting cleanup for project {project.project_id}")
     try:
+        retained_prefixes = list(keep_prefixes or [
+            "references", "videos/scenes", "videos/final", "videos/optimization",
+        ])
+        if not getattr(project, "is_ended", False) and "state" not in retained_prefixes:
+            retained_prefixes.append("state")
         tos_service.cleanup_project_directory(
             project.project_id,
-            keep_prefixes=keep_prefixes or [
-                "references/characters",
-                "references/scenes",
-                "videos/scenes",
-                "videos/final",
-            ],
+            keep_prefixes=retained_prefixes,
         )
     except Exception as e:
         logger.error(f"TOS cleanup failed for project {project.project_id}: {str(e)}")

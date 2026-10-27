@@ -1,4 +1,36 @@
 {
+  "optimization": {
+    "taskSummary": "影片最佳化進度：{done}/{total} 項已處理",
+    "roundLabel": "第 {round} 輪", "fragmentLabel": "分鏡 {scene} · {start}–{end} 秒",
+    "taskNames": {"triage":"判斷關鍵劇情與局部評分","source":"載入母片與時間軸","transcribe":"識別真實音軌","audio_review":"獨立核對異常旁白","audio_edit":"修復局部音軌","review":"審核影片","confirm":"獨立確認問題","repair_plan":"安排剪除與必要補拍","fragment_prepare":"準備補片與銜接參考","fragment":"重新生成影片片段","fragment_review":"獨立複核補片","replace":"替換問題片段","edit":"剪輯與光影匹配","subtitles":"生成並渲染字幕","final_review":"整片複審"},
+    "taskStates": {"queued":"等待中","running":"處理中","completed":"已完成","needs_review":"待檢查","unavailable":"審核不可用","failed":"失敗","budget_exhausted":"已達補拍次數"},
+    "finalConfirm": "獨立確認成片問題",
+    "fragmentSelect": "選擇補片有效動作",
+    "fragmentReference": "生成修正目標參考圖",
+    "fragmentReferenceReview": "驗證修正目標參考圖",
+    "reviewPassed": "成片複審通過，刪除 {seconds} 秒。", "needsReview": "成片已生成；仍有品質問題或審核不可用，請檢查最佳化報告。",
+    "downloadSubtitles": "下載字幕（SRT）", "downloadReport": "下載最佳化報告",
+    "beforeVideo": "查看合成版本（最佳化前）", "editTitle": "剪輯與局部補拍",
+    "editHint": "先查看最佳化前的合成影片，再填寫要刪除或補拍的時間。所有時間依未剪輯母片計算，不按剪輯後的成片計時；不須修改的項目留空。",
+    "cutsHint": "多個片段每行一個，例如第一行 5-7，第二行 12.5-14；也可寫成 5-7, 12.5-14。單位為秒，支援小數。刪除後字幕同步調整；與對白重疊的片段會受到保護。",
+    "repairsHint": "每條先填開始與結束秒數，再寫這段的補拍要求。點選「新增補拍片段」可填多段；每段最多 {seconds} 秒且須位於同一分鏡。補片並行生成和審核，通過後替換原位置，保留原聲並檢查人物、光影及前後銜接。",
+    "startSeconds": "開始時間（秒）", "endSeconds": "結束時間（秒）",
+    "repairInstructions": "這段的補拍要求", "repairPlaceholder": "例如：修正右手多餘手指，保留原動作、服裝與光影，銜接前後畫面。",
+    "repairItem": "補拍片段 {number}", "addRepair": "＋ 新增補拍片段", "remove": "移除",
+    "removeRepair": "移除補拍片段 {number}",
+    "rangeOrder": "時間須符合：0 ≤ 開始時間 < 結束時間。",
+    "rangeDuration": "結束時間不可超過母片長度 {seconds} 秒。",
+    "rangeOverlap": "同類時間區間不可重疊，請調整時間。",
+    "cutRepairOverlap": "同一段畫面不可同時刪除和補拍，請選擇一種操作。",
+    "repairIncomplete": "每條補拍須填開始時間、結束時間和對應要求；不需要的條目可移除。",
+    "repairMax": "每條補拍最多 {seconds} 秒，請拆成多個條目。",
+    "repairScene": "每條補拍須位於同一分鏡，請依分鏡邊界拆成多個條目。",
+    "cutLimit": "一次最多刪除 50 個片段。", "instructionLimit": "每條補拍要求最多 4000 個字元。",
+    "cuts": "刪除片段（秒）", "sceneOrder": "分鏡順序，例如 2,1,3", "regenerateScenes": "整鏡補拍編號，例如 2,3",
+    "repairRanges": "局部畫面補拍（秒）", "instructions": "補拍與最佳化要求",
+    "matchLighting": "匹配同場景光影與色調", "subtitles": "按真實音軌加字幕", "autoRepair": "自動審核並修復剩餘問題",
+    "apply": "執行影片最佳化", "rangeFormat": "刪除片段請填「開始秒-結束秒」，例如 5-7；多段用換行或逗號分隔。", "applyError": "方案無法執行：{error}"
+  },
   "scriptQuality": {
     "paused": "劇本校驗未通過，後續生成已暫停",
     "restart": "重新啟動整個專案",
@@ -32,6 +64,7 @@
     "recording": "正在錄音..."
   },
   "progress": {
+    "optimize": {"generating": "正在最佳化影片並配對字幕…", "completed": "影片最佳化完成"},
     "overall": "📋 整體進度",
     "emptyState": "開始創作後，這裡將顯示生成的內容",
     "waiting": "等待中...",
@@ -57,6 +90,8 @@
     }
   },
   "steps": {
+    "optimize": "最佳化",
+    "optimizeTitle": "影片最佳化",
     "script": "劇本",
     "referenceImage": "參考圖",
     "videos": "影片",

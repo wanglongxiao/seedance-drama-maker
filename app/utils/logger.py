@@ -4,6 +4,7 @@
 # Open Source Usage: attribution required; preserve this notice in redistributions.
 
 import logging
+import os
 import re
 import sys
 from typing import Any, Optional
@@ -11,12 +12,17 @@ from app.config import config
 
 
 _URL_QUERY_RE = re.compile(r"(https?://[^\s\"'<>?]+\?)[^\s\"'<>]+")
+_SENSITIVE_ENV = re.compile(r"key|secret|password|token|endpoint|app_?id", re.I)
 
 
 def _redact_url_queries(value: Any) -> Any:
     """Prevent temporary TOS signatures and other URL credentials from entering logs."""
     if isinstance(value, str):
-        return _URL_QUERY_RE.sub(r"\1<redacted>", value)
+        value = _URL_QUERY_RE.sub(r"\1<redacted>", value)
+        for name, secret in os.environ.items():
+            if secret and len(secret) >= 4 and _SENSITIVE_ENV.search(name):
+                value = value.replace(secret, "<redacted>")
+        return value
     if isinstance(value, tuple):
         return tuple(_redact_url_queries(item) for item in value)
     if isinstance(value, list):
@@ -30,6 +36,9 @@ class _URLCredentialFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = _redact_url_queries(record.msg)
         record.args = _redact_url_queries(record.args)
+        if record.exc_info:
+            # Format exceptions before logging's formatter can append unfiltered text.
+            record.exc_text = _redact_url_queries(logging.Formatter().formatException(record.exc_info))
         return True
 
 

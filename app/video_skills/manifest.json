@@ -1,0 +1,72 @@
+[
+  {
+    "skill": "hyperframes",
+    "file": "SKILL.md",
+    "sha256": "180ce4eea5f33f1617105c92e2690a5a2320abf624c263186ec0cb1a78a919ef"
+  },
+  {
+    "skill": "hyperframes",
+    "file": "references/review.md",
+    "sha256": "90886b58db02aaa53e6b91c433748629eda061b18465804b56ebbbab92508e56"
+  },
+  {
+    "skill": "hyperframes",
+    "file": "references/story.md",
+    "sha256": "3c2b96bb7f262652f4bf5efdef1ae806b47fd259c6704cb131938c5254965f22"
+  },
+  {
+    "skill": "hyperframes",
+    "file": "references/types/character.md",
+    "sha256": "e8b4f6fd622acff593e2d7e478aa4e18ace1f9f785d16e42db5faf57ed525498"
+  },
+  {
+    "skill": "media-use",
+    "file": "SKILL.md",
+    "sha256": "ef3976a02ff516d8e5ed0b7fff19d4bbf9358264233bace33fdacaa3aa7f37de"
+  },
+  {
+    "skill": "media-use",
+    "file": "references/resolve.md",
+    "sha256": "c90a833f6c3dcc8f33b289f5ad90e9f835f59581873bdc774035f25b6eb72314"
+  },
+  {
+    "skill": "openai-whisper",
+    "file": "SKILL.md",
+    "sha256": "802e31d7310316fc25a5ec4fbe29308a0897c039cd2ae897f59fc25128ab4644"
+  },
+  {
+    "skill": "remotion-captions",
+    "file": "SKILL.md",
+    "sha256": "ceb2615a1c4dfd14c1c01de60671d622b600a9ceb9ca666706dda932cb83b01b"
+  },
+  {
+    "skill": "remotion-render",
+    "file": "SKILL.md",
+    "sha256": "f0a0cdb799a01793861faa9a81be004d48eac4df77b659479c91038b13c9436c"
+  },
+  {
+    "skill": "video-use",
+    "file": "LICENSE",
+    "sha256": "5afa3d97bf1e6f998d587fa101e3fe0d0c416840b7fe77bcd6ae97690a334631"
+  },
+  {
+    "skill": "video-use",
+    "file": "SKILL.md",
+    "sha256": "d3bbeb19bc0e81e197d74806fba15e0a5f5694a0cdf33f0a2348bffe8472a27b"
+  },
+  {
+    "skill": "vlog-auto-edit",
+    "file": "LICENSE",
+    "sha256": "2d9ba3709c7dc9991fc1a226291ac394b4225bdb63b3b741ef570754a6d1ef18"
+  },
+  {
+    "skill": "vlog-auto-edit",
+    "file": "SKILL.md",
+    "sha256": "913d45d6b15f76b2a7cfd32d1442aa5e19d29a6b8b057c0fb108953a509eb539"
+  },
+  {
+    "skill": "vlog-auto-edit",
+    "file": "templates/edit_plan_prompt.md",
+    "sha256": "3e421a2406340c3df98a5194964be761458f1386fef686e91df83218042d6d5d"
+  }
+]

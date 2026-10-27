@@ -153,14 +153,20 @@ class LLMService:
             "max_tokens": max_tokens,
             **kwargs
         }
+        if ("thinking" not in payload
+                and model == config.get("models.video_review.endpoint")
+                and config.get("models.video_review.disable_thinking", False)):
+            payload["thinking"] = {"type": "disabled"}
 
         payload_json = json.dumps(payload, ensure_ascii=False)
         logger.log_llm_input(model, json.dumps(messages, ensure_ascii=False))
         logger.info(
-            "[LLM_REQUEST][CHAT] model=%s messages=%s payload_chars=%s",
+            "[LLM_REQUEST][CHAT] model=%s messages=%s payload_chars=%s thinking=%s max_tokens=%s",
             model,
             len(messages),
             len(payload_json),
+            (payload.get("thinking") or {}).get("type", "default"),
+            max_tokens,
         )
         logger.debug("[LLM_REQUEST][CHAT] url=%s payload=%s", url, payload_json)
         try:
@@ -366,7 +372,6 @@ class LLMService:
             "output_format": config.get('video_generation.output_format', 'mov'),
             **kwargs
         }
-
         # 添加可选参数
         if resolution:
             payload["resolution"] = resolution
@@ -469,6 +474,10 @@ class LLMService:
             **kwargs
         }
 
+        if any(item.get("role") == "first_frame" for item in content):
+            # First-frame mode inherits the image dimensions; an explicit ratio is rejected.
+            payload.pop("ratio", None)
+
         # 添加可选参数
         if normalized_resolution:
             payload["resolution"] = normalized_resolution
@@ -477,7 +486,8 @@ class LLMService:
 
         payload_json = json.dumps(payload, ensure_ascii=False)
         logger.info(
-            f"Video task created: model={model}, duration={duration}, ratio={ratio}, "
+            f"Video task request: model={model}, duration={duration}, "
+            f"ratio={payload.get('ratio', 'inherited_from_first_frame')}, "
             f"resolution={normalized_resolution or 'default'}, content={len(content)} items"
         )
         logger.info(

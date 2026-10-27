@@ -10,7 +10,9 @@ from typing import Dict, Any, List, Optional
 from app.config import config
 from app.prompt_skill import load_prompt, nsfw_content_requested, nsfw_enabled, render_prompt
 from app.services.llm_service import llm_service
+from app.services.video_skill_service import video_skill_service
 from app.utils.i18n import language_name, translate
+from app.utils.dialogue_language import dialogue_language_instruction, requests_english_dialogue
 from app.utils.logger import get_logger
 from app.utils.outfit_similarity import (
     are_outfits_visually_equivalent,
@@ -1242,10 +1244,10 @@ class ScriptAgent:
             剧本对象
         """
         logger.log_agent_call("ScriptAgent", "generate_script", {
-            "user_input": user_input[:200] if user_input else "",
+            "input_chars": len(user_input or ""),
             "has_images": bool(reference_images),
             "has_audio": bool(audio_text),
-            "style_hint": style_hint
+            "has_style_hint": bool(style_hint)
         })
 
         if not self.model:
@@ -1358,9 +1360,8 @@ class ScriptAgent:
     ) -> Script:
         """基于上一版完整剧本和用户修改要求，重写整份分镜脚本。"""
         logger.log_agent_call("ScriptAgent", "rewrite_script", {
-            "title": existing_script.title,
             "scene_count": len(existing_script.scenes),
-            "edit_request": edit_request[:200] if edit_request else "",
+            "edit_request_chars": len(edit_request or ""),
             "has_images": bool(reference_images),
             "has_audio": bool(audio_text),
         })
@@ -1575,6 +1576,8 @@ class ScriptAgent:
             ),
         )]
         prompt_parts.append(load_prompt("script_director_storytelling.md"))
+        prompt_parts.append(video_skill_service.guidance("script"))
+        prompt_parts.append(dialogue_language_instruction(*trigger_texts))
         self._append_nsfw_script_policy(prompt_parts, *trigger_texts)
         return "\n\n".join(part for part in prompt_parts if part)
 
@@ -1665,6 +1668,7 @@ class ScriptAgent:
             )
         )
         prompt_parts.append("请直接输出完整 JSON，不要包含解释、前言或 Markdown 代码块。")
+        prompt_parts.append(dialogue_language_instruction(user_input, audio_text))
 
         return "\n".join(prompt_parts)
 
@@ -2159,6 +2163,14 @@ class ScriptAgent:
             self._fit_scene_durations_to_target(data["scenes"], target_duration)
             quality_ok = self._is_script_quality_acceptable(data, user_input)
             feedback = self._collect_script_quality_feedback(data, user_input) if not quality_ok else []
+            if requests_english_dialogue(user_input):
+                for scene in data["scenes"]:
+                    spoken = re.sub(r"\[[^\]]*\]\s*[:：]?", "", str(scene.get("dialogue") or ""))
+                    if re.search(r"[\u4e00-\u9fff]", spoken):
+                        feedback.append(
+                            f"分镜 {scene['scene_number']} 的对白仍为中文；用户明确要求英语对白。"
+                            "保留角色名与剧情，把实际台词改为英文，并同步描述中的引用台词。"
+                        )
             if not names_ok:
                 feedback.append("用户上传参考图的锁定角色名或布景名未被完整保留和引用。")
             actual_duration = sum(int(scene["duration"]) for scene in data["scenes"])
@@ -2884,7 +2896,7 @@ class ScriptAgent:
 
         except Exception as e:
             logger.error(f"Failed to parse script JSON: {str(e)}")
-            logger.error(f"Content: {content}")
+            logger.error("Invalid script response: content_length=%s", len(content))
             logger.warning("Returning default script due to parsing failure")
             return {
                 'title': '未命名剧本',

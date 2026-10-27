@@ -26,7 +26,8 @@ let stepProgress = { // 各步骤进度
     script: 0,
     reference_image: 0,
     videos: 0,
-    merge: 0
+    merge: 0,
+    optimize: 0
 };
 // 视频分镜进度跟踪（用于“videos”步骤的真实进度展示）
 let videoTotalScenes = null;
@@ -43,6 +44,12 @@ let lastReferenceImageOutput = null;
 let lastImagesOutput = null;
 let lastFinalVideoUrl = null;
 let mergeStepVisible = false;
+let lastOptimizationReport = null;
+let lastOptimizationSettings = {};
+let optimizationTasks = [];
+let optimizationTasksVersion = 0;
+let optimizationTasksProject = null;
+let optimizationTaskTimer = null;
 let videoOutputsByScene = {};
 let videoReviewOutputsByScene = {};
 let lastStatusState = null;
@@ -95,8 +102,8 @@ function getPersistedProjectId() {
         return null;
     }
 }
-const I18N_VERSION = '20261024a';
-const FRONTEND_CONFIG_VERSION = '20260811c';
+const I18N_VERSION = '20261027-repair-editor';
+const FRONTEND_CONFIG_VERSION = '20261027-repair-editor';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
     'zh-cn': 'zh-CN',
@@ -141,6 +148,7 @@ let frontendConfig = {
     reference_image_max_count: 30,
     character_reference_max_count: 10,
     scene_reference_max_count: 20,
+    optimization_fragment_max_seconds: 6,
 };
 
 function getCurrentReviewMode() {
@@ -478,6 +486,8 @@ function applyStaticTranslations() {
     if (stepReferenceLabel) stepReferenceLabel.textContent = t('steps.referenceImage');
     if (stepVideosLabel) stepVideosLabel.textContent = t('steps.videos');
     if (stepMergeLabel) stepMergeLabel.textContent = t('steps.merge');
+    const optimizeLabel = document.getElementById('stepOptimizeLabel');
+    if (optimizeLabel) optimizeLabel.textContent = t('steps.optimize');
     const currentEmptyStateText = document.getElementById('emptyStateText');
     if (currentEmptyStateText) currentEmptyStateText.textContent = t('progress.emptyState');
     if (statusSection && statusSection.style.display === 'none') {
@@ -649,7 +659,7 @@ async function resolveScriptQualityChoice(choice) {
             lastReferenceImageOutput = null;
             lastImagesOutput = null;
             lastFinalVideoUrl = null;
-            stepProgress = { script: 0, reference_image: 0, videos: 0, merge: 0 };
+            stepProgress = { script: 0, reference_image: 0, videos: 0, merge: 0, optimize: 0 };
             updateOverallProgress();
         }
         startStep(result.next_step);
@@ -862,6 +872,8 @@ function maybeStartPendingStepCountdown() {
     }
     if (pendingStep === 'merge' && canStartPendingStepCountdown('videos')) {
         showAutoRunCountdown('merge', 'videos', isAutoRunMode);
+    } else if (pendingStep === 'optimize') {
+        showAutoRunCountdown('optimize', 'merge', isAutoRunMode);
     }
 }
 
@@ -922,7 +934,8 @@ async function init() {
 // - 通过后端 /project/{id}/restore 拉取快照；后端内存未命中会回源 TOS，
 //   因此本地与云端多实例刷新后都能恢复同一项目，实现「继续执行而非新建」。
 async function restoreProjectOnLoad() {
-    const projectId = getPersistedProjectId();
+    const projectId = new URLSearchParams(window.location.search).get('project')
+        || getPersistedProjectId();
     if (!projectId) return;
 
     try {
@@ -959,6 +972,7 @@ function applyRestoredSnapshot(snap) {
     projectEnded = false;
     projectEndBeaconSent = false;
     persistActiveProject(currentProjectId);
+    renderOptimizationProgress(snap);
 
     // 恢复后默认不自动推进（isAutoRunMode 保持 false），避免刷新即触发合成等破坏性动作；
     // 用户可再次点击继续或输入 auto 指令恢复全自动。
@@ -993,9 +1007,20 @@ function applyRestoredSnapshot(snap) {
     renderVideosFromSnapshot(snap);
 
     // 4) 最终合成视频
+    lastOptimizationSettings = snap.optimization_settings || lastOptimizationSettings;
     if (snap.final_video_url) {
-        displayFinalVideo(snap.final_video_url);
-        currentStep = 'merge';
+        displayFinalVideo(snap.final_video_url, snap.optimization_report);
+        currentStep = 'optimize';
+        stepProgress.optimize = snap.optimization_report?.final_review?.approved === false ? 99 : 100;
+    } else if (snap.merged_video_url) {
+        displayMergedVideo(snap.merged_video_url, !snap.processing_phase
+            && (!isAutoRunMode || snap.status === 'optimization_failed'));
+        stepProgress.merge = 100;
+        currentStep = (snap.processing_phase === 'optimize' || snap.current_step === 'optimize'
+            || snap.status === 'optimization_failed') ? 'optimize' : 'merge';
+        pendingStep = 'optimize';
+        isWaitingForConfirm = snap.processing_phase !== 'optimize';
+        if (isWaitingForConfirm && isAutoRunMode && snap.status !== 'optimization_failed') showAutoRunCountdown('optimize', 'merge', true);
     } else if (snap.total_scenes > 0 && (snap.next_scene_index >= snap.total_scenes) && !snap.merge_blocked) {
         // 所有分镜已完成且未被重新生成阻塞：恢复到「等待/可进入合成」态。
         // 不自动开始倒计时，交由后端 step_complete 或用户继续驱动，避免重复合成。
@@ -1105,7 +1130,7 @@ function stopVideoReconcilePolling() {
 
 async function reconcileProjectSnapshotOnce() {
     const projectId = currentProjectId || getPersistedProjectId();
-    if (!projectId || projectEnded || currentStep === 'merge') {
+    if (!projectId || projectEnded || lastFinalVideoUrl) {
         stopProjectReconcilePolling();
         return;
     }
@@ -1195,8 +1220,20 @@ function reconcileUiFromSnapshot(snap) {
 
         // 4) 最终合成视频：无最终视频卡片但快照已就绪 -> 补渲染并结束视频阶段。
         if (snap.final_video_url && !lastFinalVideoUrl) {
-            displayFinalVideo(snap.final_video_url);
-            currentStep = 'merge';
+            displayFinalVideo(snap.final_video_url, snap.optimization_report);
+            currentStep = 'optimize';
+        } else if (snap.merged_video_url && !snap.final_video_url) {
+            lastOptimizationSettings = snap.optimization_settings || lastOptimizationSettings;
+            displayMergedVideo(snap.merged_video_url, !snap.processing_phase
+                && (!isAutoRunMode || snap.status === 'optimization_failed'));
+            stepProgress.merge = 100;
+            currentStep = (snap.processing_phase === 'optimize' || snap.current_step === 'optimize'
+                || snap.status === 'optimization_failed') ? 'optimize' : 'merge';
+            if (currentStep === 'merge') {
+                pendingStep = 'optimize';
+                isWaitingForConfirm = true;
+                if (isAutoRunMode && snap.status !== 'optimization_failed') showAutoRunCountdown('optimize', 'merge', true);
+            }
         }
     } catch (e) {
         console.debug('reconcileUiFromSnapshot render failed:', e);
@@ -1211,6 +1248,11 @@ function reconcileUiFromSnapshot(snap) {
         reconcileStatusBarFromSnapshot(snap);
     } catch (e) {
         console.debug('reconcileStatusBarFromSnapshot failed:', e);
+    }
+    try {
+        renderOptimizationProgress(snap);
+    } catch (e) {
+        console.debug('Optimization progress reconciliation failed:', e);
     }
 
     updateOverallProgress();
@@ -1290,6 +1332,7 @@ function reconcileStatusBarFromSnapshot(snap) {
             'reference_category2': { step: t('steps.referenceImageTitle'), text: t('progress.reference.generating') },
             'videos': { step: t('steps.videosTitle'), text: t('status.startingVideoGeneration') },
             'merge': { step: t('steps.mergeTitle'), text: t('progress.merge.generating') },
+            'optimize': { step: t('steps.optimizeTitle'), text: t('progress.optimize.generating') },
         }[phase];
         if (phaseStatus) {
             renderStatusBar(phaseStatus.text, 'loading', phaseStatus.step);
@@ -1313,6 +1356,8 @@ function reconcileStatusBarFromSnapshot(snap) {
             'waiting_reference_confirmation': { step: t('steps.videosTitle'), text: t('status.startingVideoGeneration') },
             'images_generated': { step: t('steps.videosTitle'), text: t('status.startingVideoGeneration') },
             'videos_generated': { step: t('steps.mergeTitle'), text: t('progress.merge.generating') },
+            'merged': { step: t('steps.optimizeTitle'), text: t('progress.optimize.generating') },
+            'optimizing': { step: t('steps.optimizeTitle'), text: t('progress.optimize.generating') },
         }[step];
         if (chainStatus) {
             renderStatusBar(chainStatus.text, 'loading', chainStatus.step);
@@ -1331,6 +1376,88 @@ function reconcileStatusBarFromSnapshot(snap) {
         showStatusSection(t('messages.referenceCompleteStatus'));
     } else if (snap.script) {
         showStatusSection(t('steps.scriptTitle'));
+    }
+}
+
+function renderOptimizationProgress(data) {
+    if (!statusSection || (data?.project_id && data.project_id !== currentProjectId)) return;
+    if (data) {
+        if (optimizationTasksProject !== currentProjectId) {
+            optimizationTasksVersion = 0;
+            optimizationTasksProject = currentProjectId;
+        }
+        const version = Number(data.state_version || 0);
+        if (version && version < optimizationTasksVersion) return;
+        optimizationTasksVersion = Math.max(optimizationTasksVersion, version);
+        optimizationTasks = data.optimization_tasks || data.tasks || [];
+    }
+    if (!optimizationTasks.length) return;
+    stepProgress.merge = 100;
+    updateStepHighlight('merge_agent', 100);
+    const finalProgress = lastOptimizationReport?.final_review?.approved === false ? 99 : 100;
+    stepProgress.optimize = lastFinalVideoUrl ? finalProgress : Math.max(stepProgress.optimize || 0, 5);
+    updateStepHighlight('optimization_agent', stepProgress.optimize);
+    updateOverallProgress();
+    const failed = (data?.status || document.getElementById('optimization-progress-list')?.dataset.projectStatus) === 'optimization_failed';
+    const activeTasks = failed ? [] : optimizationTasks.filter(task => ['queued', 'running'].includes(task.status));
+    const active = activeTasks.length > 0;
+    let panel = document.getElementById('optimization-progress-list');
+    if (!panel) {
+        panel = document.createElement('div');
+        panel.id = 'optimization-progress-list';
+        panel.setAttribute('role', 'status');
+        panel.append(document.createElement('span'), document.createElement('div'));
+        panel.firstChild.className = 'optimization-task-summary';
+        panel.lastChild.className = 'optimization-task-list';
+        panel.lastChild.tabIndex = 0;
+    }
+    if (data?.status) panel.dataset.projectStatus = data.status;
+    const summary = panel.firstChild;
+    const finished = optimizationTasks.filter(task => !['queued', 'running'].includes(task.status)).length;
+    summary.textContent = `${t('steps.optimizeTitle')} · ${lastScriptData?.title || currentProjectId} · ${finished}/${optimizationTasks.length}`;
+    summary.title = t('optimization.taskSummary', {done: finished, total: optimizationTasks.length});
+    const list = panel.lastChild;
+    const scrollLeft = list.scrollLeft;
+    const history = [];
+    const visible = failed ? [] : (active ? activeTasks : optimizationTasks.slice(-1));
+    list.replaceChildren();
+    for (const task of optimizationTasks) {
+        const range = task.scene_number ? t('optimization.fragmentLabel', {
+            scene: task.scene_number, start: Number(task.start).toFixed(1), end: Number(task.end).toFixed(1)}) : '';
+        const customStageNames = {final_confirm: 'finalConfirm', fragment_select: 'fragmentSelect',
+            fragment_reference: 'fragmentReference', fragment_reference_review: 'fragmentReferenceReview'};
+        const stageName = t(customStageNames[task.stage]
+            ? 'optimization.' + customStageNames[task.stage] : 'optimization.taskNames.' + task.stage);
+        const name = `${task.round ? t('optimization.roundLabel', {round: task.round}) + ' · ' : ''}${stageName}${range ? ' · ' + range : ''}`;
+        const elapsed = Math.max(0, Math.floor(((task.status === 'running' ? Date.now()/1000 : task.updated_at) - task.started_at) || 0));
+        const text = `${name}：${t('optimization.taskStates.' + task.status)} · ${elapsed}s`;
+        history.push(text);
+        if (!visible.includes(task)) continue;
+        const row = document.createElement('span');
+        row.className = 'optimization-task-row';
+        row.dataset.status = task.status;
+        row.textContent = text;
+        list.appendChild(row);
+    }
+    if (failed) {
+        const row = document.createElement('span');
+        row.className = 'optimization-task-row';
+        row.dataset.status = 'failed';
+        row.textContent = `${t('steps.optimizeTitle')}：${t('optimization.taskStates.failed')}`;
+        list.appendChild(row);
+    }
+    panel.title = history.join('\n');
+    panel.setAttribute('aria-label', history.join('；'));
+    if (panel.parentNode !== statusSection) statusSection.replaceChildren(panel);
+    list.scrollLeft = scrollLeft;
+    statusSection.dataset.mode = 'optimization_progress';
+    statusSection.style.display = 'flex';
+    statusSection.style.flexDirection = 'row';
+    if (active && !optimizationTaskTimer) {
+        optimizationTaskTimer = setInterval(() => renderOptimizationProgress(), 1000);
+    } else if (!active && optimizationTaskTimer) {
+        clearInterval(optimizationTaskTimer);
+        optimizationTaskTimer = null;
     }
 }
 
@@ -1485,14 +1612,25 @@ function handleWebSocketMessage(data) {
             handleStepComplete(data.data.step, data.data.message);
             break;
 
+        case 'optimization_progress':
+            renderOptimizationProgress(data.data);
+            break;
         case 'status':
+            if (data.data.agent === 'optimization_agent') {
+                cancelAutoRunCountdown();
+                currentStep = 'optimize';
+                pendingStep = null;
+                isWaitingForConfirm = false;
+                showMergeStep('optimize');
+            }
             // 根据当前步骤显示全屏转转效果
             const stepNames = {
                 'script_agent': t('steps.scriptTitle'),
                 'image_agent': t('steps.imageAgent'),
                 'video_agent': t('steps.videosTitle'),
                 'video_review_agent': t('steps.videoReview'),
-                'merge_agent': t('steps.mergeTitle')
+                'merge_agent': t('steps.mergeTitle'),
+                'optimization_agent': t('steps.optimizeTitle')
             };
             const agentName = stepNames[data.data.agent] || t('steps.processing');
             showFullscreenGenerating(data.data.message, agentName);
@@ -1501,6 +1639,11 @@ function handleWebSocketMessage(data) {
         case 'error':
             hideFullscreenGenerating();
             hideLoading();
+            if (currentStep === 'optimize' && !lastFinalVideoUrl) {
+                isWaitingForConfirm = true;
+                pendingStep = 'optimize';
+                cancelAutoRunCountdown();
+            }
             addAgentMessage(data.data.message);
             break;
         case 'script_quality_choice':
@@ -1552,7 +1695,8 @@ function updateStepProgress(agent, progress, stepType = null) {
         'image_agent': stepType || 'reference_image',  // 根据 stepType 区分参考图和分镜图
         'video_agent': 'videos',
         'video_review_agent': 'videos',  // 视频审核也算在视频步骤进度中
-        'merge_agent': 'merge'
+        'merge_agent': 'merge',
+        'optimization_agent': 'optimize'
     };
 
     const stepName = stepMap[agent];
@@ -1565,10 +1709,11 @@ function updateStepProgress(agent, progress, stepType = null) {
 function updateOverallProgress() {
     // 计算整体进度：每个步骤占25%（4个步骤）
     const stepWeights = {
-        script: 0.25,           // 剧本：25%
-        reference_image: 0.25,  // 参考图：25%
-        videos: 0.25,           // 视频：25%
-        merge: 0.25             // 合成：25%
+        script: 0.20,
+        reference_image: 0.20,
+        videos: 0.20,
+        merge: 0.20,
+        optimize: 0.20
     };
 
     let totalProgress = 0;
@@ -1580,7 +1725,7 @@ function updateOverallProgress() {
 
     overallProgress = Math.round(totalProgress);
     // 合成完成时，强制收尾到 100%
-    if (stepProgress.script >= 100 && stepProgress.reference_image >= 100 && stepProgress.videos >= 100 && stepProgress.merge >= 100) {
+    if (getStepOrder().every(step => stepProgress[step] >= 100)) {
         overallProgress = 100;
     }
 
@@ -1604,7 +1749,8 @@ function updateStepHighlight(agent, progress, stepType = null) {
         'image_agent': stepType || 'reference',  // 根据 stepType 区分参考图和分镜图
         'video_agent': 'videos',
         'video_review_agent': 'videos',  // 视频审核也算在视频步骤中
-        'merge_agent': 'merge'
+        'merge_agent': 'merge',
+        'optimization_agent': 'optimize'
     };
 
     const stepName = stepMap[agent];
@@ -1815,7 +1961,9 @@ function isRollbackCommand(message) {
     const normalized = normalizeCommandMessage(message);
     return ROLLBACK_COMMAND_KEYWORDS.some((keyword) => {
         const normalizedKeyword = normalizeCommandMessage(keyword);
-        return normalized === normalizedKeyword || normalized.startsWith(`${normalizedKeyword} `) || normalized.startsWith(`${normalizedKeyword}-`);
+        return normalized === normalizedKeyword || normalized.startsWith(`${normalizedKeyword} `) || normalized.startsWith(`${normalizedKeyword}-`)
+            || (/[\u3400-\u9fff]/.test(normalizedKeyword) && normalized.startsWith(normalizedKeyword)
+                && Object.prototype.hasOwnProperty.call(getStepMapping(), normalized.slice(normalizedKeyword.length)));
     });
 }
 
@@ -1833,6 +1981,11 @@ function parseRollbackStep(message) {
         }
         if (normalized.startsWith(`${normalizedKeyword}-`)) {
             normalized = normalized.slice(normalizedKeyword.length + 1).trim();
+            break;
+        }
+        if (/[\u3400-\u9fff]/.test(normalizedKeyword) && normalized.startsWith(normalizedKeyword)
+            && Object.prototype.hasOwnProperty.call(getStepMapping(), normalized.slice(normalizedKeyword.length))) {
+            normalized = normalized.slice(normalizedKeyword.length);
             break;
         }
     }
@@ -1886,13 +2039,23 @@ function getStepMapping() {
         'mezcla': 'merge',
         '結合': 'merge',
         'マージ': 'merge',
-        '合并': 'merge'
+        '合并': 'merge',
+        '优化': 'optimize',
+        '视频优化': 'optimize',
+        '視頻優化': 'optimize',
+        '最佳化': 'optimize',
+        'optimize': 'optimize',
+        'optimization': 'optimize',
+        'video optimization': 'optimize',
+        '最適化': 'optimize',
+        'optimización': 'optimize',
+        'optimizar': 'optimize'
     };
 }
 
 // 获取步骤顺序
 function getStepOrder() {
-    return ['script', 'reference_image', 'videos', 'merge'];
+    return ['script', 'reference_image', 'videos', 'merge', 'optimize'];
 }
 
 // 验证退回步骤是否合法
@@ -2087,7 +2250,7 @@ async function sendMessage() {
             startStepName = pendingStep;
         } else if (currentStep) {
             // 如果当前有步骤，从下一步开始
-            const steps = ['script', 'reference_image', 'videos', 'merge'];
+            const steps = getStepOrder();
             const currentIndex = steps.indexOf(currentStep);
             if (currentIndex >= 0 && currentIndex < steps.length - 1) {
                 startStepName = steps[currentIndex + 1];
@@ -2329,7 +2492,7 @@ async function sendRollbackRequest(targetStep) {
 
 // 清空预览区域从某步骤开始的所有输出
 function clearPreviewFromStep(targetStep) {
-    const stepOrder = ['script', 'reference_image', 'videos', 'merge'];
+    const stepOrder = getStepOrder();
     const targetIndex = stepOrder.indexOf(targetStep);
 
     if (targetIndex === -1) return;
@@ -2338,6 +2501,7 @@ function clearPreviewFromStep(targetStep) {
     const stepsToClear = stepOrder.slice(targetIndex);
 
     stepsToClear.forEach(step => {
+        stepProgress[step] = 0;
         switch(step) {
             case 'script':
                 document.getElementById('script-card')?.remove();
@@ -2351,6 +2515,10 @@ function clearPreviewFromStep(targetStep) {
                 break;
             case 'merge':
                 document.getElementById('merge-step-card')?.remove();
+                stepProgress.optimize = 0;
+                document.getElementById('final-video-card')?.remove();
+                break;
+            case 'optimize':
                 document.getElementById('final-video-card')?.remove();
                 break;
         }
@@ -2378,6 +2546,7 @@ function startStep(step) {
     }
 
     showLoading(getStepLoadingText(step));
+    startProjectReconcilePolling();
 
     // 发送步骤执行请求
     ws.send(JSON.stringify({
@@ -2424,7 +2593,8 @@ function getStepLoadingText(step) {
         'script': t('loading.script'),
         'reference_image': t('loading.referenceImage'),
         'videos': t('loading.videos'),
-        'merge': t('loading.merge')
+        'merge': t('loading.merge'),
+        'optimize': t('progress.optimize.generating')
     };
     return texts[step] || t('status.processing');
 }
@@ -2483,14 +2653,15 @@ function getStepName(step) {
         'script': t('steps.scriptTitle'),
         'reference_image': t('steps.referenceImageTitle'),
         'videos': t('steps.videosTitle'),
-        'merge': t('steps.mergeTitle')
+        'merge': t('steps.mergeTitle'),
+        'optimize': t('steps.optimizeTitle')
     };
     return names[step] || step;
 }
 
 // 获取下一步
 function getNextStep(currentStep) {
-    const steps = ['script', 'reference_image', 'videos', 'merge'];
+    const steps = getStepOrder();
     const currentIndex = steps.indexOf(currentStep);
     if (currentIndex >= 0 && currentIndex < steps.length - 1) {
         return steps[currentIndex + 1];
@@ -3138,10 +3309,17 @@ function handleAgentOutput(agent, output) {
             if (output.final_video_url) {
                 // 合成完成，显示最终视频
                 displayFinalVideo(output.final_video_url);
+            } else if (output.merged_video_url) {
+                stepProgress.merge = 100;
+                displayMergedVideo(output.merged_video_url, !isAutoRunMode);
+                updateOverallProgress();
             } else {
                 // 合成开始，显示转转效果
                 showMergeStep();
             }
+            break;
+        case 'optimization_agent':
+            if (output.final_video_url) displayFinalVideo(output.final_video_url, output.optimization_report);
             break;
     }
 }
@@ -4650,7 +4828,7 @@ async function skipScene(sceneNumber) {
 }
 
 // 显示合成步骤（转转效果）
-function showMergeStep() {
+function showMergeStep(stage = currentStep === 'optimize' ? 'optimize' : 'merge') {
     mergeStepVisible = true;
     referenceImageLocked = true;
     refreshAllReferenceActionStates();
@@ -4666,7 +4844,7 @@ function showMergeStep() {
     mergeCard.id = 'merge-step-card';
     mergeCard.innerHTML = `
         <h4 style="margin: 0 0 15px 0; color: #1890ff; border-bottom: 2px solid #1890ff; padding-bottom: 10px;">
-            ${t('labels.mergeTitle')}
+            ${stage === 'optimize' ? t('steps.optimizeTitle') : t('labels.mergeTitle')}
         </h4>
     `;
 
@@ -4675,15 +4853,51 @@ function showMergeStep() {
     contentDisplay.scrollTop = contentDisplay.scrollHeight;
 
     // 更新右上角进度
-    stepProgress.merge = 50;
-    updateStepHighlight('merge_agent', 50);
+    if (stage === 'optimize') {
+        stepProgress.merge = 100;
+        stepProgress.optimize = Math.max(stepProgress.optimize || 0, 5);
+    } else {
+        stepProgress.merge = 50;
+    }
+    updateStepHighlight(stage === 'optimize' ? 'optimization_agent' : 'merge_agent', stage === 'optimize' ? 5 : 50);
     updateOverallProgress();
-    renderStatusBar(t('loading.merge'), 'loading', t('steps.mergeTitle'));
+    renderStatusBar(getStepLoadingText(stage), 'loading', getStepName(stage));
 }
 
 // 显示最终视频
-function displayFinalVideo(url) {
+function displayMergedVideo(url, editable = false) {
+    stepProgress.merge = 100;
+    updateStepHighlight('merge_agent', 100);
+    if (document.getElementById('merged-video-card')) return;
+    const card = document.createElement('div');
+    card.id = 'merged-video-card';
+    card.className = 'content-card';
+    const title = document.createElement('h4');
+    title.textContent = t('optimization.beforeVideo');
+    const video = document.createElement('video');
+    video.controls = true;
+    video.playsInline = true;
+    video.preload = 'metadata';
+    video.src = url;
+    video.style.cssText = 'width:100%;max-height:320px;border-radius:8px';
+    const link = document.createElement('a');
+    link.href = url;
+    link.textContent = t('optimization.beforeVideo');
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    card.append(title, video, link);
+    if (editable) appendOptimizationEditor(card, lastOptimizationSettings);
+    contentDisplay.appendChild(card);
+}
+
+function displayFinalVideo(url, report = null) {
+    report = report || (url === lastFinalVideoUrl ? lastOptimizationReport : null);
+    const finalApproved = !report || report.final_review?.approved === true;
+    const finalColor = finalApproved ? '#52c41a' : '#d48806';
+    lastOptimizationReport = report;
     lastFinalVideoUrl = url;
+    document.getElementById('final-video-card')?.remove();
+    document.getElementById('optimization-editor')?.remove();
     mergeStepVisible = false;
     stopVideoReconcilePolling(); // 最终视频就绪：视频阶段结束，停止对账轮询
     hideFullscreenGenerating();
@@ -4701,8 +4915,8 @@ function displayFinalVideo(url) {
     card.className = 'content-card';
     card.id = 'final-video-card';
     card.innerHTML = `
-        <h4 style="margin: 0 0 15px 0; color: #52c41a; border-bottom: 2px solid #52c41a; padding-bottom: 10px;">
-            ${t('labels.finalVideoTitle')}
+        <h4 style="margin: 0 0 15px 0; color: ${finalColor}; border-bottom: 2px solid ${finalColor}; padding-bottom: 10px;">
+            ${finalApproved ? t('labels.finalVideoTitle') : `${t('optimization.taskNames.final_review')} · ${t('optimization.taskStates.needs_review')}`}
         </h4>
         <div style="display: flex; flex-direction: column; align-items: center; gap: 15px;">
             <div style="position: relative; width: 100%; max-width: 400px; cursor: pointer; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.15);" onclick="openMediaModal('video', '${url}')">
@@ -4724,6 +4938,41 @@ function displayFinalVideo(url) {
             </div>
         </div>
     `;
+    if (report) {
+        if (report.comparison_video_url) {
+            const before = document.createElement('a');
+            before.href = report.comparison_video_url;
+            before.target = '_blank';
+            before.rel = 'noopener noreferrer';
+            before.textContent = t('optimization.beforeVideo');
+            before.style.cssText = 'display:block;margin-top:16px';
+            card.appendChild(before);
+        }
+        const note = document.createElement('p');
+        note.style.cssText = 'font-size:14px;line-height:1.5;padding:10px;background:#f5f5f5;border-radius:6px';
+        note.textContent = report.final_review?.approved
+            ? t('optimization.reviewPassed', { seconds: Number(report.removed_seconds || 0).toFixed(2) })
+            : t('optimization.needsReview');
+        card.appendChild(note);
+        if (report.subtitle_url) {
+            const subtitles = document.createElement('a');
+            subtitles.href = report.subtitle_url;
+            subtitles.textContent = t('optimization.downloadSubtitles');
+            subtitles.target = '_blank';
+            subtitles.rel = 'noopener noreferrer';
+            card.appendChild(subtitles);
+        }
+        if (report.report_url) {
+            const reviewReport = document.createElement('a');
+            reviewReport.href = report.report_url;
+            reviewReport.textContent = t('optimization.downloadReport');
+            reviewReport.style.marginLeft = '16px';
+            reviewReport.target = '_blank';
+            reviewReport.rel = 'noopener noreferrer';
+            card.appendChild(reviewReport);
+        }
+    }
+    appendOptimizationEditor(card, report?.edit_settings || lastOptimizationSettings);
 
     // 添加到内容展示区
     contentDisplay.appendChild(card);
@@ -4732,9 +4981,242 @@ function displayFinalVideo(url) {
     // 更新右上角进度为完成
     stepProgress.merge = 100;
     stepProgress.videos = 100;
-    updateStepHighlight('merge_agent', 100);
+    stepProgress.optimize = finalApproved ? 100 : 99;
+    updateStepHighlight('optimization_agent', stepProgress.optimize);
     updateOverallProgress();
     updateProjectActionState();
+}
+
+function appendOptimizationEditor(card, settings = {}) {
+    const details = document.createElement('details');
+    details.id = 'optimization-editor';
+    details.className = 'optimization-editor';
+    const summary = document.createElement('summary');
+    summary.textContent = t('optimization.editTitle');
+    details.appendChild(summary);
+    const form = document.createElement('form');
+    form.noValidate = true;
+    details.appendChild(form);
+    const maximum = Number(frontendConfig.optimization_fragment_max_seconds) || 6;
+    const duration = Number(lastOptimizationReport?.input_duration) || null;
+    const hint = document.createElement('p');
+    hint.textContent = t('optimization.editHint');
+    hint.className = 'optimization-help';
+    form.appendChild(hint);
+    const inputs = {};
+    function field(parent, key, value, options = {}) {
+        const label = document.createElement('label');
+        label.textContent = t(`optimization.${key}`);
+        label.className = 'optimization-field';
+        const input = document.createElement(options.multiline ? 'textarea' : 'input');
+        input.id = options.id || `optimization-${key}`;
+        input.value = value;
+        if (options.multiline) input.rows = 3;
+        if (options.placeholder) input.placeholder = options.placeholder;
+        if (options.numeric) {
+            input.type = 'number';
+            input.min = '0';
+            input.step = '0.01';
+            input.inputMode = 'decimal';
+            if (duration) input.max = String(duration);
+        }
+        if (options.multiline) input.maxLength = 4000;
+        label.appendChild(input);
+        parent.appendChild(label);
+        return input;
+    }
+    inputs.cuts = field(form, 'cuts', (settings.cuts || []).map(r => `${r.start}-${r.end}`).join('\n'),
+        {multiline: true, placeholder: '5-7\n12.5-14\n30-31'});
+    const cutsHint = document.createElement('p');
+    cutsHint.id = 'optimization-cuts-help';
+    cutsHint.className = 'optimization-help';
+    cutsHint.textContent = t('optimization.cutsHint');
+    inputs.cuts.setAttribute('aria-describedby', cutsHint.id);
+    form.appendChild(cutsHint);
+    const repairsSection = document.createElement('section');
+    repairsSection.className = 'optimization-repairs';
+    const repairsTitle = document.createElement('h5');
+    repairsTitle.textContent = t('optimization.repairRanges');
+    repairsSection.appendChild(repairsTitle);
+    const repairsHint = document.createElement('p');
+    repairsHint.className = 'optimization-help';
+    repairsHint.textContent = t('optimization.repairsHint', {seconds: maximum});
+    repairsSection.appendChild(repairsHint);
+    const repairList = document.createElement('div');
+    repairList.id = 'optimization-repair-list';
+    repairsSection.appendChild(repairList);
+    const repairs = [];
+    let nextRepairId = 0;
+    const addButton = document.createElement('button');
+    addButton.type = 'button';
+    addButton.id = 'optimization-add-repair';
+    addButton.className = 'optimization-secondary-btn';
+    addButton.textContent = t('optimization.addRepair');
+    function renumber() {
+        repairs.forEach((row, index) => {
+            row.title.textContent = t('optimization.repairItem', {number: index + 1});
+            row.remove.setAttribute('aria-label', t('optimization.removeRepair', {number: index + 1}));
+        });
+        addButton.disabled = repairs.length >= 20;
+    }
+    function addRepair(value = {}) {
+        if (repairs.length >= 20) return;
+        const id = ++nextRepairId;
+        const container = document.createElement('div');
+        container.className = 'optimization-repair-row';
+        const header = document.createElement('div');
+        header.className = 'optimization-repair-header';
+        const title = document.createElement('strong');
+        header.appendChild(title);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'optimization-remove-repair';
+        remove.textContent = t('optimization.remove');
+        header.appendChild(remove);
+        container.appendChild(header);
+        const times = document.createElement('div');
+        times.className = 'optimization-repair-times';
+        container.appendChild(times);
+        const start = field(times, 'startSeconds', value.start ?? '',
+            {numeric: true, id: `optimization-repair-${id}-start`, placeholder: '5'});
+        const end = field(times, 'endSeconds', value.end ?? '',
+            {numeric: true, id: `optimization-repair-${id}-end`, placeholder: '7'});
+        const instructions = field(container, 'repairInstructions',
+            value.instructions || value.evidence
+                || (value.start != null && value.end != null ? settings.instructions : '') || '',
+            {multiline: true, id: `optimization-repair-${id}-instructions`,
+                placeholder: t('optimization.repairPlaceholder')});
+        const row = {container, title, remove, start, end, instructions};
+        repairs.push(row);
+        repairList.appendChild(container);
+        remove.onclick = () => {
+            repairs.splice(repairs.indexOf(row), 1);
+            container.remove();
+            renumber();
+            addButton.focus();
+        };
+        renumber();
+        return row;
+    }
+    const restored = new Map();
+    for (const value of [...(lastOptimizationReport?.unresolved_manual_repairs || []),
+        ...(settings.repair_ranges || [])]) {
+        restored.set(`${value.start}:${value.end}`, value);
+    }
+    for (const value of restored.values()) addRepair(value);
+    if (!repairs.length) addRepair();
+    addButton.onclick = () => addRepair()?.start.focus();
+    repairsSection.appendChild(addButton);
+    form.appendChild(repairsSection);
+    const options = document.createElement('div');
+    options.className = 'optimization-options';
+    for (const [key, value] of [['matchLighting', settings.match_lighting !== false],
+        ['subtitles', settings.subtitles !== false], ['autoRepair', settings.auto_repair !== false]]) {
+        const label = document.createElement('label');
+        label.className = 'optimization-checkbox';
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = value;
+        input.id = `optimization-${key}`;
+        label.appendChild(input);
+        label.append(` ${t(`optimization.${key}`)}`);
+        options.appendChild(label);
+        inputs[key] = input;
+    }
+    form.appendChild(options);
+    const errorMessage = document.createElement('p');
+    errorMessage.id = 'optimization-edit-error';
+    errorMessage.className = 'optimization-edit-error';
+    errorMessage.setAttribute('role', 'alert');
+    errorMessage.hidden = true;
+    form.appendChild(errorMessage);
+    form.addEventListener('input', (event) => {
+        event.target.removeAttribute('aria-invalid');
+        errorMessage.hidden = true;
+    });
+    const button = document.createElement('button');
+    button.type = 'submit';
+    button.id = 'applyOptimizationBtn';
+    button.className = 'action-btn optimization-apply-btn';
+    button.textContent = t('optimization.apply');
+    form.onsubmit = async (event) => {
+        event.preventDefault();
+        if (button.disabled) return;
+        function fail(input, message) {
+            input.setAttribute('aria-invalid', 'true');
+            input.focus();
+            throw new Error(message);
+        }
+        function validateRange(input, start, end) {
+            if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start >= end)
+                fail(input, t('optimization.rangeOrder'));
+            if (duration && end > duration)
+                fail(input, t('optimization.rangeDuration', {seconds: duration.toFixed(2)}));
+        }
+        function ranges(value) {
+            if (!value.trim()) return [];
+            return value.split(/[,，;；\n]+/).filter(x => x.trim()).map(line => {
+                const match = line.trim().match(/^(\d+(?:\.\d+)?)\s*[-–—~至]\s*(\d+(?:\.\d+)?)$/);
+                if (!match) fail(inputs.cuts, t('optimization.rangeFormat'));
+                const start = Number(match[1]), end = Number(match[2]);
+                validateRange(inputs.cuts, start, end);
+                return {start, end};
+            });
+        }
+        function rejectOverlap(ranges, input) {
+            const ordered = [...ranges].sort((a, b) => a.start - b.start);
+            if (ordered.some((r, i) => i > 0 && r.start < ordered[i - 1].end))
+                fail(input, t('optimization.rangeOverlap'));
+        }
+        button.disabled = true;
+        errorMessage.hidden = true;
+        try {
+            const cuts = ranges(inputs.cuts.value);
+            if (cuts.length > 50) fail(inputs.cuts, t('optimization.cutLimit'));
+            rejectOverlap(cuts, inputs.cuts);
+            const repairRanges = repairs.flatMap(row => {
+                const values = [row.start.value.trim(), row.end.value.trim(), row.instructions.value.trim()];
+                if (values.every(value => !value) && !row.start.validity.badInput && !row.end.validity.badInput)
+                    return [];
+                if (!values[0] || !values[1])
+                    fail(values[0] ? row.end : row.start, t('optimization.repairIncomplete'));
+                const start = Number(values[0]), end = Number(values[1]);
+                validateRange(row.end, start, end);
+                if (end - start > maximum)
+                    fail(row.end, t('optimization.repairMax', {seconds: maximum}));
+                if (!values[2]) fail(row.instructions, t('optimization.repairIncomplete'));
+                if (values[2].length > 4000) fail(row.instructions, t('optimization.instructionLimit'));
+                const timeline = lastOptimizationReport?.scene_timeline || [];
+                if (timeline.length && !timeline.some(scene => scene.start <= start && end <= scene.end))
+                    fail(row.end, t('optimization.repairScene'));
+                return [{start, end, instructions: values[2]}];
+            });
+            rejectOverlap(repairRanges, repairs[0]?.start || inputs.cuts);
+            if (cuts.some(cut => repairRanges.some(r => cut.start < r.end && cut.end > r.start)))
+                fail(inputs.cuts, t('optimization.cutRepairOverlap'));
+            const settings = {cuts, scene_order: [], regenerate_scenes: [], repair_ranges: repairRanges,
+                instructions: '', match_lighting: inputs.matchLighting.checked,
+                subtitles: inputs.subtitles.checked, auto_repair: inputs.autoRepair.checked};
+            const response = await fetch(`/project/${currentProjectId}/optimize`, {method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({client_id: wsClientId, settings})});
+            const result = await parseJsonResponse(response);
+            if (!response.ok || !result.success) throw new Error(result.detail || result.error || t('labels.unknown'));
+            lastOptimizationSettings = settings;
+            lastFinalVideoUrl = null;
+            currentStep = 'optimize';
+            isWaitingForConfirm = false;
+            showMergeStep('optimize');
+            startVideoReconcilePolling(currentProjectId);
+        } catch (error) {
+            errorMessage.textContent = error.message;
+            errorMessage.hidden = false;
+            addAgentMessage(t('optimization.applyError', {error: error.message}));
+            button.disabled = false;
+        }
+    };
+    form.appendChild(button);
+    card.appendChild(details);
 }
 
 // 显示加载
@@ -4772,6 +5254,11 @@ function resetProject() {
     lastReferenceImageOutput = null;
     lastImagesOutput = null;
     lastFinalVideoUrl = null;
+    lastOptimizationReport = null;
+    lastOptimizationSettings = {};
+    optimizationTasks = [];
+    optimizationTasksVersion = 0;
+    optimizationTasksProject = null;
     referenceImageLocked = false;
     referenceImageRegenerateLocked = false;
     referenceImageRegenerating = false;

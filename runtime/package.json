@@ -1,0 +1,16 @@
+{
+  "name": "seedance-video-tools",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=22"},
+  "dependencies": {
+    "hyperframes": "0.8.203",
+    "@remotion/bundler": "4.0.539",
+    "@remotion/renderer": "4.0.539",
+    "@remotion/captions": "4.0.539",
+    "remotion": "4.0.539",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  }
+}

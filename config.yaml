@@ -86,6 +86,7 @@ models:
     api_key: "${VIDEO_REVIEW_API_KEY}"
     temperature: 0.3
     max_tokens: 16000
+    disable_thinking: true  # 视觉审核直接输出证据与结论；可关闭此选项启用额外推理
 
   # ASR 资源配置：用于音频转文字
   # 对应代码：app/services/asr_service.py
@@ -152,7 +153,8 @@ video_generation:
 # 视频审核配置
 video_review:
   # 审核通过阈值（0-100分），达到或超过此分数视为通过
-  pass_threshold: 60
+  pass_threshold: 80
+  sample_fps: 3  # 每秒多个动作观测，避免短补片仅抽到首帧
   # 每个分镜最大重试审核次数（审核不通过时重新生成的最大次数）
   max_retries: 2
   # 默认审核模式：auto=自动重试, manual=手动确认
@@ -247,3 +249,44 @@ cleanup:
   enabled: true
   # 保留时间（小时），0表示立即清理
   retain_hours: 0
+
+# GitHub / 云端使用随应用发布的有限 skills；可覆盖为本地安装目录。
+video_skills:
+  enabled: true
+  root: "${VIDEO_SKILLS_ROOT:-app/video_skills}"
+  runtime_dir: "${VIDEO_TOOLS_RUNTIME_DIR:-~/.local/share/seedance-drama-maker/video-tools}"
+
+video_optimization:
+  enabled: true
+  whisper_cache_dir: "${WHISPER_CACHE_DIR:-~/.cache/whisper}"
+  fast_triage: true  # 一次快速审核同时判断关键剧情、局部评分与处理动作，跳过多轮深度确认
+  critical_regenerate_below: 40  # 仅关键剧情且评分低于此值、明确无法接受时自动局部补拍
+  fast_review_max_tokens: 1600
+  fast_max_cut_seconds: 6  # 非关键问题直接剪除；冗余对白按完整句剪除
+  confidence_threshold: 0.85
+  repair_min_severity: "major"  # 轻微装饰/合理类型特效列为建议；明确肢体、接触及关键因果缺陷仍修复
+  audit_story_impact: true  # 独立复核真实因果影响，避免把合理仙侠特效或镜头变化误当肢体/剧情错误
+  max_removed_fraction: 0.20
+  min_kept_segment_seconds: 0.5
+  review_max_tokens: 4000
+  review_fps: 3  # 提高短动作/物体接触的观察密度，取值 0.2–5
+  whisper_model: "small"
+  whisper_min_avg_logprob: -1.0  # 过滤环境声/音乐引发的低置信度幻觉，避免错误字幕和剪辑
+  whisper_cantonese_model: "turbo"  # 支持 yue；仅明确要求粤语时加载
+  native_chinese_asr: true  # 中文/粤语对白优先原生词级 ASR，失败回退 Whisper
+  remove_prompt_narration: true  # 无对白镜头中朗读制作说明，须由两种 ASR 确认后局部修复音轨
+  whisper_device: "cpu"
+  subtitle_renderer: "remotion"
+  max_review_rounds: 3
+  max_repair_scenes_per_round: 4
+  max_repair_fragments_per_round: 8
+  fragment_max_attempts: 2
+  fragment_max_seconds: 6
+  select_silent_patch_window: true  # 无对白补片可选择实际修正动作的连续窗口，再独立复核
+  repair_reference_after_failure: true  # 文字补拍失败后先生成修正目标参考，避免照抄原片缺陷
+  repair_reference_max_attempts: 2  # 目标图独立检查可见修正、接触和重复道具；不合格时先重绘
+  anatomy_review_thinking: true  # 手指目标单图先数轮廓/关节/连接，再单独核对边界连续性
+  anatomy_review_max_tokens: 3000
+  repair_workers: 4
+  keep_local_outputs: true
+  output_dir: "${VIDEO_OUTPUT_DIR:-outputs}"
