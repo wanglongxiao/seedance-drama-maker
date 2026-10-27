@@ -139,6 +139,7 @@ def main():
     else:
         created = api("vefaas", "CreateFunction",
                       dict(Name=args.function_name, Runtime="native/v1", ProjectName="default",
+                           CpuStrategy="always",
                            SourceAccessConfig={"Username": credentials["Username"], "Password": credentials["Token"]},
                            **parameters))
         function_id = created["Id"]
