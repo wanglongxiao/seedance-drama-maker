@@ -1,8 +1,5 @@
 # Copyright (c) 2026 Alex Wang
 # veFaaS 自定义运行时镜像：Python 3.11 + FFmpeg/FFprobe + 应用依赖。
-# Optional named build context contains only public, checksum-verified checkpoints.
-FROM scratch AS whisper-cache
-
 FROM node:22-bookworm-slim AS node-runtime
 WORKDIR /opt/video-tools
 COPY runtime/package*.json ./
@@ -37,14 +34,7 @@ WORKDIR /app
 # 先装依赖以利用镜像层缓存。
 COPY requirements.txt requirements-video-tools.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir -r requirements.txt -r requirements-video-tools.txt
-
-# Preload both models: no model download is needed during a cold start.
-ENV WHISPER_CACHE_DIR=/opt/whisper-models
-RUN --mount=type=cache,target=/root/.cache/whisper \
-    --mount=type=bind,from=whisper-cache,target=/preloaded,ro \
-    python -c "import whisper, shutil, pathlib; cache=pathlib.Path('/root/.cache/whisper'); [shutil.copy2(p, cache/p.name) for p in pathlib.Path('/preloaded').glob('*.pt') if p.name in ('small.pt', 'large-v3-turbo.pt')]; pathlib.Path('/opt/whisper-models').mkdir(exist_ok=True); [shutil.copy2(whisper._download(whisper._MODELS[name], str(cache), False), '/opt/whisper-models') for name in ('small', 'turbo')]"
 
 # 拷贝应用代码（.dockerignore 已排除 .env / .venv / demo 大文件 / tests / docs 等）。
 COPY app ./app

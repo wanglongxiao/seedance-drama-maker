@@ -315,6 +315,12 @@ class AssetLibraryService:
         )
         return self.wait_for_asset_active(asset_id, project_name=project_name)
 
+    def register_video_asset(self, *, group_id: str, url: str, name: str,
+                             project_name: Optional[str] = None) -> Dict[str, Any]:
+        asset_id = self.create_asset(group_id=group_id, url=url, name=name,
+                                     asset_type="Video", project_name=project_name)
+        return self.wait_for_asset_active(asset_id, project_name=project_name)
+
     def ensure_project_asset_group(
         self,
         *,

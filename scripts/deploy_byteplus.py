@@ -103,7 +103,7 @@ def main():
     cloud_env.update(ACCESS_PASSWORD=env["CLOUD_ACCESS_PASSWORD"],
                      ACCESS_SECRET=env["CLOUD_ACCESS_SECRET"], ACCESS_COOKIE_SECURE="true",
                      VIDEO_SKILLS_ROOT="/app/app/video_skills", VIDEO_TOOLS_RUNTIME_DIR="/opt/video-tools",
-                     WHISPER_CACHE_DIR="/opt/whisper-models", VIDEO_OUTPUT_DIR="/tmp/seedance-outputs",
+                     VIDEO_OUTPUT_DIR="/tmp/seedance-outputs",
                      REMOTION_BROWSER_EXECUTABLE="/usr/bin/chromium", RUNTIME_SMOKE_ENABLED="true")
     registry_host = f"{args.registry}-{args.region}.cr.bytepluses.com"
     if runtime_base and runtime_base != (
@@ -127,24 +127,12 @@ def main():
     if result.returncode:
         raise RuntimeError("Registry login failed; raw output withheld")
     if not args.reuse_published_image:
-        with tempfile.TemporaryDirectory(prefix="seedance-release-") as temporary, \
-             tempfile.TemporaryDirectory(prefix="seedance-model-cache-") as model_context:
-            Path(model_context).chmod(0o755)
+        with tempfile.TemporaryDirectory(prefix="seedance-release-") as temporary:
             archive = subprocess.check_output(["git", "archive", "HEAD"], cwd=ROOT)
             subprocess.run(["tar", "-xf", "-", "-C", temporary], input=archive, check=True)
-            local_models = Path(env.get("WHISPER_CACHE_DIR") or "~/.cache/whisper").expanduser()
-            for name in ("small.pt", "large-v3-turbo.pt"):
-                source = local_models / name
-                if source.is_file() and not source.is_symlink():
-                    target = Path(model_context) / name
-                    try:
-                        os.link(source, target)
-                    except OSError:
-                        shutil.copy2(source, target)
             build = ["docker", "buildx", "build", "--builder", args.builder,
                             "--platform", "linux/amd64", "--tag", image, "--label",
-                            f"org.opencontainers.image.revision={sha}", "--build-context",
-                            f"whisper-cache={model_context}"]
+                            f"org.opencontainers.image.revision={sha}"]
             if args.upload_mode == "resumable":
                 oci_archive = Path(temporary) / "image.oci.tar"
                 build += ["--provenance=false", "--output",

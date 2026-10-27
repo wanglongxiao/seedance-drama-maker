@@ -1,5 +1,15 @@
 # Changelog
 
+## [3.0.0] - 2026-10-28
+
+- Enabled automatic multilingual detection in BytePlus Seed Speech ASR for Japanese, Korean, Spanish, Portuguese and mixed audio. Updated caches and subtitle language labels so brief foreign fillers do not override the main language. Preserve real speech, word/utterance times and spaces between Latin words; failed recognition never writes a successful cache.
+- Local repairs now edit original scene videos with Seedance 2.5: group ranges per scene, run scenes in parallel, validate video assets, review each interval independently, align duration and preserve original audio. Removed unused corrected-reference and first-frame repair code.
+- Fixed indefinite waiting after repair budgets run out. Pending scene generation or review blocks merge and optimization. Ended projects stop polling, archiving, reviewing and retrying. Model errors keep bounded response details without full request payloads.
+- Approved completion keeps the master, final film, subtitles, report and recovery state. Failed or disconnected projects remain available for retry; explicit project end deletes all resources. Restored pages skip reference images and scenes already cleaned.
+- Removed local Whisper/PyTorch models and image cache layers. Runtime checks now cover media tools and BytePlus ASR configuration. Changed dependencies require a full image rebuild.
+- Updated editing, repair-limit and project-end text in all five locales, refreshed static caches and both README files. Removed local monitoring, logs, temporary test output and obsolete unit tests while keeping valid behavior regressions.
+- Local Japanese delivery checks passed for desktop/mobile playback, four downloads, 24 subtitle time ranges and unchanged audio. Minor ASR noise has not been checked line by line.
+
 ## [3.0.0] - 2026-10-27
 
 - Default subtitles now use Remotion grouping/SRT and FFmpeg rendering. The same 60-second sample rendered locally in 4.48 seconds versus 112.14 seconds. Keep original audio, input frame rate, final review and the optional Remotion frame renderer.

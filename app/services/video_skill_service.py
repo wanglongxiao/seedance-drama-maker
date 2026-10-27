@@ -27,7 +27,7 @@ STAGE_SKILLS = {
     "review": [("hyperframes", "references/review.md")],
     "merge": [("video-use", "SKILL.md")],
     "optimize": [("video-use", "SKILL.md"), ("vlog-auto-edit", "SKILL.md"),
-                 ("hyperframes", "references/review.md"), ("openai-whisper", "SKILL.md"),
+                 ("hyperframes", "references/review.md"),
                  ("remotion-captions", "SKILL.md"), ("remotion-render", "SKILL.md")],
 }
 

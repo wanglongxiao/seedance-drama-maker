@@ -12,7 +12,7 @@ from app.prompt_skill import load_prompt, nsfw_content_requested, nsfw_enabled, 
 from app.services.llm_service import llm_service
 from app.services.video_skill_service import video_skill_service
 from app.utils.i18n import language_name, translate
-from app.utils.dialogue_language import dialogue_language_instruction, requests_english_dialogue
+from app.utils.dialogue_language import dialogue_language_instruction, requests_english_dialogue, script_language_feedback
 from app.utils.logger import get_logger
 from app.utils.outfit_similarity import (
     are_outfits_visually_equivalent,
@@ -2056,7 +2056,8 @@ class ScriptAgent:
             "background": str(script_data.get("background") or "")[:2000],
             "characters": [
                 {key: character.get(key) for key in
-                 ("name", "personality", "identity_background")}
+                 ("name", "personality", "identity_background", "dialogue_language",
+                  "dialogue_dialect", "allow_english_mixing")}
                 for character in script_data.get("characters") or []
             ],
             "scenes": [],
@@ -2071,6 +2072,8 @@ class ScriptAgent:
                 "characters_present": scene.get("characters_present"),
                 "mood": scene.get("mood"),
                 "dialogue": str(scene.get("dialogue") or "")[:1600],
+                "dialogue_languages": scene.get("dialogue_languages"),
+                "voice_description": str(scene.get("voice_description") or "")[:800],
                 "beats": [segment["content"][:650] for segment in segments]
                 or [str(scene.get("description") or "")[:2000]],
             })
@@ -2163,7 +2166,11 @@ class ScriptAgent:
             self._fit_scene_durations_to_target(data["scenes"], target_duration)
             quality_ok = self._is_script_quality_acceptable(data, user_input)
             feedback = self._collect_script_quality_feedback(data, user_input) if not quality_ok else []
-            if requests_english_dialogue(user_input):
+            feedback.extend(script_language_feedback(data, user_input))
+            if requests_english_dialogue(user_input) and (
+                    not data.get("characters") or all(
+                        str(c.get("dialogue_language") or "").lower() in ("english", "英语", "英文", "英語")
+                        for c in data["characters"])):
                 for scene in data["scenes"]:
                     spoken = re.sub(r"\[[^\]]*\]\s*[:：]?", "", str(scene.get("dialogue") or ""))
                     if re.search(r"[\u4e00-\u9fff]", spoken):
@@ -4074,6 +4081,9 @@ class ScriptAgent:
                 'voice_type': str(item.get('voice_type') or '未知').strip(),
                 'voice_features': str(item.get('voice_features') or '待补充').strip(),
                 'voice_style': str(item.get('voice_style') or '待补充').strip(),
+                'dialogue_language': str(item.get('dialogue_language') or '').strip(),
+                'dialogue_dialect': str(item.get('dialogue_dialect') or '').strip(),
+                'allow_english_mixing': item.get('allow_english_mixing') is not False,
                 'personality': self._coerce_scene_text_field(item.get('personality')).strip() or None,
                 'identity_background': self._coerce_scene_text_field(
                     item.get('identity_background') or item.get('identity') or item.get('occupation_background') or item.get('character_background') or item.get('background')

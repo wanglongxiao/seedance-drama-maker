@@ -6,4 +6,4 @@
 # Video Chatbot Agent Application
 
 __version__ = "3.0.0"
-__asset_version__ = "20261027v3"
+__asset_version__ = "20261028v3"

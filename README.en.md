@@ -25,7 +25,14 @@ A multi-agent AI video system that turns text, images or voice input into short 
 
 Workflow: input → script → character and backdrop references → scene generation and review → merge → optimization and subtitles.
 
-video-use and vlog-auto-edit guide editing; media-use handles assets; HyperFrames builds the timeline; openai-whisper transcribes audio; remotion-captions groups subtitles, FFmpeg adds them quickly, and remotion-render supports frame rendering. The system supports faulty-fragment cuts, local reshoots, lighting correction and final review, preserving original audio and exporting videos, subtitles and review reports.
+video-use and vlog-auto-edit guide editing; media-use handles assets; HyperFrames builds the timeline; BytePlus Seed Speech transcribes audio; remotion-captions groups subtitles, FFmpeg adds them quickly, and remotion-render supports frame rendering. The system supports faulty-fragment cuts, local reshoots, lighting correction and final review, preserving original audio and exporting videos, subtitles and review reports.
+
+### Update on 2026-10-28
+
+- BytePlus ASR now enables automatic language detection (`enable_auto_lang=true`) for Japanese, Korean, Spanish, Portuguese and mixed Chinese/English audio. Subtitles use actual speech, including fillers and word/utterance times. Old recognition caches expire; correcting a language label alone does not repeat ASR.
+- Local repairs edit the original scene video with Seedance 2.5. Ranges in one scene share one request; different scenes run in parallel. Only independently approved ranges replace the picture, preserving other frames and original audio. Times refer to the uncut master, with up to 6 seconds per range.
+- Reaching the repair limit shows a report for review instead of waiting indefinitely. Pending scene generation or review blocks merge and optimization. Ending a project stops further work and deletes all its resources; download the video, subtitles and report first.
+- Removed local Whisper/PyTorch model layers, the old image-based repair path and obsolete tests. Updated all five UI languages and static cache versions.
 
 ## Showcase
 
@@ -76,7 +83,7 @@ All of the above are available through [byteplus.com](https://www.byteplus.com/)
 
 ### Environment
 
-- Python `3.11`, Node `22+`, Chromium, and CPU PyTorch for Whisper
+- Python `3.11`, Node `22+`, Chromium, and BytePlus Seed Speech for transcription
 - `ffmpeg` and `ffprobe` available in the runtime environment, including local runs, Docker, and cloud veFaaS images
 - Network access to BytePlus / ModelArk / Seed-Speech / TOS
 
@@ -302,11 +309,11 @@ The Web UI now includes an `End Project` button. Cleanup can be triggered in thr
 
 Cleanup removes:
 
-- temporary files and directories in `TOS`
+- all project files in `TOS`, including the master, final film, subtitles, report and recovery snapshot
 - virtual asset-library assets for the project
 - the asset group associated with the project
 
-If the project has already produced a final video, the final export under `videos/final` is preserved.
+Download the files you need before ending the project. Automatic cleanup after approved completion removes intermediate assets while keeping delivery files and recovery state. Explicit project end deletes all resources. WebSocket disconnection or project failure alone does not delete resources, allowing recovery or retry.
 
 ### 4. Video Review And Flow Control
 
@@ -410,7 +417,7 @@ Services
 - Each project is bound to its browser connection to support isolated multi-tab execution
 - Long-running background tasks can continue pushing results after WebSocket reconnects through a stable client ID
 - Reference generation, video generation, review, and merge are rendered progressively in the UI
-- Final videos are preserved during project-ending cleanup
+- Approved completion keeps the master, final film, subtitles, report and recovery state; explicit project end deletes all resources
 - Uploads, ASR, and other real-time interactions use the dedicated `interactive` thread pool; image generation, video generation, review, and merge use the `generation` pool, reducing queue timeout risk on cloud single-instance multi-project workloads
 
 ## Usage
@@ -425,7 +432,7 @@ mkdir -p ~/.local/share/seedance-drama-maker/video-tools
 cp -R runtime/node_modules ~/.local/share/seedance-drama-maker/video-tools/
 ```
 
-Install FFmpeg/FFprobe and Chromium on the host. Local Whisper downloads models on first use; the cloud image caches `small` and `turbo`. Remotion can download its browser on macOS; on Linux set `REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`.
+Install FFmpeg/FFprobe and Chromium on the host. Configure `SPEECH_*`, TOS and `ASR_RESOURCE_ID=volc.seedasr.auc`. By default, leave language unset and enable `enable_auto_lang` for Japanese, Korean, Spanish, Portuguese and mixed Chinese/English/Cantonese speech. Keep fillers and native word/utterance times. ASRService also accepts an explicit `language`; subtitle optimization always uses automatic detection. Recognition failures stop subtitle generation with an error; a real no-speech result can export without captions. No local speech model is needed. Remotion can download its browser on macOS; on Linux set `REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`.
 
 ### Start The Service
 
@@ -464,7 +471,7 @@ Notes:
 
 - The latest real E2E run successfully produced a final video under `videos/final`
 - Scene review, final merge, and project-ending cleanup were all validated in the real cloud workflow
-- Cleanup removes temporary materials and intermediate outputs while preserving the final export
+- Approved completion removes intermediate assets and keeps delivery files and recovery state; explicit project end stops processing and deletes all TOS resources, while failed or disconnected projects remain available for retry
 
 ## Repository Hygiene And Safe Commits
 
@@ -475,10 +482,11 @@ To prevent secret leakage or accidental publication of test artifacts, this repo
 - README files, `config.yaml`, and `.env.example` keep placeholders only and never contain real credentials
 - Before committing, make sure test audio, test images, service logs, and temporary exports are not staged
 - Temporary share packages, archive exports, key files, and local deployment JSON stay outside Git and the image context. Before release, scan staged files and history; report file paths only, without printing secret values
+- Remove local monitoring records, debug logs, old test exports and obsolete repair code during release cleanup. Keep valid behavior regressions local. Environments, credentials and deployment recovery state are not temporary files.
 
 ### Cloud Release
 
-Release in this order: `git commit → git push → rebuild image → release veFaaS`. `Dockerfile` includes Python 3.11, Node 22, FFmpeg/FFprobe, Chromium, Noto fonts, CPU PyTorch, cached Whisper `small` / `turbo`, locked HyperFrames/Remotion packages, prompts and bounded skill references. Start with `./run.sh`; one Uvicorn process listens on `_FAAS_RUNTIME_PORT` (default 8000). Background task snapshots are saved to private TOS.
+Release in this order: `git commit → git push → rebuild image → release veFaaS`. `Dockerfile` includes Python 3.11, Node 22, FFmpeg/FFprobe, Chromium, Noto fonts, locked HyperFrames/Remotion packages, prompts and bounded skill references. Audio transcription calls BytePlus Seed Speech without a local model layer. Start with `./run.sh`; one Uvicorn process listens on `_FAAS_RUNTIME_PORT` (default 8000). Background task snapshots are saved to private TOS.
 
 The veFaaS service in BytePlus `ap-southeast-1` keeps at least `1` and at most `5` instances. Once the new revision is ready, move all traffic to it and retain the previous revision for rollback. Check the cloud page, locale files, private TOS signed access, and release status.
 
@@ -496,15 +504,15 @@ The script builds `linux/amd64` from `git archive HEAD`, creates an isolated v3 
 
 Use an ordinary `native/v1` function without `CpuStrategy=always`, which selects the Sandbox function type. Image transfer can finish while `ImageCacheStatus` is still `Creating`; wait for the cache and overall synchronization to succeed. Release the function and wait for `done` before setting and reading back `MinInstance=1`, `MaxInstance=5` and zero frozen reserved instances. The deployment helper prints both synchronization and cache status.
 
-For app-only changes, `--reuse-runtime-layers` checks that the published commit has the same Dockerfile, Python dependencies and Node runtime, then validates image settings, build instructions and dependency layer hashes. It reuses runtime layers already in the registry and uploads only fresh app, static and settings layers, avoiding another Whisper model transfer. App layers are built from current source, so deleted files do not remain. Changed runtime inputs require a full build. This mode requires resumable upload, publishes the current commit and cannot be combined with `--reuse-published-image`.
+For app-only changes, `--reuse-runtime-layers` checks that the published commit has the same Dockerfile, Python dependencies and Node runtime, then validates image settings, build instructions and every runtime layer hash. It reuses runtime layers already in the registry and uploads only fresh app, static and settings layers. App layers are built from current source, so deleted files do not remain. Changed runtime inputs require a full build. This mode requires resumable upload, publishes the current commit and cannot be combined with `--reuse-published-image`.
 
-Cloud settings include `BYTEPLUS_AK/SK`, `TOS_*`, `MODELARK_*`, five model `*_ENDPOINT` / `*_API_KEY` pairs, `SPEECH_*`, `ASR_RESOURCE_ID`, `ASSET_LIBRARY_*`, `NSFW_ENABLED`, and `ACCESS_PASSWORD` / `ACCESS_SECRET` / `ACCESS_COOKIE_SECURE`. Runtime paths are `VIDEO_SKILLS_ROOT=/app/app/video_skills`, `VIDEO_TOOLS_RUNTIME_DIR=/opt/video-tools`, `WHISPER_CACHE_DIR=/opt/whisper-models`, `VIDEO_OUTPUT_DIR=/tmp/seedance-outputs`, and `REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`. Only variables referenced by configuration are copied.
+Cloud settings include `BYTEPLUS_AK/SK`, `TOS_*`, `MODELARK_*`, five model `*_ENDPOINT` / `*_API_KEY` pairs, `SPEECH_*`, `ASR_RESOURCE_ID`, `ASSET_LIBRARY_*`, `NSFW_ENABLED`, and `ACCESS_PASSWORD` / `ACCESS_SECRET` / `ACCESS_COOKIE_SECURE`. Runtime paths are `VIDEO_SKILLS_ROOT=/app/app/video_skills`, `VIDEO_TOOLS_RUNTIME_DIR=/opt/video-tools`, `VIDEO_OUTPUT_DIR=/tmp/seedance-outputs`, and `REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`. Only variables referenced by configuration are copied.
 
-`/healthz` returns health and version only. Authenticated `/api/runtime` reports tools and skills without secrets. Run `python -m app.services.runtime_service --smoke` inside the image to check actual editing, captions, timeline lint, both Whisper models, audio and duration. WebSocket delivery is local to its instance; snapshot polling covers updates made by other instances. Restarting interrupted jobs after instance removal and arbitrating concurrent writes still need a job queue and shared locks; TOS snapshots alone do not provide them.
+`/healthz` returns health and version only. Authenticated `/api/runtime` reports tools, skills and ASR settings without secrets; configured ASR does not prove connectivity. Run `python -m app.services.runtime_service --smoke` inside the image to check actual editing, captions, timeline lint, audio and duration without paid ASR calls. WebSocket delivery is local to its instance; snapshot polling covers updates made by other instances. Restarting interrupted jobs after instance removal and arbitrating concurrent writes still need a job queue and shared locks; TOS snapshots alone do not provide them.
 
 The deployment script enables `RUNTIME_SMOKE_ENABLED=true`. After login, `POST /api/runtime/smoke` runs the same synthetic media check on the actual cloud instance, cleans its temporary files and makes no paid generation calls. Each instance allows one check at a time. Set the flag to `false` to disable this diagnostic endpoint.
 
-The latest cloud media check on 2026-10-27 took 35.89 seconds: editing and caption rendering both produced a 1.52-second video, subtitles were visible, audio was preserved, timeline lint found no errors, and small/turbo inference passed. All five UI languages switched in Chrome without page errors. Authenticated WebSocket connections worked. The application rejects unauthenticated handshakes with 403; the platform proxy may report HTTP 200 for that failed handshake, which still cannot upgrade to WebSocket.
+Historical cloud check (2026-10-27, before the ASR migration): media checks took 35.89 seconds and produced a 1.52-second video with visible subtitles, preserved audio and valid timing. The local speech models passed then; they have since been removed. Current runtime checks cover media tools and ASR configuration without a paid ASR call. All five UI languages and authenticated WebSocket connections passed. The application rejects unauthenticated handshakes; a proxy may change the response code, but the client cannot upgrade the connection.
 
 A cloud Chrome run before this speed update generated a 60-second English romantic adventure sample. Its three scenes passed their first reviews with scores of 83/86/88. After fixing the minor-fault retry loop, optimization took about 201 seconds in one round and passed final review. The original and optimized films were 60.171 and 60.200 seconds at 854×480; both played in the browser without page errors. Acceptable minor caption errors remain as advice. This sample does not establish flawless automatic output for every prompt.
 
@@ -514,7 +522,11 @@ The latest cloud run reused verified caches for the same 60-second film. Backend
 
 Optimization reports record processing and upload times. Verified scene timelines persist in project snapshots: renewing signed URLs keeps the cache, while changed scene addresses, numbers, durations or content identifiers invalidate it. Subtitle rendering keeps the input frame rate and original audio. With no caption pages, it copies the video stream. Local media regressions cover landscape and portrait video, five subtitle languages, audio and frame counts.
 
-Builds can reuse local Whisper checkpoints. Only `small.pt` and `large-v3-turbo.pt` enter a separate build context, and Whisper checks their official SHA256 values. Missing models download automatically. User directories and other local files are never copied.
+Local Japanese task checked on 2026-10-28: all 8 scenes passed on their first attempt and final review passed. The film was 156.421 seconds, 854×480 at 24 fps. Desktop and mobile playback worked; all four delivery links returned 200; 24 SRT entries had valid times; decoded master and subtitle audio matched. Minor ASR noise has not been checked line by line, so this does not prove every subtitle is correct.
+
+The Dockerfile and dependencies changed with the Seed Speech migration. The first cloud release must rebuild the full image; runtime layers from before the migration cannot be reused.
+
+The Seed Speech migration changes Dockerfile and dependencies. The next cloud release requires a full image build and cannot reuse runtime layers from before this migration.
 
 By default, builds export an OCI archive and upload in 32 MiB Registry v2 chunks, save acknowledged progress, refresh authentication and skip existing layers. If the server limits chunk size, it is halved automatically. Interrupt signals finish the current chunk before saving; expired upload sessions restart their current layer. Transport errors print their type only, without tokens or upload signatures. The private `.run/oci-upload-checkpoint.json` uses mode 600 and stays outside Git and the image. Use `--upload-mode buildx` for a normal push on a stable network.
 

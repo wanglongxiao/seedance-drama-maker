@@ -25,7 +25,7 @@ class ASRService:
         self.base_url = config.get('speech.base_url', 'https://voice.ap-southeast-1.bytepluses.com/api/v3')
         self.submit_path = config.get('speech.submit_path', '/auc/bigmodel/submit')
         self.query_path = config.get('speech.query_path', '/auc/bigmodel/query')
-        self.resource_id = config.get('models.asr.resource_id', 'volc.bigasr.auc')
+        self.resource_id = config.get('models.asr.resource_id', 'volc.seedasr.auc')
 
         if not self.appid:
             raise ValueError("Missing required config: speech.appid")
@@ -93,11 +93,17 @@ class ASRService:
                 "enable_ddc": False,
                 "enable_speaker_info": False,
                 "enable_channel_split": False,
+                "show_utterances": True,
+                # An empty language otherwise selects the Chinese/English model.
+                # Explicit language keeps its own route; unknown audio uses multilingual LID.
+                "enable_auto_lang": not bool(language),
                 **kwargs.get("request_params", {})
             }
         }
 
-        logger.info(f"Submitting ASR task: {task_id}, format={audio_format}, codec={codec}")
+        logger.info("Submitting ASR task: %s, format=%s, codec=%s, language=%s, auto_lang=%s",
+                    task_id, audio_format, codec, language or "auto",
+                    request["request"].get("enable_auto_lang"))
 
         # 构建请求头（使用 x-api-key 认证）
         headers = {
@@ -123,7 +129,7 @@ class ASRService:
                 logger.info(f"ASR task submitted successfully: {task_id}")
                 return task_id, x_tt_logid
             else:
-                error_msg = f"ASR task submission failed: {response.headers}"
+                error_msg = f"ASR task submission failed: status={status_code}, http={response.status_code}"
                 logger.error(error_msg)
                 raise Exception(error_msg)
 
@@ -200,10 +206,11 @@ class ASRService:
         task_id, log_id = self.submit_task(audio_url, language=language, **kwargs)
 
         # 轮询等待结果
-        elapsed = 0
-        while elapsed < max_wait_time:
+        deadline = time.monotonic() + max_wait_time
+        while time.monotonic() < deadline:
             active()
             query_response = self.query_task(task_id, log_id)
+            active()
             code = query_response.headers.get("X-Api-Status-Code", "")
 
             if code == "20000000":  # 任务完成
@@ -215,16 +222,16 @@ class ASRService:
                 logger.info("ASR recognition successful: chars=%s utterances=%s",
                     len(data.get("text", "")), len(data.get("utterances", [])))
                 return data
-
+            elif code == "20000003":
+                return {"text": "", "utterances": [], "status": "no_speech"}
             elif code not in ["20000001", "20000002"]:  # 任务失败
                 error_msg = f"ASR task failed with code: {code}"
                 logger.error(error_msg)
                 raise Exception(error_msg)
 
             # 任务进行中，继续等待
-            logger.debug(f"ASR task in progress... elapsed: {elapsed}s")
-            time.sleep(poll_interval)
-            elapsed += poll_interval
+            logger.debug("ASR task in progress")
+            time.sleep(max(0, min(poll_interval, deadline - time.monotonic())))
 
         raise TimeoutError("ASR recognition timeout")
 

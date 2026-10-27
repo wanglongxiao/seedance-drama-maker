@@ -13,9 +13,8 @@ from app.services.video_skill_service import STAGE_SKILLS, video_skill_service
 
 def capabilities():
     runtime = Path(config.get("video_skills.runtime_dir")).expanduser()
-    models = Path(config.get("video_optimization.whisper_cache_dir")).expanduser()
     packages = {}
-    for name in ("openai-whisper", "torch", "librosa", "matplotlib", "pypinyin"):
+    for name in ("numpy", "librosa", "matplotlib", "pypinyin", "requests"):
         try:
             packages[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
@@ -33,19 +32,20 @@ def capabilities():
     tools["chromium"] = bool(shutil.which("chromium") or shutil.which("google-chrome")
         or (browser and Path(browser).is_file())
         or Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome").is_file())
-    cached = {name: (models / file).is_file() for name, file in
-              (("small", "small.pt"), ("turbo", "large-v3-turbo.pt"))}
+    from app.services.asr_service import asr_service
+    speech = {"provider": "byteplus", "resource_id": asr_service.resource_id,
+              "configured": bool(asr_service.api_key and asr_service.appid),
+              "connectivity_verified": False}
     return {"version": __version__, "tools": tools, "python": packages,
             "subtitle_renderer": config.get("video_optimization.subtitle_renderer", "ffmpeg"),
-            "whisper_models": cached, "stages": skills,
-            "ready": all(tools.values()) and all(packages.values()) and all(cached.values())
+            "asr": speech, "stages": skills,
+            "ready": all(tools.values()) and all(packages.values()) and speech["configured"]
                      and all(skills.values())}
 
 
 def smoke():
-    """Exercise decode, edit, both Whisper checkpoints, EDL lint, and caption rendering."""
+    """Exercise local media tools; report ASR configuration without a paid API call."""
     import numpy as np
-    import whisper
     from app.services.video_optimization_service import video_optimization_service, command, probe
     ready = capabilities()
     if not ready["ready"]:
@@ -80,17 +80,10 @@ def smoke():
             return subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a:0",
                 "-c", "copy", "-f", "adts", "-"], capture_output=True, check=True).stdout
         assert audio(edited) == audio(final)
-        for name in ("small", "turbo"):
-            model = whisper.load_model(name, device="cpu",
-                download_root=str(Path(config.get("video_optimization.whisper_cache_dir")).expanduser()))
-            result = model.transcribe(np.zeros(16000, dtype=np.float32), language="en",
-                                      fp16=False, verbose=False)
-            assert "segments" in result
-            del model
         return {"passed": True, "edit_duration": float(info["format"]["duration"]),
                 "caption_duration": float(final_info["format"]["duration"]), "timeline_lint": lint,
                 "subtitle_render": subtitle_render, "audio_preserved": True, "subtitle_visible": True,
-                "whisper": ["small", "turbo"]}
+                "asr": ready["asr"]}
 
 
 if __name__ == "__main__":

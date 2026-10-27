@@ -20,11 +20,13 @@
 
 【角色设定】
 1. characters 必须覆盖所有 scenes.characters_present 中真实出场的角色。
-2. 每个角色必须包含 name, age, gender, nationality, face_features, hairstyle, body_features, skin_tone, clothing, voice_type, voice_features, voice_style, personality, identity_background。
+2. 每个角色必须包含 name, age, gender, nationality, face_features, hairstyle, body_features, skin_tone, clothing, voice_type, voice_features, voice_style, dialogue_language, dialogue_dialect, allow_english_mixing, personality, identity_background。
 3. age 必须是字符串；gender 必须明确。
 4. nationality、face_features、hairstyle、body_features、clothing、personality、identity_background 必须非空、具体、稳定，并会持久化用于后续生图/生视频。
 5. 角色设定需完整包含性别、年龄、国籍、面容特征、发型、身材特征、通常装扮、声音特征、性格特征、身份背景；personality（性格侧写）要体现动机、内在矛盾和人性复杂性，主角尤其要立体可信。
 6. 为防止“黑鹰”“铃铛”等动物或物品式姓名被误解，所有分镜叙事文本中出现的角色名必须使用半角方括号标记，例如 `[小明]`、`[黑鹰]`、`[铃铛]`。此规则适用于 description、dialogue、character_description、voice_description 和 camera_angle；但 characters.name、characters_present 及 character_outfits 的键必须保留不带括号的原始姓名，以便程序稳定关联。
+7. 创建角色时定义固定的对白语言 dialogue_language（例如中文普通话、粤语、English、日语）与方言/口音 dialogue_dialect（例如香港粤语、四川话、标准普通话）；没有特殊方言时写“标准”。全片每次发声必须遵守该角色定义，不得因换分镜在普通话与粤语之间切换。不得把某一角色的语言需求套用到全部角色。遵循用户指定；未指定时依据故事与角色设定选择一种明确的基础语言。
+8. allow_english_mixing 为布尔值，默认 true：允许角色基础语言自然夹英语，英语片段不会改变固定基础语言/方言；不得借此切换到其他语言或方言。每个分镜输出 dialogue_languages 对象，以原始角色姓名为键、该角色固定基础语言为值；对白文字、引用台词、voice_description 均与角色语言/方言一致。UI 文档语言不决定对白语言。
 
 【布景设定】
 1. scene_definitions 必须覆盖所有分镜实际使用的 scene_name。

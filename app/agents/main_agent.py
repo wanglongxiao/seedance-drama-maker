@@ -113,39 +113,25 @@ def extract_aspect_ratio(user_input: str) -> Optional[str]:
     # 先将中文冒号替换为英文冒号，方便统一处理
     normalized_input = user_input.replace('：', ':')
 
-    # 匹配常见的比例格式
-    # 支持：16:9, 4/3, 9×16, 1:1, 9:21 等
-    patterns = [
-        r'(\d+:\d+)',  # 16:9, 4:3, 1:1, 9:21
-        r'(\d+/\d+)',  # 16/9, 4/3
-        r'(\d+)\s*[xX×]\s*(\d+)',  # 16x9, 1920×1080
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, normalized_input)
-        if match:
-            ratio = match.group(0)
-            # 统一转换为 宽:高 格式
-            if 'x' in ratio.lower() or '×' in ratio or 'X' in ratio:
-                # 1920x1080 格式，需要简化
-                w, h = re.findall(r'\d+', ratio)
-                w, h = int(w), int(h)
-                # 简化比例
-                from math import gcd
-                g = gcd(w, h)
-                ratio = f"{w//g}:{h//g}"
-            elif '/' in ratio:
-                ratio = ratio.replace('/', ':')
-
-            # 验证是否是常见比例（支持更多比例）
-            valid_ratios = ['16:9', '4:3', '1:1', '9:16', '21:9', '2:3', '3:2', '3:4', '9:21', '21:9']
-            if ratio in valid_ratios:
-                logger.info(f"Extracted aspect ratio: {ratio}")
-                return ratio
-            else:
-                # 如果不是常见比例，但仍然匹配了格式，也返回
-                logger.info(f"Extracted custom aspect ratio: {ratio}")
-                return ratio
+    # Do not send timestamps (0:00 / 00:13) or dates as model ratios.
+    # Continue past unrelated numeric pairs to find a later explicit ratio.
+    from math import gcd
+    valid_ratios = {'16:9', '4:3', '1:1', '9:16', '21:9', '2:3', '3:2', '3:4', '9:21'}
+    canonical_ratios = {}
+    for candidate in valid_ratios:
+        width, height = map(int, candidate.split(":"))
+        divisor = gcd(width, height)
+        canonical_ratios[f"{width//divisor}:{height//divisor}"] = candidate
+    pattern = r'(?<![\d:/.])(\d+)\s*[:/xX×]\s*(\d+)(?![\d:/.])'
+    for match in re.finditer(pattern, normalized_input):
+        w, h = int(match.group(1)), int(match.group(2))
+        if w <= 0 or h <= 0:
+            continue
+        divisor = gcd(w, h)
+        ratio = canonical_ratios.get(f"{w//divisor}:{h//divisor}")
+        if ratio:
+            logger.info(f"Extracted aspect ratio: {ratio}")
+            return ratio
 
     return None
 
@@ -1561,6 +1547,8 @@ class MainAgent:
         return deduped
 
     def _select_video_review_reference_urls(self, project: VideoProject, scene) -> List[str]:
+        if project.temporary_assets_cleaned:
+            return []
         urls: List[str] = []
         for image in self._select_reference_assets_for_scene(project, scene):
             if getattr(image, "reference_type", None) not in {"character", "character_outfit"}:
@@ -2353,6 +2341,12 @@ class MainAgent:
         current_video = None
         project_language = self._project_language(project)
         is_manual_mode = review_mode == "manual"
+        review_feedback = (
+            scene_state.last_feedback
+            if (scene_state.last_video is not None and scene_state.last_score > 0
+                and not scene_state.approved and not scene_state.generation_failure_count)
+            else ""
+        )
 
         while True:
             self._raise_if_project_ended(project)
@@ -2445,6 +2439,8 @@ class MainAgent:
                     scene_definitions=getattr(project.script, "scene_definitions", None),
                     asset_group_id=project.asset_group_id,
                     asset_project_name=project.asset_project_name,
+                    review_feedback=review_feedback,
+                    check_active=lambda: self._raise_if_project_ended(project),
                 )
                 self._raise_if_project_ended(project)
                 current_video = await self.archive_scene_video_async(
@@ -2758,7 +2754,11 @@ class MainAgent:
 
             # 审核未通过
             scene_state.approved = False
-            logger.warning(f"[REVIEW] Scene {scene_number} - FAILED attempt {scene_state.auto_retry_count}/{max_retries}: {feedback}")
+            review_feedback = feedback
+            logger.warning(
+                "[REVIEW] Scene %s - FAILED attempt %s/%s score=%s feedback_chars=%s",
+                scene_number, scene_state.auto_retry_count, max_retries, score, len(feedback or ""),
+            )
 
             await self._send_agent_output(websocket, "video_review_agent", {
                 "scene_number": scene_number,
@@ -3851,7 +3851,7 @@ class MainAgent:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _optimize_video(self, project: VideoProject, websocket=None) -> str:
-        from app.services.video_optimization_service import fragment_plan, fast_triage_enabled, triage_report
+        from app.services.video_optimization_service import fragment_plan, fast_triage_enabled, triage_report, scene_edit_groups
         self._raise_if_project_ended(project)
         operation = {"task": asyncio.current_task(), "active": True}
         self._optimization_runs[project.project_id] = operation
@@ -3909,9 +3909,15 @@ class MainAgent:
                         if r.instructions.strip() or settings.instructions else r.model_dump(exclude_defaults=True)
                         for r in settings.repair_ranges]
                 }.values())
-                outstanding_manual_repairs = [dict(item) for item in manual_ranges]
                 requested = list(dict.fromkeys(settings.regenerate_scenes))
-                # Whole-scene generation is available only on an explicit manual request.
+                for number in requested:
+                    scene_range = next((r for r in analysis.get("scene_timeline", [])
+                                        if r["scene_number"] == number), None)
+                    if not scene_range:
+                        raise ValueError(f"Scene {number} has no video timeline")
+                    manual_ranges.append(dict(scene_range, instructions=settings.instructions
+                        or "修正穿帮、肢体畸变与光影连续性，严格保留原剧本"))
+                outstanding_manual_repairs = [dict(item) for item in manual_ranges]
                 settings.repair_ranges = []
                 settings.regenerate_scenes = []
                 # Preserve the time/requirement pairs before any parallel work starts.
@@ -3919,23 +3925,6 @@ class MainAgent:
                     dict(item) for item in outstanding_manual_repairs]
                 self.save_project_state(project.project_id)
                 slots = asyncio.Semaphore(max(1, int(config.get("video_optimization.repair_workers", 3))))
-                async def repair(number):
-                    async with slots:
-                        check()
-                        return await self._repair_optimization_scene(project, number,
-                            settings.instructions or "修正穿帮、肢体畸变与光影连续性，严格保留原剧本")
-                full_changed = any(await asyncio.gather(*(repair(number) for number in requested)))
-                if full_changed:
-                    try:
-                        working_url = await self._merge_videos(project)
-                    finally:
-                        project.merged_video_url = original_url
-                    project.optimization_source_url = working_url
-                    project.current_step = "optimize"
-                    project.processing_phase = "optimize"
-                    project.status = "optimizing"
-                    self.save_project_state(project.project_id)
-                    _, analysis = await optimize(True)
                 candidates = list(analysis.get("confirmed_issues", []))
                 if fast_triage_enabled():
                     candidates = [i for i in triage_report(
@@ -3952,27 +3941,31 @@ class MainAgent:
                 maximum = max(len(manual_ranges), int(config.get("video_optimization.max_repair_fragments_per_round", 8)))
                 await self._optimization_task(project, f"{prefix}:repair_plan",
                     "repair_plan", "completed", websocket, round=round_number+1)
-                async def fragment(index, interval):
+                groups = scene_edit_groups(partials[:maximum], analysis.get("scene_timeline", []),
+                                           analysis.get("input_duration", 0))
+                async def edit_scene(index, number, intervals):
                     async with slots:
                         check()
-                        task_id = f"{prefix}:fragment-{index+1}"
+                        task_id = f"{prefix}:scene-edit-{number}"
                         try:
-                            return await self._repair_optimization_fragment(project, analysis, interval,
-                                interval.get("instructions") or interval.get("evidence")
-                                or settings.instructions, websocket, task_id)
+                            return await self._repair_optimization_scene_edits(
+                                project, analysis, number, intervals, settings.instructions,
+                                websocket, task_id, check)
                         except ProjectEndedError:
                             raise
                         except Exception as error:
-                            logger.warning("Local repair preparation failed: %s", type(error).__name__)
+                            logger.warning("Scene edit failed: scene=%s error=%s", number, type(error).__name__)
                             await self._optimization_task(project, task_id, "fragment", "failed", websocket,
-                                start=interval["start"], end=interval["end"])
-                            return None
-                for i, interval in enumerate(partials[:maximum]):
-                    await self._optimization_task(project, f"{prefix}:fragment-{i+1}",
-                        "fragment", "queued", websocket, start=interval["start"], end=interval["end"],
-                        scene_number=interval.get("scene_number"))
-                patches = await asyncio.gather(*(fragment(i, r) for i, r in enumerate(partials[:maximum])))
-                accepted = [patch for patch in patches if patch]
+                                scene_number=number, start=intervals[0]["start"], end=intervals[-1]["end"])
+                            return []
+                for number, intervals in groups:
+                    await self._optimization_task(project, f"{prefix}:scene-edit-{number}",
+                        "fragment", "queued", websocket, start=intervals[0]["start"],
+                        end=intervals[-1]["end"], scene_number=number,
+                        ranges=[{"start": r["start"], "end": r["end"]} for r in intervals])
+                patches = await asyncio.gather(*(edit_scene(i, number, intervals)
+                    for i, (number, intervals) in enumerate(groups)))
+                accepted = [patch for batch in patches for patch in batch]
                 if accepted:
                     await self._optimization_task(project, f"{prefix}:replace", "replace", "running", websocket)
                     working_url = await run_generation(video_optimization_service.replace_fragments,
@@ -3980,9 +3973,7 @@ class MainAgent:
                     check()
                     project.optimization_source_url = working_url
                     outstanding_manual_repairs = [
-                        item for item in outstanding_manual_repairs if not any(
-                            patch["start"] <= item["start"] + .001
-                            and patch["end"] >= item["end"] - .001 for patch in accepted)]
+                        item for item in outstanding_manual_repairs if not self._repair_range_covered(item, accepted)]
                     project.optimization_report["unresolved_manual_repairs"] = [
                         dict(item) for item in outstanding_manual_repairs]
                     for patch in accepted:
@@ -3991,6 +3982,15 @@ class MainAgent:
                     await self._optimization_task(project, f"{prefix}:replace", "replace", "completed", websocket)
                 url, report = await optimize()
                 check()
+                unresolved_automatic = [
+                    dict(issue) for issue in candidates
+                    if settings.auto_repair and not self._repair_range_covered(issue, accepted)]
+                if unresolved_automatic:
+                    report["unresolved_auto_repairs"] = unresolved_automatic
+                    report["final_review"]["approved"] = False
+                    report["final_review"]["summary"] = (
+                        "已确认的关键问题尚未通过补片审核。 "
+                        + report["final_review"].get("summary", ""))
                 if outstanding_manual_repairs:
                     report["unresolved_manual_repairs"] = [dict(item) for item in outstanding_manual_repairs]
                     report["final_review"]["approved"] = False
@@ -4006,7 +4006,7 @@ class MainAgent:
                 if report["final_review"].get("approved") or report["final_review"].get("unavailable") or not settings.auto_repair:
                     break
                 # Map final output faults back to the source timeline before the next repair.
-                final_faults = []
+                final_faults = list(unresolved_automatic)
                 offset = 0.
                 for a, b in report["kept_ranges"]:
                     for issue in report["final_review"].get("issues", []):
@@ -4027,6 +4027,9 @@ class MainAgent:
             project.current_step = "completed" if approved else "optimize"
             project.progress = 100 if approved else 99
             project.processing_phase = ""
+            report["repair_history"] = project.optimization_history
+            if report.get("report_url"):
+                await run_generation(video_optimization_service.publish_report, project, report, check)
             self.save_project_state(project.project_id)
             return url
         except (Exception, asyncio.CancelledError):
@@ -4096,184 +4099,151 @@ class MainAgent:
             if not project.is_ended:
                 self.save_project_state(project.project_id)
 
-    async def _repair_optimization_fragment(self, project, analysis, interval, feedback,
-                                            websocket=None, task_id=None):
-        from app.services.video_optimization_service import probe, command, localized_scene_description, fragment_attempts
+    @staticmethod
+    def _repair_range_covered(interval, patches):
+        cursor = interval["start"]
+        for patch in sorted(patches, key=lambda p: p["start"]):
+            if patch["end"] <= cursor:
+                continue
+            if patch["start"] > cursor+.001:
+                return False
+            cursor = max(cursor, patch["end"])
+            if cursor >= interval["end"]-.001:
+                return True
+        return False
+
+    async def _repair_optimization_scene_edits(self, project, analysis, number, intervals,
+                                              feedback, websocket=None, task_id=None, check_active=None):
         from pathlib import Path
-        a, b = interval["start"], interval["end"]
-        scene_interval = next((r for r in analysis["scene_timeline"] if r["start"] <= a < b <= r["end"]), None)
-        maximum = float(config.get("video_optimization.fragment_max_seconds", 6))
-        if not scene_interval or b-a > maximum + .001:
-            raise ValueError(f"Local repair must stay in one scene and be at most {maximum:g} seconds")
-        number = scene_interval["scene_number"]
-        task_id = task_id or f"fragment-{a:.3f}-{b:.3f}"
-        details = dict(scene_number=number, start=a, end=b)
-        attempts = fragment_attempts(project.optimization_history, number, a, b)
+        from app.services.video_optimization_service import fragment_attempts, extract_boundary_frame
+        check = check_active or (lambda: self._raise_if_project_ended(project))
+        check()
+        scene_range = next(r for r in analysis["scene_timeline"] if r["scene_number"] == number)
+        scene = self.get_project_scene(project, number)
+        task_id = task_id or f"scene-edit-{number}-{uuid.uuid4().hex[:8]}"
+        records, edits = [], []
         limit = int(config.get("video_optimization.fragment_max_attempts", 2))
-        if attempts >= limit:
-            await self._optimization_task(project, task_id, "fragment", "budget_exhausted", websocket, **details)
-            return None
-        history = dict(kind="fragment_repair", status="generating", **details)
-        project.optimization_history.append(history)
+        for interval in intervals:
+            a, b = interval["start"], interval["end"]
+            if not scene_range["start"] <= a < b <= scene_range["end"]:
+                raise ValueError("Edit interval must lie in its mapped scene")
+            details = dict(scene_number=number, start=a, end=b)
+            if fragment_attempts(project.optimization_history, number, a, b) >= limit:
+                await self._optimization_task(project, f"{task_id}:{a}", "fragment",
+                                              "budget_exhausted", websocket, **details)
+                continue
+            requirement = interval.get("instructions") or interval.get("evidence") or feedback or (
+                "修正局部肢体、接触与光影，不改变原剧情与原声")
+            if feedback and feedback not in requirement:
+                requirement += "\nAdditional repair requirements: " + feedback
+            record = dict(kind="fragment_repair", status="generating", mode="video_edit",
+                          original_fault=requirement, **details)
+            records.append(record)
+            project.optimization_history.append(record)
+            edits.append(dict(start=a-scene_range["start"], end=b-scene_range["start"],
+                              instructions=requirement))
+        if not edits:
+            await self._optimization_task(project, task_id, "fragment",
+                "budget_exhausted", websocket, scene_number=number,
+                start=intervals[0]["start"], end=intervals[-1]["end"])
+            return []
+        details = dict(scene_number=number, start=records[0]["start"], end=records[-1]["end"],
+                       ranges=[{"start": r["start"], "end": r["end"]} for r in records])
         await self._optimization_task(project, task_id, "fragment_prepare", "running", websocket, **details)
         source = Path(analysis["local_source"])
-        scene = self.get_project_scene(project, number)
-        refs = list(self._select_reference_assets_for_scene(project, scene))
-        info = probe(source)
-        duration = float(info["format"]["duration"])
-        unique = uuid.uuid4().hex[:12]
-        boundary_urls = []
-        for label, t in (("before", max(0, a-.15)), ("after", min(duration-.05, b+.15))):
-            self._raise_if_project_ended(project)
-            frame = ensure_project_temp_dir(project.project_id)/f"repair-{number}-{unique}-{label}.png"
-            await run_generation(command, ["ffmpeg", "-v", "error", "-y", "-ss", t, "-i", source, "-frames:v", "1", frame])
-            frame_url = await run_generation(tos_service.upload_file, str(frame),
-                custom_filename=f"repair-{number}-{label}-{uuid.uuid4().hex[:8]}.png",
-                project_id=project.project_id, category="references/repair")
-            image = GeneratedImage(scene_number=number, url=frame_url, prompt="Continuity boundary frame",
-                name=f"boundary-{label}", reference_type="scene")
-            await run_generation(self._register_generated_reference_asset, project, image, image.name)
-            refs.append(image)
-            boundary_urls.append(frame_url)
-        patch_script = project.script.model_copy(deep=True)
-        patch_scene = patch_script.scenes[number-1]
-        patch_scene.duration = max(math.ceil(b-a-1e-6), int(config.get("video_generation.scene_duration.min", 5)))
-        # Dynamic fields from the full scene can contradict a localized insert.
-        # Identity/outfit/set definitions stay inherited; motion belongs to this patch.
-        patch_scene.character_description = ""
-        patch_scene.voice_description = ""
-        patch_scene.camera_angle = "聚焦指定修复部位，使修正状态与动作清楚可见；前后构图衔接边界帧"
-        transcript_file = source.parent/"transcript.json"
-        segments = json.loads(transcript_file.read_text()).get("segments", []) if transcript_file.exists() else []
-        words = [w for s in segments for w in s.get("words", [])
-                 if a < float(w["end"]) and b > float(w["start"])]
-        spoken = "".join(w["word"] for w in words)
-        timing = [{"text": w["word"], "start": round(max(0, w["start"]-a), 2),
-                   "end": round(min(b-a, w["end"]-a), 2)} for w in words]
-        patch_scene.dialogue = spoken
-        local_action = localized_scene_description(scene.description,
-            a-scene_interval["start"], b-scene_interval["start"])
-        await self._optimization_task(project, task_id, "repair_plan", "running", websocket, **details)
-        original_fault = feedback or "局部肢体、接触或光影不连续"
-        goal = await run_generation(video_optimization_service.repair_goal, original_fault, local_action, b-a)
-        self._raise_if_project_ended(project)
-        history.update(original_fault=original_fault, repair_goal=goal)
-        feedback = (goal["goal"] + "\n必要局部动作：" + goal["motion"]
-                    + "\n必须在补片中看见的修正状态：" + "；".join(goal["checks"]))
-        await self._optimization_task(project, task_id, "repair_plan", "completed", websocket, **details)
-        patch_scene.description = (
-            f"仅重建原分镜中 {a-scene_interval['start']:.2f} 到 {b-scene_interval['start']:.2f} 秒的画面。"
-            f"所属动作段背景（不是补片必须重演的动作清单）：{local_action}。"
-            f"修补要求：{feedback or '修正手指、肢体、物体接触和光影连续性'}。"
-            "优先展示修正后的局部状态和必要动作，问题部位必须清楚可见，"
-            "不要用遮挡、无关反应镜头或整段动作开场代替修复。"
-            "只修复两个边界帧之间的局部可见状态与动作，不从所属动作段的起点重演；"
-            "反馈中跨出此时间区间的其他动作与后续升级不属于此补片的生成或验收要求。"
-            f"前 {b-a:.2f} 秒完成此局部修补，随后自然停留。以 boundary-before/after 参考图匹配接入与离开姿态、"
-            "构图和光源；参考图中被指出有误的道具或肢体必须按修补要求纠正，"
-            "不要为了照抄边界图重现原有缺陷。其他道具保持连续，不得重演整个分镜、增加人物或字幕。"
-            f"最终保留原声轨，此段实际原声文字：{spoken or '无台词'}。"
-            f"词级时间轴（相对补片开始秒）：{json.dumps(timing, ensure_ascii=False)}。"
-            "说话者口型与原声时间吻合，不增加或重复台词；第0秒立即从此局部动作开始。")
         try:
-            prior_rejection = any(r.get("kind") == "fragment_repair" and r.get("status") == "rejected"
-                and r.get("scene_number") == number and r.get("start", duration) < b
-                and r.get("end", 0) > a for r in project.optimization_history)
-            if prior_rejection and config.get("video_optimization.repair_reference_after_failure", True):
-                try:
-                    reference_feedback = ""
-                    reference_attempts = history.setdefault("reference_attempts", [])
-                    reference_ready = False
-                    for _ in range(max(1, int(config.get("video_optimization.repair_reference_max_attempts", 2)))):
-                        self._raise_if_project_ended(project)
-                        await self._optimization_task(project, task_id, "fragment_reference", "running",
-                                                      websocket, **details)
-                        target = await run_generation(self.image_agent.generate_repair_reference_image,
-                            scene, project.script, feedback, local_action, boundary_urls,
-                            [r for r in refs if r.reference_type in {"character", "character_outfit"}],
-                            project.aspect_ratio, reference_feedback)
-                        self._raise_if_project_ended(project)
-                        await self._optimization_task(project, task_id, "fragment_reference_review", "running",
-                                                      websocket, **details)
-                        reference_review = await run_generation(self.image_agent.review_repair_reference_image,
-                            target.url, feedback, local_action, boundary_urls)
-                        self._raise_if_project_ended(project)
-                        reference_attempts.append({"url": target.url, "review": reference_review})
-                        reference_ready = reference_review["approved"] is True
-                        await self._optimization_task(project, task_id, "fragment_reference_review",
-                            "completed" if reference_ready else "needs_review", websocket, **details)
-                        if reference_ready:
-                            break
-                        reference_feedback = reference_review["evidence"]
-                    if not reference_ready:
-                        history.update(status="rejected", feedback=reference_feedback,
-                                       repair_reference_rejected=True)
-                        self.save_project_state(project.project_id)
-                        return None
-                    target.name = f"repair-target-{number}-{unique}"
-                    await run_generation(self._register_generated_reference_asset, project, target, target.name)
-                    refs.append(target)
-                    history["repair_reference_image_url"] = target.url
-                    patch_scene.description += (
-                        " repair-target 是修正完成后的目标状态参考；补片优先呈现该目标状态，"
-                        "原边界帧仅约束未修改部位的身份、场景与光影。")
-                except ProjectEndedError:
-                    raise
-                except Exception as error:
-                    history["repair_reference_error"] = type(error).__name__
-                    logger.warning("Corrected repair reference unavailable: %s", type(error).__name__)
-                    history.update(status="rejected", repair_reference_rejected=True,
-                                   feedback="Corrected reference could not be verified")
-                    self.save_project_state(project.project_id)
-                    await self._optimization_task(project, task_id, "fragment_reference_review",
-                        "needs_review", websocket, **details)
-                    return None
+            original = await run_generation(video_optimization_service.prepare_scene_edit_input,
+                                            project, source, scene_range, check)
+            check()
+            group = await run_generation(self._ensure_project_asset_group, project)
+            check()
+            asset = await run_generation(asset_library_service.register_video_asset,
+                group_id=group["Id"], url=original["url"], name=f"scene-edit-{number}-{uuid.uuid4().hex[:8]}",
+                project_name=project.asset_project_name)
+            check()
+            asset_id = str(asset.get("Id") or "")
+            if not asset_id:
+                raise AssetLibraryError("Original video asset is missing its id")
             await self._optimization_task(project, task_id, "fragment", "running", websocket, **details)
-            patch = await run_generation(self.video_agent.regenerate_video, scene_number=number,
-                script=patch_script, project_id=project.project_id, reference_image=project.reference_image,
-                reference_images=refs, feedback=feedback, user_style_info=project.script.style,
-                user_requirement_text=f"仅修补局部画面，原声台词：{spoken or '无对白'}", resolution=project.video_resolution,
-                aspect_ratio=project.aspect_ratio)
-            self._raise_if_project_ended(project)
-            history.update(generated_video_url=patch.url, generated_duration=patch.duration,
-                           boundary_urls=boundary_urls)
-            generated_start = 0.
-            if (not spoken and config.get("video_optimization.select_silent_patch_window", True)
-                    and patch.duration > b-a+.1):
-                await self._optimization_task(project, task_id, "fragment_select", "running", websocket, **details)
+            edited = await run_generation(self.video_agent.edit_scene_video, script=project.script,
+                scene_number=number, source_url=f"asset://{asset_id}", source_duration=original["duration"],
+                intervals=edits, resolution=project.video_resolution, check_active=check)
+            check()
+            aligned = await run_generation(video_optimization_service.align_scene_edit,
+                                          project, edited.url, original, check)
+            for record in records:
+                record.update(generated_video_url=edited.url, source_video_url=original["url"],
+                              source_asset_id=asset_id)
+
+            async def review_interval(record, edit):
+                check()
+                a, b = record["start"], record["end"]
+                interval_task = f"{task_id}:{a:.3f}-{b:.3f}"
+                interval_details = dict(scene_number=number, start=a, end=b)
                 try:
-                    generated_start = await run_generation(video_optimization_service.select_fragment_offset,
-                        patch.url, patch.duration, b-a, feedback, boundary_urls,
-                        lambda: self._raise_if_project_ended(project))
+                    # Boundary frames are review evidence, never image generation inputs.
+                    boundaries = []
+                    master_duration = float(analysis.get("input_duration", scene_range["end"]))
+                    boundary_times = []
+                    if a > 0:
+                        boundary_times.append(("before", max(0., a-.15)))
+                    if b < master_duration:
+                        boundary_times.append(("after", min(master_duration-.001, b+.15)))
+                    for label, t in boundary_times:
+                        check()
+                        frame = Path(original["path"]).parent/f"{a:.3f}-{b:.3f}-{label}.png"
+                        actual_time = await run_generation(extract_boundary_frame, source, frame, t)
+                        if (label == "before" and actual_time >= a
+                                or label == "after" and actual_time <= b):
+                            continue
+                        check()
+                        boundaries.append(await run_generation(tos_service.upload_file, str(frame),
+                            custom_filename=f"edit-boundary-{uuid.uuid4().hex[:12]}.png",
+                            project_id=project.project_id, category="references/repair"))
+                    prepared = await run_generation(video_optimization_service.prepare_fragment,
+                        project, source, edited.url, a, b, check, edit["start"], generated_path=aligned)
+                    check()
+                    await self._optimization_task(project, interval_task, "fragment_review",
+                                                  "running", websocket, **interval_details)
+                    approved, detail, score = await run_generation(self.video_review_agent.review_video,
+                        script_scene_description=(
+                            f"仅审核原分镜 {number} 的 {edit['start']:.3f}–{edit['end']:.3f} 秒编辑区间。"
+                            f"当前视频长度约 {b-a:.3f} 秒，视频内时间从 0 秒起算。"
+                            "只判断指定修复点与相邻边界是否连贯，不要求此短片重演完整分镜剧情。"
+                            "核对指定缺陷修正、身份/道具/物理一致性、两侧边界姿态与光影和原声口型。"
+                            "保留原声，不能添加对白或切换说话语言。"),
+                        video_url=prepared["url"], boundary_image_urls=boundaries,
+                        reference_image_urls=self._select_video_review_reference_urls(project, scene),
+                        output_language=project.output_language, repair_requirement=edit["instructions"])
+                    check()
+                    record.update(status="accepted" if approved else "rejected", score=score, feedback=detail)
+                    await self._optimization_task(project, interval_task, "fragment_review",
+                        "completed" if approved else "needs_review", websocket, score=score, **interval_details)
+                    return dict(prepared, score=score) if approved else None
                 except ProjectEndedError:
                     raise
                 except Exception as error:
-                    logger.warning("Repair window selection unavailable: %s", type(error).__name__)
-                history["generated_start"] = generated_start
-            prepared = await run_generation(video_optimization_service.prepare_fragment,
-                project, source, patch.url, a, b, lambda: self._raise_if_project_ended(project), generated_start)
-            self._raise_if_project_ended(project)
-            await self._optimization_task(project, task_id, "fragment_review", "running", websocket, **details)
-            approved, detail, score = await run_generation(self.video_review_agent.review_video,
-                script_scene_description=patch_scene.description + (
-                    f"\n仅审核原镜{a-scene_interval['start']:.2f}–{b-scene_interval['start']:.2f}秒"
-                    "的补片。背景动作仅供定位，不要求补片重演全部背景动作或后续剧情。"
-                    "前后参考帧是接缝姿态与光影约束，"
-                    "检查肢体/道具/物理一致性及原声口型。允许轻微构图差别。"),
-                video_url=prepared["url"], reference_image_urls=boundary_urls+
-                    self._select_video_review_reference_urls(project, scene), output_language=project.output_language,
-                repair_requirement=feedback or "修正局部肢体、接触与光影，并匹配前后边界帧")
-            self._raise_if_project_ended(project)
-            history.update(status="accepted" if approved else "rejected", score=score, feedback=detail)
-            await self._optimization_task(project, task_id, "fragment_review",
-                "completed" if approved else "needs_review", websocket, score=score, **details)
-            return dict(prepared, score=score) if approved else None
+                    record.update(status="failed", error=type(error).__name__)
+                    logger.warning("Fragment preparation/review failed: scene=%s start=%.3f end=%.3f error=%s",
+                                   number, a, b, type(error).__name__)
+                    await self._optimization_task(project, interval_task, "fragment_review",
+                                                  "failed", websocket, **interval_details)
+                    return None
+            results = await asyncio.gather(*(review_interval(r, e) for r, e in zip(records, edits)))
+            check()
+            await self._optimization_task(project, task_id, "fragment",
+                "completed" if all(results) else "needs_review", websocket, **details)
+            self.save_project_state(project.project_id)
+            return [r for r in results if r]
         except ProjectEndedError:
             raise
         except Exception as error:
-            history.update(status="failed", error=type(error).__name__)
+            for record in records:
+                record.update(status="failed", error=type(error).__name__)
+            self.save_project_state(project.project_id)
             await self._optimization_task(project, task_id, "fragment", "failed", websocket, **details)
-            return None
+            logger.warning("Original scene edit failed: scene=%s error=%s", number, type(error).__name__)
+            return []
 
     async def _update_progress(self, websocket, agent: str, progress: int, message: str):
         """更新进度"""

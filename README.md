@@ -25,7 +25,14 @@
 
 流程：需求 → 剧本 → 角色与布景参考图 → 分镜生成与审核 → 合成 → 优化与字幕。
 
-结合 video-use、vlog-auto-edit 规划剪辑，media-use 处理素材，HyperFrames 构建时间线，openai-whisper 识别音轨，remotion-captions 组织字幕，FFmpeg 快速合成，remotion-render 支持逐帧导出。支持问题片段剪除、局部补拍、光影校正和成片复审，保留原声，输出视频、字幕与审核报告。
+结合 video-use、vlog-auto-edit 规划剪辑，media-use 处理素材，HyperFrames 构建时间线，BytePlus Seed Speech 识别音轨，remotion-captions 组织字幕，FFmpeg 快速合成，remotion-render 支持逐帧导出。支持问题片段剪除、局部补拍、光影校正和成片复审，保留原声，输出视频、字幕与审核报告。
+
+### 2026-10-28 更新
+
+- BytePlus ASR 默认开启多语言自动识别（`enable_auto_lang=true`），覆盖日语、韩语、西班牙语、葡萄牙语及中英混合音轨；字幕直接来自实际语音，保留口头词和词/句时间戳。旧识别缓存自动失效，单纯语言标签修正不重复调用 ASR。
+- 局部修复使用 Seedance 2.5 编辑原分镜视频：同镜多个区间合并为一次请求，不同镜头并行。仅独立审核通过的区间回填，保留其他画面和原音轨。时间以未剪辑母片为准，每个区间最多 6 秒。
+- 修复上限耗尽后显示待检查状态与报告，不继续假等待；未完成的分镜生成/审核会阻止合成和优化。结束项目会停止后续处理并删除全部项目资源，请先下载所需成片、字幕与报告。
+- 删除本地 Whisper/PyTorch 模型层、旧参考图补拍路径及过期测试，统一五种界面语言与资源缓存版本。
 
 ## 项目展示
 
@@ -76,7 +83,7 @@
 
 ### 环境要求
 
-- Python `3.11`、Node `22+`、Chromium；Whisper 使用 CPU PyTorch
+- Python `3.11`、Node `22+`、Chromium；音轨识别使用 BytePlus Seed Speech
 - 运行环境可执行 `ffmpeg` 与 `ffprobe`（本地、Docker、云端 veFaaS 镜像均需要安装）
 - 网络可访问 BytePlus / ModelArk / Seed-Speech / TOS
 
@@ -295,11 +302,11 @@ Web UI 新增“结束项目”按钮，并支持在以下场景触发清理：
 
 清理范围：
 
-- 删除本项目在 `TOS` 中的临时文件与临时目录
+- 删除本项目全部 `TOS` 文件，包括母片、成片、字幕、报告与恢复快照
 - 删除本项目虚拟素材库中的素材资产
 - 删除本项目对应的素材资产组
 
-如果项目已经产出最终视频，则保留 `videos/final` 下的最终成片，避免误删导出结果。
+请在结束项目之前下载需要保留的文件。成片复审通过后的自动清理只删除中间素材，保留交付文件和恢复快照；明确结束则删除全部项目资源。单纯 WebSocket 断连或项目失败不会触发资源删除，以便恢复或重试。
 
 ### 4. 视频审核与流程推进
 
@@ -403,7 +410,7 @@ Services
 - 项目与浏览器连接绑定，支持多标签页独立运行
 - 后台长任务通过稳定客户端 ID 支持 WebSocket 断线重连后的结果续推
 - 参考图库、视频生成、审核、合成都采用渐进式前端展示
-- 最终视频会在项目结束清理中保留
+- 成片复审通过后自动清理中间素材，保留母片、成片、字幕、报告和恢复状态；明确结束项目会删除全部项目资源
 - 上传、ASR 等实时交互请求使用独立 `interactive` 线程池；生图、生视频、审核、合成等长任务使用 `generation` 线程池，降低云端单实例多项目并发时的排队超时风险
 
 ## 使用说明
@@ -418,7 +425,7 @@ mkdir -p ~/.local/share/seedance-drama-maker/video-tools
 cp -R runtime/node_modules ~/.local/share/seedance-drama-maker/video-tools/
 ```
 
-系统安装 FFmpeg/FFprobe 和 Chromium。首次使用 Whisper 会下载模型；云端镜像预置 `small` 和 `turbo`。本地 Mac 可使用 Remotion 自动下载的浏览器；Linux 建议设置 `REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`。
+系统安装 FFmpeg/FFprobe 和 Chromium。音轨识别配置 `SPEECH_*`、TOS 与 `ASR_RESOURCE_ID=volc.seedasr.auc`，无需下载本地模型。默认不指定单一语言并开启 `enable_auto_lang`，支持日、韩、西、葡等多语言与中英/粤语混合；保留口头词及原生词/句时间戳。调用 ASRService 时可用 `language` 显式指定语种，字幕优化始终启用自动检测。识别失败会中止字幕生成并报错，真实无语音结果可正常导出无字幕视频。本地 Mac 可使用 Remotion 自动下载的浏览器；Linux 建议设置 `REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`。
 
 ### 启动服务
 
@@ -457,7 +464,7 @@ http://localhost:8888
 
 - 最近一次真实 E2E 已成功产出最终视频并上传至 `videos/final`
 - 分镜审核、最终合成、项目结束清理均已在真实调用链路中验证
-- 清理逻辑默认删除临时素材与中间产物，保留最终成片，避免误删导出结果
+- 成片复审通过后仅清理中间素材，保留四项交付与恢复快照；明确结束项目会停止处理并删除全部 TOS 资源，失败或断连项目保留以供重试
 
 ## 仓库清理与安全提交
 
@@ -468,10 +475,11 @@ http://localhost:8888
 - README、`config.yaml`、`.env.example` 只保留占位符示例，不写入真实凭证
 - 提交前请确认测试音频、测试图片、服务日志、临时导出文件没有进入暂存区
 - 临时分享包、压缩导出、密钥文件和本地部署 JSON 均排除在 Git 与镜像上下文之外；发布前检查暂存区和历史记录，扫描只报告文件路径，不输出密钥值
+- 本地监控记录、调试日志、旧测试导出和过期补拍代码按发布清理；仍有效的行为回归测试仅保留本地，运行环境、凭证与部署恢复状态不属于临时文件
 
 ### 云端发布
 
-发布顺序为 `git commit → git push → 重建镜像 → 发布 veFaaS`。`Dockerfile` 基于 Python 3.11 与 Node 22，包含 FFmpeg/FFprobe、Chromium、Noto 字体、CPU PyTorch、Whisper `small` / `turbo` 缓存及固定版本 HyperFrames、Remotion 和 captions。所有提示词和有限 skills 参考文件均随镜像发布。启动命令为 `./run.sh`，监听 `_FAAS_RUNTIME_PORT`（默认 8000），单进程 Uvicorn；后台任务状态通过私有 TOS 持久化。
+发布顺序为 `git commit → git push → 重建镜像 → 发布 veFaaS`。`Dockerfile` 基于 Python 3.11 与 Node 22，包含 FFmpeg/FFprobe、Chromium、Noto 字体及固定版本 HyperFrames、Remotion 和 captions。音轨识别调用 BytePlus Seed Speech，无需本地语音模型层。所有提示词和有限 skills 参考文件均随镜像发布。启动命令为 `./run.sh`，监听 `_FAAS_RUNTIME_PORT`（默认 8000），单进程 Uvicorn；后台任务状态通过私有 TOS 持久化。
 
 BytePlus `ap-southeast-1` 的 veFaaS 使用常驻最少 `1`、最多 `5` 个实例。新版本就绪后切换全部流量，保留上一版本用于回滚，并验证云端页面、多语言文件、私有 TOS 签名访问与发布状态。
 
@@ -489,19 +497,19 @@ BytePlus `ap-southeast-1` 的 veFaaS 使用常驻最少 `1`、最多 `5` 个实�
 
 若镜像已发布，仅修改部署脚本或文档，可加 `--reuse-published-image` 继续部署。脚本会比较 Dockerfile、应用、skills、静态页面、配置和依赖等构建输入；任何输入发生变化都会拒绝复用。状态分别记录镜像源码 commit 与部署脚本 commit。
 
-仅修改应用代码时，可使用 `--reuse-runtime-layers`：先校验已发布 commit 的 Dockerfile、Python 依赖和 Node runtime 与当前源码一致，再校验镜像配置、构建指令与依赖层摘要，直接复用仓库中已发布的运行时层，仅上传新应用、静态文件与配置层，避免重复传输 Whisper 模型。应用层从当前源码完整构建，已删除文件不会残留；依赖变化时拒绝此模式，必须完整重建。它要求 resumable 上传，仍发布当前提交的新镜像，不可与 `--reuse-published-image` 同时使用。
+仅修改应用代码时，可使用 `--reuse-runtime-layers`：先校验已发布 commit 的 Dockerfile、Python 依赖和 Node runtime 与当前源码一致，再校验镜像配置、构建指令与全部运行时层摘要，直接复用仓库中已发布的运行时层，仅上传新应用、静态文件与配置层。应用层从当前源码完整构建，已删除文件不会残留；依赖变化时拒绝此模式，必须完整重建。它要求 resumable 上传，仍发布当前提交的新镜像，不可与 `--reuse-published-image` 同时使用。
 
 新函数先完成 `Release`，等待状态为 `done`，再设置 `MinInstance=1` / `MaxInstance=5`；平台不允许对尚未发布的函数调整保留实例。
 
 原生镜像同步包含传输与运行时缓存两个阶段；传输的 `EndTime` 已出现时，`ImageCacheStatus` 仍可能为 `Creating`。脚本同时显示两个状态，等待缓存就绪且整体同步成功后才发布函数。
 
-云端环境变量清单：`BYTEPLUS_AK/SK`、`TOS_*`、`MODELARK_*`、五类模型 `*_ENDPOINT` / `*_API_KEY`、`SPEECH_*`、`ASR_RESOURCE_ID`、`ASSET_LIBRARY_*`、`NSFW_ENABLED`，以及 `ACCESS_PASSWORD` / `ACCESS_SECRET` / `ACCESS_COOKIE_SECURE`。运行时设置 `VIDEO_SKILLS_ROOT=/app/app/video_skills`、`VIDEO_TOOLS_RUNTIME_DIR=/opt/video-tools`、`WHISPER_CACHE_DIR=/opt/whisper-models`、`VIDEO_OUTPUT_DIR=/tmp/seedance-outputs`、`REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`；脚本仅复制配置引用的变量。
+云端环境变量清单：`BYTEPLUS_AK/SK`、`TOS_*`、`MODELARK_*`、五类模型 `*_ENDPOINT` / `*_API_KEY`、`SPEECH_*`、`ASR_RESOURCE_ID`、`ASSET_LIBRARY_*`、`NSFW_ENABLED`，以及 `ACCESS_PASSWORD` / `ACCESS_SECRET` / `ACCESS_COOKIE_SECURE`。运行时设置 `VIDEO_SKILLS_ROOT=/app/app/video_skills`、`VIDEO_TOOLS_RUNTIME_DIR=/opt/video-tools`、`VIDEO_OUTPUT_DIR=/tmp/seedance-outputs`、`REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium`；脚本仅复制配置引用的变量。
 
-`/healthz` 只返回健康状态与版本；登录后的 `/api/runtime` 返回不含密钥的依赖和 skills 就绪状态。镜像内可用 `python -m app.services.runtime_service --smoke` 验证实际剪辑、字幕渲染、时间线 lint、两种 Whisper 模型及音轨/时长。WebSocket 推送为实例内路由，跨实例通过快照轮询补齐；实例回收后的在途任务重启和跨实例写入仲裁仍需要任务队列与共享锁，TOS 快照本身不是分布式任务队列。
+`/healthz` 只返回健康状态与版本；登录后的 `/api/runtime` 返回不含密钥的依赖、skills 和 ASR 配置状态，不代表 ASR 连通性已验证。镜像内可用 `python -m app.services.runtime_service --smoke` 验证实际剪辑、字幕渲染、时间线 lint 及音轨/时长，不调用付费 ASR。WebSocket 推送为实例内路由，跨实例通过快照轮询补齐；实例回收后的在途任务重启和跨实例写入仲裁仍需要任务队列与共享锁，TOS 快照本身不是分布式任务队列。
 
 部署脚本显式启用 `RUNTIME_SMOKE_ENABLED=true`，可登录后 `POST /api/runtime/smoke` 在真实云端执行同一套合成测试，使用临时合成媒体并自动清理，不调用付费生成模型。同一实例只允许一项该检查同时运行；设置为 `false` 可关闭此诊断端点。
 
-2026-10-27 新版云端实测：上述媒体检查耗时 35.89 秒，剪辑与带字幕成片均为 1.52 秒，字幕可见、原声保持一致，时间线检查无错误，small/turbo 推理通过；五种 UI 语言在 Chrome 中切换成功，无页面脚本错误。已登录 WebSocket 正常连接；未登录连接在应用侧拒绝为 403，平台代理可能将握手失败转换为 HTTP 200，客户端仍不能升级到 WebSocket。
+历史云端验证（2026-10-27，迁移前运行时）：媒体检查耗时 35.89 秒，剪辑与带字幕成片均为 1.52 秒，字幕可见、原声保持一致，时间线无错误；当时的本地语音模型推理也通过。现版本已移除该模型，运行时检查验证媒体工具与 ASR 配置，不调用付费 ASR。五种 UI 语言切换及登录后 WebSocket 曾通过；未登录握手由应用拒绝，平台代理可能转换响应码，但客户端不能升级连接。
 
 同日提速前的云端 Chrome 验证完成 60 秒英语浪漫冒险样片：三段视频首次审核评分 83/86/88；修复轻微问题误触发循环后，优化约 201 秒、仅执行 1 轮，最终审核通过。原片 60.171 秒、优化片 60.200 秒，854×480，浏览器均可播放且无脚本错误。少量可接受的字幕识别偏差保留为建议；本次样片通过不代表所有输入都能自动达到无瑕疵成片。
 
@@ -511,7 +519,9 @@ BytePlus `ap-southeast-1` 的 veFaaS 使用常驻最少 `1`、最多 `5` 个实�
 
 优化报告记录各处理与上传阶段耗时。已验证的分镜时间轴随项目快照复用，签名 URL 续签不使缓存失效；分镜地址、编号、时长或内容标识变化时重新计算，避免重复下载整段视频。字幕合成保留输入帧率与原声；无字幕页时直接复制视频流。横竖屏、五语言字幕、音轨和帧数已有本地媒体回归验证。
 
-构建可复用本地 Whisper 缓存，仅将 `small.pt` 和 `large-v3-turbo.pt` 传入独立构建上下文并验证官方 SHA256；缓存缺失时自动下载。不复制用户目录或其他本地文件。
+2026-10-28 本地日语任务验证：8 个分镜全部首轮通过，成片复审通过；156.421 秒、854×480、24 fps，桌面与手机可播放，四项交付链接返回 200，24 条 SRT 时序有效，母片与字幕版解码音轨一致。少量 ASR 噪声尚未逐句听校，这不代表字幕全文无误。
+
+迁移到 Seed Speech 后的 Dockerfile 与依赖已变化，首次云端发布必须完整重建镜像，不可复用迁移前的运行时层。
 
 默认以 OCI 归档导出镜像，通过 Registry v2 每次 32 MiB 分段上传，持久化已确认分段的进度、自动刷新认证，并跳过已发布的镜像层；服务限制分段大小时自动减半。收到中断信号后完成当前分段再保存进度，已失效的上传状态会重新上传当前层。传输失败仅输出错误类型，不记录令牌或上传签名。`.run/oci-upload-checkpoint.json` 权限为 600，不进入 Git 或镜像。稳定网络可用 `--upload-mode buildx` 切换为普通推送。
 

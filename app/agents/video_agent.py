@@ -12,14 +12,14 @@ from app.prompt_skill import is_explicitly_adult, load_prompt, nsfw_content_requ
 from app.services.llm_service import llm_service
 from app.utils.logger import get_logger
 from app.utils.scene_identity import scene_content_fingerprint
-from app.utils.dialogue_language import requests_cantonese, dialogue_language_instruction
+from app.utils.dialogue_language import requests_cantonese, dialogue_language_instruction, character_language_instruction
 from app.models.schemas import Script, GeneratedImage, GeneratedVideo
 
 logger = get_logger("video_agent")
 
 
 class VideoAgent:
-    """视频生成分镜Agent - 调用seedance-2.0-off"""
+    """分镜视频生成与 Seedance 2.5 原视频编辑。"""
 
     def __init__(self):
         self.model = config.get('models.video.endpoint')
@@ -344,6 +344,8 @@ class VideoAgent:
         scene_definitions=None,
         asset_group_id: Optional[str] = None,
         asset_project_name: Optional[str] = None,
+        review_feedback: str = None,
+        check_active=None,
     ) -> GeneratedVideo:
         """根据参考图和分镜脚本生成单个分镜视频。
 
@@ -359,6 +361,8 @@ class VideoAgent:
         Returns:
             生成的视频
         """
+        if check_active:
+            check_active()
         scene_number = self._validated_scene_number(scene, scene_index)
         prepared_reference_images = self._prepare_reference_images_for_generation(
             reference_images=reference_images,
@@ -391,8 +395,22 @@ class VideoAgent:
             total_scenes=total_scenes,
         )
 
+        if review_feedback:
+            prompt += (
+                "\nPrevious attempt failed visual review. Correct the observed defects below "
+                "while preserving the scene's story, character identity, reference outfits, "
+                "duration and dialogue language. Do not add captions or repeat the defects.\n"
+                f"Review feedback: {review_feedback}\n"
+            )
+            logger.info(
+                "Scene %s: Applying review feedback to retry, feedback_chars=%s",
+                scene_number, len(review_feedback),
+            )
+
         logger.info(f"Scene {scene_number}: Generating video with reference images")
 
+        if check_active:
+            check_active()
         task_id = self._create_video_task_with_references(
             prompt=prompt,
             reference_image_urls=reference_urls,
@@ -403,7 +421,10 @@ class VideoAgent:
 
         logger.info(f"Scene {scene_number}: Created video task, task_id={task_id}")
 
-        video_result = self._wait_for_video(task_id)
+        video_result = (self._wait_for_video(task_id, check_active)
+                        if check_active else self._wait_for_video(task_id))
+        if check_active:
+            check_active()
 
         return GeneratedVideo(
             scene_number=scene_number,
@@ -597,7 +618,7 @@ class VideoAgent:
         from app.services.video_skill_service import video_skill_service
         parts = [video_skill_service.guidance("video")]
         cantonese = requests_cantonese(user_requirement_text, user_style_info)
-        if cantonese:
+        if cantonese and not character_language_instruction(characters):
             parts.insert(0, "AUDIO LANGUAGE LOCK: Native Hong Kong Cantonese (yue-HK). "
                 "Speak every dialogue line with authentic Cantonese pronunciation and Cantonese "
                 "grammar. Preserve the written Cantonese particles and words exactly. "
@@ -675,7 +696,9 @@ class VideoAgent:
 
         dialogue = getattr(scene, 'dialogue', '') or ''
         parts.append(f"对白/旁白：{dialogue if dialogue else '无'}")
-        language_lock = dialogue_language_instruction(user_requirement_text, user_style_info)
+        language_lock = character_language_instruction(characters)
+        if not language_lock:
+            language_lock = dialogue_language_instruction(user_requirement_text, user_style_info)
         if language_lock:
             parts.append(language_lock)
         parts.append(
@@ -731,7 +754,7 @@ class VideoAgent:
         )
 
         parts.append(self._extract_background_music_instruction(user_requirement_text))
-        if cantonese and dialogue:
+        if cantonese and dialogue and not character_language_instruction(characters):
             parts.append("最终声音约束：全程地道香港粤语发音。逐字说出以上粤语台词，"
                 "保留啲、嘅、喺、嗰、哋、咗等粤语词，不改写成普通话句子。"
                 "Native Cantonese speech only; dialogue timing and speaker identity must remain correct.")
@@ -928,13 +951,17 @@ class VideoAgent:
             parts.append(f"{stripped}{tag or ''}")
         return "".join(parts)
 
-    def _wait_for_video(self, task_id: str) -> Dict[str, str]:
+    def _wait_for_video(self, task_id: str, check_active=None) -> Dict[str, str]:
         """轮询等待视频生成完成，并提取最终视频 URL 与 seed。"""
         logger.info(f"Waiting for video task: {task_id}")
 
         elapsed = 0
         while elapsed < self.max_wait_time:
+            if check_active:
+                check_active()
             result = llm_service.query_video_task(task_id)
+            if check_active:
+                check_active()
             status = result.get('status')
 
             logger.info(f"Video task status: {status}, elapsed: {elapsed}s")
@@ -943,12 +970,17 @@ class VideoAgent:
                 video_result = llm_service.extract_video_result(result)
                 video_url = video_result.get('video_url')
                 if not video_url:
-                    raise ValueError(f"Video generation succeeded but video_url is missing: {result}")
-                logger.info(f"Video generation completed: {video_url}, seed={video_result.get('seed')}")
+                    raise ValueError(f"Video generation succeeded but video_url is missing: task_id={task_id}")
+                logger.info("Video generation completed: task_id=%s, seed=%s",
+                            task_id, video_result.get('seed'))
                 return video_result
 
             elif status == 'failed':
-                error_msg = f"Video generation failed: {result}"
+                error = result.get("error")
+                error = error if isinstance(error, dict) else {}
+                code = re.sub(r"[^A-Za-z0-9_.-]", "", str(error.get("code") or "unknown"))[:160]
+                # The exception also reaches retry logs and UI; keep the full payload out of it.
+                error_msg = f"Video generation failed: task_id={task_id}, code={code}"
                 logger.error(error_msg)
                 raise Exception(error_msg)
 
@@ -956,6 +988,56 @@ class VideoAgent:
             elapsed += self.poll_interval
 
         raise TimeoutError(f"Video generation timeout after {self.max_wait_time}s")
+
+    def edit_scene_video(self, *, script: Script, scene_number: int, source_url: str,
+                         source_duration: float, intervals: List[Dict],
+                         resolution: str = None, check_active=None) -> GeneratedVideo:
+        """One edit task for all local fault spans in a complete original scene."""
+        self._validate_script_scene_sequence(script)
+        if not 4 <= source_duration <= 30:
+            raise ValueError("Seedance 2.5 edit requires a 4–30 second reference video")
+        scene = script.scenes[scene_number-1]
+        cursor = 0.
+        edits = []
+        for interval in sorted(intervals, key=lambda item: item["start"]):
+            a, b = float(interval["start"]), float(interval["end"])
+            if not cursor <= a < b <= source_duration:
+                raise ValueError("Scene edit spans overlap or exceed the source duration")
+            cursor = b
+            edits.append(f"{a:.3f}–{b:.3f}s: {interval['instructions']}")
+        if not edits:
+            raise ValueError("Scene edit requires at least one interval")
+        prompt = (
+            "Edit the reference video. Times below are seconds from the start of this "
+            "reference video, not the master film. Change ONLY these disjoint intervals:\n"
+            + "\n".join(edits)
+            + "\nKeep every other frame, timing, camera movement, identity, costume, "
+            "props, lighting, dialogue and voice unchanged. Preserve original duration "
+            "and each event's timestamp; no retiming, new shots, captions or transitions. "
+            "Match motion and pose at BOTH boundaries of every edit. Correct the visible "
+            "defect directly; do not hide it behind occlusion or a reaction shot. "
+            "Keep lip movements synchronized to the reference audio; the original audio "
+            "will be retained in the final film.\n"
+            + character_language_instruction(script.characters)
+            + f"\nScene context (do not replay it): {scene.description}\nDialogue: {scene.dialogue}"
+        )
+        if check_active:
+            check_active()
+        task_id = llm_service.create_video_task_with_content(
+            model=self.model,
+            content=[{"type": "text", "text": prompt},
+                     {"type": "video_url", "video_url": {"url": source_url},
+                      "role": "reference_video"}],
+            duration=-1, aspect_ratio="adaptive", resolution=resolution or self.default_resolution,
+            omni_reference_task_type="edit")
+        logger.info("[OPTIMIZE] video edit scene=%s intervals=%s task=%s",
+                    scene_number, len(edits), task_id)
+        result = self._wait_for_video(task_id, check_active)
+        if check_active:
+            check_active()
+        return GeneratedVideo(scene_number=scene_number, url=result["video_url"],
+                              first_frame_url="", duration=round(source_duration), prompt=prompt,
+                              scene_content_hash=scene_content_fingerprint(scene), seed=result.get("seed"))
 
     def regenerate_video(
         self,
@@ -990,7 +1072,7 @@ class VideoAgent:
         """
         logger.log_agent_call("VideoAgent", "regenerate_video", {
             "scene_number": scene_number,
-            "feedback": feedback,
+            "feedback_chars": len(feedback or ""),
             "has_user_style_info": bool(user_style_info),
         })
 
@@ -1036,37 +1118,13 @@ class VideoAgent:
         resolution = (resolution or "").strip().lower() or self._parse_resolution(user_style_info)
         aspect_ratio = aspect_ratio or "9:16"
 
-        target = next((image for image in prepared_reference_images
-                       if str(image.name or "").startswith("repair-target-")), None)
-        if target is not None:
-            # A verified correction must determine the opening picture, rather than
-            # compete with unrelated portraits or flawed boundary reference images.
-            from app.services.video_skill_service import video_skill_service
-            prompt = (
-                video_skill_service.guidance("video")
-                + f"\nStyle: {script.style}\nLocalized repair: {scene.description}\n"
-                + "Animate the provided CORRECTED FIRST FRAME as one continuous local insert. "
-                "Keep its visible corrected detail, object inventory, composition, identity, "
-                "costume and lighting readable from the first frame onward. Perform only the "
-                "necessary local motion; do not replay the background scene or substitute "
-                "a reaction shot. No transitions, added objects, titles or captions.\n"
-                + f"Required corrected state and visible checks: {feedback}")
-            reference_image_url = target.url
-            task_id = llm_service.create_video_task_with_content(
-                model=self.model,
-                content=[{"type": "text", "text": prompt},
-                         {"type": "image_url", "role": "first_frame",
-                          "image_url": {"url": self._get_generation_reference_url(target)}}],
-                duration=duration, resolution=resolution)
-            logger.info("[REPAIR] generation mode=corrected_first_frame scene=%s", scene_number)
-        else:
-            task_id = self._create_video_task_with_references(
-                prompt=prompt,
-                reference_image_urls=reference_urls,
-                duration=duration,
-                resolution=resolution,
-                aspect_ratio=aspect_ratio,
-            )
+        task_id = self._create_video_task_with_references(
+            prompt=prompt,
+            reference_image_urls=reference_urls,
+            duration=duration,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
+        )
 
         video_result = self._wait_for_video(task_id)
 

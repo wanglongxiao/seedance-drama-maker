@@ -91,6 +91,7 @@ class VideoReviewAgent:
         output_language: str = "zh-CN",
         reference_image_urls: Optional[List[str]] = None,
         repair_requirement: Optional[str] = None,
+        boundary_image_urls: Optional[List[str]] = None,
     ) -> Tuple[bool, str, int]:
         """
         审核视频是否符合剧本要求
@@ -158,6 +159,15 @@ class VideoReviewAgent:
         )
         if repair_requirement:
             prompt += (
+                "\nLOCAL PATCH SCOPE: the attached video contains ONLY the short repair interval. "
+                "All video timestamps start at 0 within this patch. Do not demand the complete "
+                "scene's setup, subsequent action or dialogue inside it. Boundary stills show "
+                "adjacent master footage OUTSIDE the patch, not additional frames in its video. "
+                "Do not describe a boundary still as a cut inside this patch. They constrain "
+                "incoming/outgoing continuity; character references constrain identity. "
+                "Any timecodes in the reported fault are source-scene/master coordinates, "
+                "not patch timestamps and not evidence that the fault remains. Judge only "
+                "the actual visible patch and its immediate boundary continuity.\n"
                 "\nMANDATORY LOCAL REPAIR VERIFICATION: " + repair_requirement
                 + "\nAlso return repair_verified:boolean and repair_evidence:string. "
                 "repair_verified may be true ONLY when the specified defect is visibly corrected "
@@ -190,7 +200,16 @@ class VideoReviewAgent:
         # 添加视频
         content.append(review_video_input(video_url))
 
+        if boundary_image_urls:
+            content.append({"type": "text", "text":
+                "ADJACENT MASTER BOUNDARY STILLS, before then after. Outside the patch video; "
+                "not character reference portraits and not extra shots within the patch."})
+            content.extend({"type": "image_url", "image_url": {"url": url}}
+                           for url in boundary_image_urls)
+
         # 添加当前分镜的全部角色参考图
+        if normalized_reference_urls:
+            content.append({"type": "text", "text": "CHARACTER IDENTITY / OUTFIT REFERENCES:"})
         for reference_url in normalized_reference_urls:
             content.append({
                 "type": "image_url",
@@ -277,7 +296,10 @@ class VideoReviewAgent:
                     logger.info(f"[REVIEW] Video review PASSED with score {score}/{self.pass_threshold}")
                     return True, feedback, score
                 else:
-                    logger.warning(f"[REVIEW] Video review FAILED with score {score}/{self.pass_threshold}: {feedback}")
+                    logger.warning(
+                        "[REVIEW] Video review FAILED with score %s/%s feedback_chars=%s",
+                        score, self.pass_threshold, len(feedback or ""),
+                    )
                     return False, feedback, score
 
             except json.JSONDecodeError as e:

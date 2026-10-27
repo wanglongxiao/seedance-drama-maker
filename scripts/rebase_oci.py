@@ -1,4 +1,4 @@
-"""Reuse a validated published runtime without downloading its model blobs."""
+"""Reuse exactly matching published runtime layers without downloading their blobs."""
 import copy
 import hashlib
 import io
@@ -75,18 +75,14 @@ def rebase_runtime(source, target, published_image, published_commit, release_co
                       for h in c["history"]] for c in (old_config, config)]
         if histories[0] != histories[1]:
             raise ValueError("Build instructions changed")
-        model_instruction = config["history"][new_h - 1]["created_by"]
-        if "whisper._download" not in model_instruction or "/opt/whisper-models" not in model_instruction:
-            raise ValueError("Expected final runtime layer to contain verified Whisper models")
         for m, c in ((old_manifest, old_config), (manifest, config)):
             if len(m["layers"]) != len(c["rootfs"]["diff_ids"]):
                 raise ValueError("Manifest and rootfs disagree")
-        if (old_manifest["layers"][:old_n - 1] != manifest["layers"][:new_n - 1]
-                or old_config["rootfs"]["diff_ids"][:old_n - 1]
-                != config["rootfs"]["diff_ids"][:new_n - 1]):
+        if (old_manifest["layers"][:old_n] != manifest["layers"][:new_n]
+                or old_config["rootfs"]["diff_ids"][:old_n]
+                != config["rootfs"]["diff_ids"][:new_n]):
             raise ValueError("Runtime dependencies differ")
-        # Only the checksum-verified model layer may differ in build metadata.
-        # The caller first validates identical tracked runtime inputs with git.
+        # Every reused runtime layer must match exactly.
         manifest["layers"][:new_n] = old_manifest["layers"][:old_n]
         config["rootfs"]["diff_ids"][:new_n] = old_config["rootfs"]["diff_ids"][:old_n]
         config["history"][:new_h] = old_config["history"][:old_h]

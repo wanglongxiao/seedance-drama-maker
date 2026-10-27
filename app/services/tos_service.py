@@ -460,7 +460,7 @@ class TOSService:
 
     def list_object_keys(self, prefix: str) -> List[str]:
         if not self.client:
-            return []
+            raise RuntimeError("TOS SDK not available for object listing")
         try:
             object_keys: List[str] = []
             continuation_token = None
@@ -482,7 +482,7 @@ class TOSService:
             return object_keys
         except Exception as e:
             logger.error(f"Failed to list objects under prefix {prefix}: {str(e)}")
-            return []
+            raise RuntimeError("TOS object listing failed") from e
 
     # ==================== 项目状态持久化（跨实例恢复） ====================
     # 云端 veFaaS 为弹性多实例，进程内内存态会随实例回收/路由到其它实例而丢失。
@@ -525,7 +525,10 @@ class TOSService:
             logger.debug(f"Project state not found in TOS for {project_id}: {str(e)}")
             return None
 
-    def cleanup_project_directory(self, project_id: str, keep_prefixes: Optional[List[str]] = None) -> None:
+    def cleanup_project_directory(self, project_id: str, keep_prefixes: Optional[List[str]] = None,
+                                  keep_object_keys: Optional[List[str]] = None) -> None:
+        if not project_id or "/" in project_id or project_id in {".", ".."}:
+            raise ValueError("Invalid project identifier for cleanup")
         project_prefix = self.build_project_prefix(project_id).rstrip("/")
         keep_full_prefixes = [
             f"{project_prefix}/{str(prefix).strip().strip('/')}/"
@@ -533,10 +536,17 @@ class TOSService:
             if str(prefix).strip()
         ]
 
-        for object_key in self.list_object_keys(project_prefix):
-            if any(object_key.startswith(prefix) for prefix in keep_full_prefixes):
+        retained = set(keep_object_keys or [])
+        failed = 0
+        for object_key in self.list_object_keys(project_prefix + "/"):
+            if not object_key.startswith(project_prefix + "/"):
                 continue
-            self.delete_file(f"https://{self.bucket}.{self.endpoint}/{object_key}")
+            if object_key in retained or any(object_key.startswith(prefix) for prefix in keep_full_prefixes):
+                continue
+            if not self.delete_file(f"https://{self.bucket}.{self.endpoint}/{object_key}"):
+                failed += 1
+        if failed:
+            raise RuntimeError(f"TOS cleanup failed for {failed} objects")
 
 
 # 全局服务实例

@@ -9,6 +9,7 @@ import statistics
 import re
 import copy
 import time
+import uuid
 from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import urlparse
@@ -24,6 +25,44 @@ from app.utils.dialogue_language import requests_cantonese
 from app.utils.visual_review import DIGIT_EVIDENCE, concerns_digits, anatomy_review_options
 
 logger = get_logger("video_optimization")
+
+def transcript_language(text, declared_languages=()):
+    """Label subtitle text without treating every Latin alphabet as English."""
+    kana = len(re.findall(r"[\u3040-\u30ff]", text))
+    han = len(re.findall(r"[\u4e00-\u9fff]", text))
+    # Japanese includes kanji. Isolated foreign interjections must not override
+    # the predominant script of the transcript.
+    counts = {
+        "ja": kana + (han if kana >= 2 else 0),
+        "ko": len(re.findall(r"[\uac00-\ud7af\u1100-\u11ff]", text)),
+        "th": len(re.findall(r"[\u0e00-\u0e7f]", text)),
+        "ar": len(re.findall(r"[\u0600-\u06ff]", text)),
+        "zh": han if kana < 2 else 0,
+    }
+    dominant = max(counts, key=counts.get)
+    if counts[dominant]:
+        return dominant
+    if not re.search(r"[A-Za-z]", text):
+        return None
+    aliases = {
+        "en": ("english", "英语", "英語", "英文"),
+        "es": ("spanish", "西班牙语", "西班牙語", "español"),
+        "pt": ("portuguese", "葡萄牙语", "葡萄牙語", "português"),
+        "fr": ("french", "法语", "法語", "français"),
+        "de": ("german", "德语", "德語", "deutsch"),
+        "it": ("italian", "意大利语", "義大利語"),
+        "id": ("indonesian", "印尼语", "印尼語"),
+        "ms": ("malay", "马来语", "馬來語"),
+        "fil": ("filipino", "菲律宾语", "菲律賓語"),
+    }
+    known = set()
+    for value in declared_languages:
+        label = str(value).strip().lower()
+        for code, names in aliases.items():
+            if label in names or label == code or label.startswith(code + "-"):
+                known.add(code)
+    # Latin spelling alone is not evidence of the spoken language.
+    return next(iter(known)) if len(known) == 1 else "und"
 
 MODERATE_CAUSAL_STANDARD = (
     "\nSTRICT BLOCKING DECISION TEST: First state what actually happens in the complete film, "
@@ -54,6 +93,26 @@ def command(args, cwd=None):
 def probe(path):
     return json.loads(command(["ffprobe", "-v", "error", "-show_format",
                                "-show_streams", "-of", "json", path]))
+
+
+def extract_boundary_frame(source, target, timestamp):
+    """Seek within decodable video frames, not the longer audio/container tail."""
+    info = probe(source)
+    stream = next(s for s in info["streams"] if s["codec_type"] == "video")
+    numerator, denominator = stream.get("r_frame_rate", "24/1").split("/")
+    fps = float(numerator) / float(denominator) if float(denominator) else 24.
+    if not math.isfinite(fps) or fps <= 0:
+        fps = 24.
+    duration = float(stream.get("duration") or info["format"]["duration"])
+    seek = max(0., min(float(timestamp), duration - 2 / fps))
+    target = Path(target)
+    target.unlink(missing_ok=True)
+    command(["ffmpeg", "-v", "error", "-y", "-ss", seek,
+             "-i", source, "-frames:v", "1", target])
+    # FFmpeg can exit successfully with zero output frames at EOF.
+    if not target.is_file() or not target.stat().st_size:
+        raise RuntimeError("No decodable boundary frame was produced")
+    return seek
 
 
 def fast_triage_enabled():
@@ -223,7 +282,7 @@ def map_segments(segments, kept):
 
 def review_context_key(script, references):
     value = {"script": script, "references": [urlparse(u).path for u in references],
-             "review_policy_revision": 13,
+             "review_policy_revision": 14,
              "fast_triage": fast_triage_enabled(),
              "critical_regenerate_below": config.get("video_optimization.critical_regenerate_below", 40),
              "fast_review_max_tokens": config.get("video_optimization.fast_review_max_tokens", 1600),
@@ -309,17 +368,36 @@ def fragment_plan(issues, timeline, duration):
     return result
 
 
-def localized_scene_description(description, start, end):
-    """Give the patch model only storyboard beats intersecting its local time span."""
-    matches = list(re.finditer(r"(\d+(?:\.\d+)?)\s*[-–—~至]\s*(\d+(?:\.\d+)?)\s*秒\s*[:：]?", description))
-    if not matches:
-        return description
-    parts = []
-    for index, match in enumerate(matches):
-        if float(match[1]) < end and float(match[2]) > start:
-            limit = matches[index+1].start() if index+1 < len(matches) else len(description)
-            parts.append(description[match.end():limit].strip())
-    return "\n".join(parts) or description
+def scene_edit_groups(intervals, timeline, duration):
+    """Split master ranges at scene boundaries and combine overlapping edit requests."""
+    groups = {}
+    for interval in intervals:
+        a, b = float(interval["start"]), float(interval["end"])
+        if not (math.isfinite(a) and math.isfinite(b) and 0 <= a < b <= duration):
+            raise ValueError("Edit interval falls outside the master")
+        covered = 0.
+        for scene in timeline:
+            start, end = max(a, scene["start"]), min(b, scene["end"])
+            if start >= end:
+                continue
+            covered += end-start
+            groups.setdefault(scene["scene_number"], []).append(
+                dict(interval, start=start, end=end, scene_number=scene["scene_number"]))
+        if abs(covered-(b-a)) > .001:
+            raise ValueError("Edit interval has no complete scene timeline mapping")
+    result = []
+    for number, items in groups.items():
+        merged = []
+        for item in sorted(items, key=lambda r: r["start"]):
+            if merged and item["start"] < merged[-1]["end"]:
+                merged[-1]["end"] = max(item["end"], merged[-1]["end"])
+                merged[-1]["instructions"] = "\n".join(filter(None, [
+                    merged[-1].get("instructions") or merged[-1].get("evidence"),
+                    item.get("instructions") or item.get("evidence")]))
+            else:
+                merged.append(dict(item))
+        result.append((number, merged))
+    return result
 
 
 def review_category(value):
@@ -385,29 +463,67 @@ def reorder_ranges(kept, timeline, order):
     return ordered
 
 
+def separate_segment_words(segments):
+    """Keep two Latin words distinct when the provider splits them into adjacent utterances."""
+    previous = ""
+    for segment in segments:
+        text = segment["text"]
+        if re.search(r"[A-Za-z0-9]$", previous) and re.match(r"[A-Za-z0-9]", text):
+            segment["text"] = " " + text
+            if segment.get("words"):
+                segment["words"][0]["word"] = " " + segment["words"][0]["word"].lstrip()
+        previous = segment["text"]
+    return segments
+
+
 def timed_asr_segments(result, duration):
     """Keep native audio words and millisecond timings, including Cantonese particles."""
     segments = []
+    def bounds(item):
+        try:
+            start, end = float(item["start_time"])/1000, float(item["end_time"])/1000
+        except (KeyError, TypeError, ValueError):
+            return None
+        if (math.isfinite(start) and math.isfinite(end)
+                and 0 <= start < min(end, duration) and end <= duration+.25):
+            return start, min(end, duration)
+        return None
+
+    normalize = lambda text: re.sub(r"[\W_]+", "", text.lower())
     for utterance in result.get("utterances", []):
         words = []
+        invalid_words = False
         for item in utterance.get("words", []):
-            text = str(item.get("text", ""))
+            text = str(item.get("text") or "")
             if not text.strip():
                 continue
-            start, end = float(item.get("start_time", -1))/1000, float(item.get("end_time", -1))/1000
-            if start < 0 or end <= start:
+            timing = bounds(item)
+            if timing is None:
                 if words and re.fullmatch(r"[，。！？、；：,.!?;:]+", text):
                     words[-1]["word"] += text
                     continue
-                raise ValueError("ASR word has no usable audio timestamps")
-            if not (math.isfinite(start) and math.isfinite(end) and end <= duration+.25):
-                raise ValueError("ASR timestamp falls outside the soundtrack")
-            words.append({"word": text, "start": start, "end": min(end, duration),
-                          "probability": float(item.get("confidence", 0))})
-        if not words:
-            start, end = float(utterance.get("start_time", -1))/1000, float(utterance.get("end_time", -1))/1000
-            if utterance.get("text") and 0 <= start < end <= duration+.25:
-                segments.append({"start": start, "end": min(end, duration), "text": utterance["text"], "words": []})
+                invalid_words = True
+                continue
+            start, end = timing
+            # Native ASR supplies separate Latin tokens without leading spaces.
+            # Keep separators in the timed words too: caption renderers join them.
+            if (words and re.search(r"[A-Za-z0-9]$", words[-1]["word"])
+                    and re.match(r"[A-Za-z0-9]", text)):
+                text = " " + text
+            word = {"word": text, "start": start, "end": end}
+            confidence = item.get("confidence")
+            if isinstance(confidence, (int, float)) and math.isfinite(confidence):
+                word["probability"] = confidence
+            words.append(word)
+        text = str(utterance.get("text") or "")
+        incomplete = text and normalize(text) != normalize("".join(w["word"] for w in words))
+        if not words or invalid_words or incomplete:
+            timing = bounds(utterance)
+            if text.strip() and timing:
+                segments.append({"start": timing[0], "end": timing[1], "text": text,
+                                 "words": [], "timing_source": "utterance"})
+            elif text.strip() or words or invalid_words:
+                raise ValueError("ASR speech has no complete usable audio timestamps")
             continue
         group = []
         for word in words:
@@ -422,7 +538,25 @@ def timed_asr_segments(result, duration):
                              "text": "".join(w["word"] for w in group), "words": group})
     if result.get("text", "").strip() and not segments:
         raise ValueError("ASR speech has no usable utterance timestamps")
-    return sorted(segments, key=lambda item: item["start"])
+    if result.get("text") and normalize(result["text"]) != normalize("".join(s["text"] for s in segments)):
+        raise ValueError("ASR timed utterances do not cover the complete transcript")
+    return separate_segment_words(sorted(segments, key=lambda item: item["start"]))
+
+
+def asr_scene_ranges(timeline, duration):
+    """Partition on verified source scene boundaries without dropping gaps or the audio tail."""
+    edges = {0., duration}
+    for scene in timeline or []:
+        for key in ("start", "end"):
+            try:
+                value = float(scene[key])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("ASR scene boundary is invalid")
+            if not math.isfinite(value) or value < 0 or value > duration+.25:
+                raise ValueError("ASR scene boundary is outside the soundtrack")
+            edges.add(min(value, duration))
+    edges = sorted(edges)
+    return [(a, b) for a, b in zip(edges, edges[1:]) if b > a]
 
 
 def subtitle_homophones(segments, script, timeline, language):
@@ -515,9 +649,13 @@ class VideoOptimizationService:
         previous = getattr(project, "optimization_report", None) or {}
         old_timeline = previous.get("scene_timeline", [])
         old_duration = previous.get("input_duration")
+        cleaned = getattr(project, "temporary_assets_cleaned", False)
+        if cleaned and not old_timeline:
+            old_timeline = getattr(project, "merged_scene_timeline", [])
+            old_duration = old_timeline[-1]["end"] if old_timeline else None
         numbers = sorted(v.scene_number for v in project.videos)
         try:
-            valid = (previous.get("scene_sources_sha256") == scene_sources_key(project)
+            valid = ((cleaned or previous.get("scene_sources_sha256") == scene_sources_key(project))
                      and old_duration > 0 and math.isfinite(old_duration)
                      and bool(old_timeline) and len(set(numbers)) == len(numbers)
                      and [r["scene_number"] for r in old_timeline] == numbers
@@ -535,6 +673,8 @@ class VideoOptimizationService:
             return [dict(scene_number=r["scene_number"],
                          start=r["start"] * duration / old_duration,
                          end=r["end"] * duration / old_duration) for r in old_timeline]
+        if cleaned:
+            raise ValueError("Retained master scene timeline is invalid; scene assets have been cleaned")
         cache = ensure_project_temp_subdir(project.project_id, "optimization", "sources")
         clips = []
         for video in sorted(project.videos, key=lambda item: item.scene_number):
@@ -610,19 +750,70 @@ class VideoOptimizationService:
         check_active()
         return min(start, generated_duration-required_duration)
 
-    def prepare_fragment(self, project, source, patch_url, start, end, check_active, generated_start=0):
+    def prepare_scene_edit_input(self, project, source, scene_range, check_active):
+        """Reference the complete current scene, including any earlier accepted repairs."""
+        cache = ensure_project_temp_subdir(project.project_id, "optimization", "repair",
+                                           "edit-"+uuid.uuid4().hex[:12])
+        target = cache/"original-scene.mp4"
+        duration = scene_range["end"]-scene_range["start"]
+        if not 4 <= duration <= 30:
+            raise ValueError("Original scene must be 4–30 seconds for Seedance video editing")
+        check_active()
+        command(["ffmpeg", "-v", "error", "-y", "-ss", scene_range["start"], "-i", source,
+                 "-t", duration, "-map", "0:v:0", "-map", "0:a:0?", "-vf", "fps=24",
+                 "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p",
+                 "-c:a", "aac", "-movflags", "+faststart", target])
+        check_active()
+        url = tos_service.upload_file(str(target), project_id=project.project_id,
+                                     custom_filename=f"edit-source-{uuid.uuid4().hex[:12]}.mp4",
+                                     category="videos/optimization/references")
+        return {"path": str(target), "url": url, "duration": duration}
+
+    def align_scene_edit(self, project, edited_url, original, check_active):
+        """Reject retimed edits; align only sub-frame/encoder rounding before slicing."""
+        cache = Path(original["path"]).parent
+        edited = self.download(edited_url, cache/"edited-scene.mp4", check_active)
+        info = probe(edited)
+        stream = next(s for s in info["streams"] if s["codec_type"] == "video")
+        actual = float(stream.get("duration") or info["format"]["duration"])
+        expected = original["duration"]
+        if not math.isfinite(actual) or abs(actual-expected) > .10:
+            raise ValueError("Video edit changed the original scene duration")
+        target = cache/"aligned-scene.mp4"
+        check_active()
+        command(["ffmpeg", "-v", "error", "-y", "-i", edited, "-an",
+                 "-vf", f"setpts={expected/actual:.12f}*(PTS-STARTPTS),fps=24,tpad=stop_mode=clone:stop_duration=0.1",
+                 "-t", expected, "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+                 "-pix_fmt", "yuv420p", target])
+        return str(target)
+
+    def prepare_fragment(self, project, source, patch_url, start, end, check_active, generated_start=0,
+                         generated_path=None):
         """Trim minimum-length model output to the fault span, keeping original audio."""
         cache = ensure_project_temp_subdir(project.project_id, "optimization", "repair",
             hashlib.sha256(f"{patch_url.split('?')[0]}:{start}:{end}:{generated_start}".encode()).hexdigest()[:16])
-        patch = self.download(patch_url, cache/"generated.mp4", check_active)
-        available = float(probe(patch)["format"]["duration"])
-        if not math.isfinite(generated_start) or generated_start < 0 or available < generated_start+end-start:
+        patch = Path(generated_path) if generated_path else self.download(patch_url, cache/"generated.mp4", check_active)
+        patch_info = probe(patch)
+        patch_stream = next(s for s in patch_info["streams"] if s["codec_type"] == "video")
+        available = float(patch_stream.get("duration") or patch_info["format"]["duration"])
+        required = generated_start + end - start
+        rate = patch_stream.get("avg_frame_rate") or "24/1"
+        numerator, denominator = map(float, rate.split("/"))
+        fps = numerator / denominator if denominator and numerator > 0 else 24.
+        tolerance = min(.15, max(2 / fps, 2 / 24)) + .001
+        if (not all(math.isfinite(v) for v in (generated_start, available, start, end))
+                or generated_start < 0 or end <= start or generated_start >= available
+                or required - available > tolerance):
             raise ValueError("Replacement footage is shorter than its required interval")
+        if required > available:
+            logger.info("[OPTIMIZE] padding frame rounding deficit=%.6fs tolerance=%.6fs",
+                        required - available, tolerance)
         info = probe(source)
         stream = next(s for s in info["streams"] if s["codec_type"] == "video")
         target = cache/"patch.mp4"
         args = ["ffmpeg", "-v", "error", "-y", "-ss", generated_start, "-i", patch, "-ss", start, "-i", source,
-                "-map", "0:v:0", "-vf", f"scale={stream['width']}:{stream['height']},setsar=1,fps=24",
+                "-map", "0:v:0", "-vf", f"scale={stream['width']}:{stream['height']},setsar=1,fps=24,"
+                f"tpad=stop_mode=clone:stop_duration={tolerance:.6f}",
                 "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p"]
         if any(s["codec_type"] == "audio" for s in info["streams"]):
             args += ["-map", "1:a:0", "-c:a", "aac", "-ar", "48000"]
@@ -717,7 +908,12 @@ class VideoOptimizationService:
         """Show short actions explicitly when a whole-film viewer may miss them."""
         import io
         from PIL import Image, ImageDraw
-        duration = float(probe(source)["format"]["duration"])
+        info = probe(source)
+        duration = float(info["format"]["duration"])
+        stream = next((s for s in info.get("streams", []) if s["codec_type"] == "video"), {})
+        numerator, denominator = map(float, stream.get("r_frame_rate", "24/1").split("/"))
+        fps = numerator / denominator if denominator and numerator > 0 else 24.
+        last_frame = max(0., float(stream.get("duration") or duration) - 2 / fps)
         identity = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
         records = []
         for window in windows[:8]:
@@ -725,7 +921,8 @@ class VideoOptimizationService:
             if not (math.isfinite(a) and math.isfinite(b) and 0 <= a < b <= duration):
                 raise ValueError("Verification window falls outside its master")
             # Include context on both sides; every label is a master timestamp.
-            left, right = max(0., a-.3), min(duration-.001, b+.3)
+            right = min(last_frame, b+.3)
+            left = min(right, max(0., a-.3))
             count = max(2, min(24, math.ceil((right-left)*6)+1))
             times = [left+(right-left)*i/(count-1) for i in range(count)]
             for page in range(0, len(times), 12):
@@ -738,7 +935,7 @@ class VideoOptimizationService:
                         "ffmpeg", "-v", "error", "-ss", str(second), "-i", str(source),
                         "-frames:v", "1", "-vf", "scale=428:240:force_original_aspect_ratio=decrease,"
                         "pad=428:240:(ow-iw)/2:(oh-ih)/2",
-                        "-f", "image2pipe", "-vcodec", "mjpeg", "-",
+                        "-f", "image2pipe", "-vcodec", "png", "-threads", "1", "-",
                     ], capture_output=True, check=True).stdout
                     x, y = index % 3 * 428, index // 3 * 264
                     with Image.open(io.BytesIO(frame)) as image:
@@ -992,6 +1189,13 @@ class VideoOptimizationService:
                 "Story:\n" + json.dumps(compact_script, ensure_ascii=False, default=str)
                 + "\nActual speech:\n" + json.dumps(transcript, ensure_ascii=False)
                 + "\nEdits/windows:\n" + json.dumps(candidate_context, ensure_ascii=False)
+                + MODERATE_CAUSAL_STANDARD
+                + "\nA scripted reveal, printed image, supernatural transformation or later "
+                "return to a blank object is not itself a prop continuity error. Follow the "
+                "complete story's declared changes in order. Clear versus blurry detail is "
+                "advisory when the reveal and its later consequence remain coherent; an "
+                "actual contradictory object identity or missing indispensable event remains blocking.\n"
+                + DIGIT_EVIDENCE
             )
         if isinstance(candidates, dict) and candidates.get("subtitles", True):
             instructions += (
@@ -1012,16 +1216,34 @@ class VideoOptimizationService:
         result = llm_service.chat_completion(
             model=config.get("models.video_review.endpoint"), messages=[{"role": "user", "content": content}],
             temperature=.1,
-            **({"thinking": {"type": "disabled"},
+            **(anatomy_review_options() if fast and isinstance(candidates, dict)
+               and candidates.get("verification_windows") else
+               {"thinking": {"type": "disabled"},
                 "max_tokens": int(config.get("video_optimization.fast_review_max_tokens", 1600))}
                if fast else
                ({"max_tokens": int(config.get("video_optimization.review_max_tokens", 4000))}
                 | (anatomy_review_options() if isinstance(candidates, dict)
                    and candidates.get("verification_windows") else {}))))
-        text = result["choices"][0]["message"]["content"].strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("```", 1)[0]
-        report = json.loads(text)
+        def parse_result(response):
+            text = response["choices"][0]["message"]["content"].strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1].rsplit("```", 1)[0]
+            return json.loads(text)
+
+        try:
+            report = parse_result(result)
+        except (ValueError, IndexError):
+            if not (fast and isinstance(candidates, dict) and candidates.get("verification_windows")):
+                raise
+            # Reasoning can exhaust the output budget before producing complete JSON.
+            # Retry the same focused evidence once with a structured, concise response.
+            logger.warning("Targeted verification returned invalid JSON; retrying once without reasoning")
+            result = llm_service.chat_completion(
+                model=config.get("models.video_review.endpoint"),
+                messages=[{"role": "user", "content": content}], temperature=.1,
+                thinking={"type": "disabled"}, response_format={"type": "json_object"},
+                max_tokens=int(config.get("video_optimization.fast_review_max_tokens", 1600)))
+            report = parse_result(result)
         if not isinstance(report.get("issues"), list) or not isinstance(report.get("approved"), bool):
             raise ValueError("Optimization review returned invalid schema")
         for issue in report["issues"]:
@@ -1058,139 +1280,203 @@ class VideoOptimizationService:
                 logger.warning("Story-impact audit unavailable: %s", type(error).__name__)
         return report
 
-    def transcribe(self, source, directory, requirement_text="", timeline=None, check_active=None):
-        import whisper
+    def confirm_fast_digits(self, report, url, source, directory, script, transcript,
+                            references, check_active, context=None):
+        """Recheck only blocking digit allegations, with actual consecutive master frames."""
+        suspects = [i for i in report.get("issues", [])
+                    if review_category(i.get("category")) == "anatomy"
+                    and concerns_digits(i.get("evidence", ""))]
+        if not suspects:
+            return report
+        try:
+            verification = independent_review_windows(suspects)
+            verification.update(context or {})
+            verification["frame_evidence"] = self.window_evidence(
+                source, directory, verification["verification_windows"], check_active)
+            verified = self.review(url, script, transcript, references, verification)
+            check_active()
+            retained = [i for i in report["issues"] if i not in suspects]
+            for suspect in suspects:
+                matches = [i for i in verified["issues"] if matching_review_issue(i, suspect)]
+                if matches:
+                    retained.extend(matches)
+                elif verified.get("approved") is True:
+                    report.setdefault("advisories", []).append(
+                        dict(suspect, confirmed=False, decision_reason="digit_evidence_not_confirmed"))
+                else:
+                    retained.append(suspect)
+            report["issues"] = retained
+            report["approved"] = not retained
+            report["digit_verification"] = verified
+        except Exception as error:
+            report["digit_verification_error"] = type(error).__name__
+            logger.warning("Targeted digit verification unavailable: %s", type(error).__name__)
+        return report
+
+    def transcribe(self, source, directory, requirement_text="", timeline=None, check_active=None,
+                   script=None):
         import numpy as np
+        from app.services.asr_service import asr_service
         active = check_active or (lambda: None)
         active()
         key = hashlib.sha256(source.read_bytes()).hexdigest()
-        model_name = str(config.get("video_optimization.whisper_model", "small"))
         cantonese = requests_cantonese(requirement_text)
-        native = cantonese or (bool(config.get("video_optimization.native_chinese_asr", True)) and
-            bool(re.search(r"中文(?:对白|對白|旁白|对话|對話)|普通话|普通話|国语|國語|mandarin|chinese\s+(?:dialogue|speech|voice)",
-                           requirement_text, re.IGNORECASE)))
-        if cantonese:
-            model_name = str(config.get("video_optimization.whisper_cantonese_model", "turbo"))
+        # ASR slices PCM at 16 kHz sample boundaries. Timeline rescaling can
+        # change only float rounding while leaving every requested sample intact.
+        scene_boundaries = [
+            (round(s["start"] * 16000) / 16000, round(s["end"] * 16000) / 16000)
+            for s in timeline or []
+        ]
+        declared_languages = [
+            getattr(character, "dialogue_language", "")
+            for character in getattr(script, "characters", []) or []
+        ]
+        settings = {"transcription_revision": 11, "asr_resource_id": asr_service.resource_id,
+                    "cantonese_required": cantonese, "subtitle_source": "seed_speech",
+                    "declared_languages": declared_languages,
+                    "asr_scene_boundaries": [list(pair) for pair in scene_boundaries],
+                    "asr_request": {"enable_itn": False, "enable_punc": True,
+                                    "enable_ddc": False, "show_utterances": True,
+                                    "enable_auto_lang": True}}
         cache = directory / "transcript.json"
         cached_audio = None
         if cache.exists():
             data = json.loads(cache.read_text())
-            same_settings = (data.get("whisper_model") == model_name
-                    and data.get("transcription_revision") == 5
-                    and data.get("cantonese_required") == cantonese
-                    and data.get("native_asr_required") == native
-                    and (not native or data.get("subtitle_source") == "seed_speech"))
+            if isinstance(data.get("asr_scene_boundaries"), list):
+                data["asr_scene_boundaries"] = [
+                    [round(value * 16000) / 16000 for value in pair]
+                    for pair in data["asr_scene_boundaries"]
+                ]
+            same_settings = all(data.get(name) == value for name, value in settings.items())
+            if same_settings and data.get("language") != "yue":
+                data["language"] = transcript_language(data.get("text", ""), declared_languages)
             if data.get("source_sha256") == key and same_settings:
+                cache.write_text(json.dumps(data, ensure_ascii=False, indent=2))
                 return data
             if same_settings:
                 cached_audio = data
-        audio = whisper.load_audio(str(source))
-        audio_key = hashlib.sha256(audio.tobytes()).hexdigest()
+        pcm = subprocess.run(["ffmpeg", "-v", "error", "-i", str(source), "-vn",
+            "-ar", "16000", "-ac", "1", "-f", "s16le", "-"],
+            capture_output=True, check=True).stdout
+        active()
+        audio = np.frombuffer(pcm, dtype="<i2")
+        audio_key = hashlib.sha256(pcm).hexdigest()
         if cached_audio and cached_audio.get("audio_sha256") == audio_key:
             cached_audio["source_sha256"] = key
             cache.write_text(json.dumps(cached_audio, ensure_ascii=False, indent=2))
             logger.info("[OPTIMIZE] Reused exact unchanged audio transcript after picture repair")
             return cached_audio
-        if len(audio) == 0 or np.sqrt(np.mean(audio ** 2)) < .0005:
-            data = {"segments": [], "language": None}
+        if len(audio) == 0 or not np.any(audio):
+            data = {"segments": [], "text": "", "language": None, "asr_status": "no_speech"}
         else:
-            data, cloud_error = None, None
-            if native:
-                try:
-                    from app.services.asr_service import asr_service
-                    wav = subprocess.run(["ffmpeg", "-v", "error", "-i", str(source), "-vn",
-                        "-ar", "16000", "-ac", "1", "-f", "wav", "-"], capture_output=True, check=True).stdout
-                    active()
-                    url = tos_service.upload_bytes(wav, filename=f"soundtrack-{key[:12]}.wav",
-                        content_type="audio/wav", project_id=directory.name, category="videos/optimization")
-                    result = asr_service.recognize_result(url, format="wav",
-                        request_params={"enable_itn": False, "enable_punc": True}, check_active=active)
-                    active()
-                    segments = timed_asr_segments(result, len(audio)/16000)
-                    records = []
-                    for scene in (timeline or []) if cantonese else []:
-                        text = "".join(s["text"] for s in segments
-                            if s["start"] < scene["end"] and s["end"] > scene["start"])
-                        if text:
-                            markers = sorted(set(re.findall(r"[啲嘅喺嚟咗哋嗰㗎唔冇咁]", text)))
-                            records.append(dict(scene_number=scene["scene_number"], evidence_words=markers,
-                                status="cantonese_evidence" if markers else "uncertain"))
-                    data = {"segments": segments, "language": "yue" if any(
-                        r["status"] == "cantonese_evidence" for r in records) else "zh",
-                        "subtitle_source": "seed_speech", "dialect_audit": records}
-                    logger.info("[OPTIMIZE] Native timed ASR: segments=%s dialect=%s",
-                        len(segments), [(r["scene_number"], r["status"]) for r in records])
-                except Exception as error:
-                    active()
-                    cloud_error = type(error).__name__
-                    logger.warning("Native timed transcription unavailable: %s", cloud_error)
-            if data is None:
-                logger.info("Whisper transcribing actual soundtrack, samples=%s", len(audio))
-                model = whisper.load_model(model_name,
-                    device=str(config.get("video_optimization.whisper_device", "cpu")),
-                    download_root=str(Path(config.get("video_optimization.whisper_cache_dir")).expanduser()))
-                data = model.transcribe(audio, word_timestamps=True, fp16=False, verbose=False,
-                    condition_on_previous_text=False)
-                minimum_logprob = float(config.get(
-                    "video_optimization.whisper_min_avg_logprob", -1.0))
-                original_segments = data["segments"]
-                data["segments"] = [s for s in data["segments"]
-                    if float(s.get("no_speech_prob", 0)) < .7 and str(s.get("text", "")).strip()
-                    and math.isfinite(float(s.get("avg_logprob", 0)))
-                    and float(s.get("avg_logprob", 0)) >= minimum_logprob
-                    and float(s["end"]) > float(s["start"])]
-                logger.info("[OPTIMIZE] Whisper retained=%s discarded_unreliable=%s",
-                            len(data["segments"]), len(original_segments) - len(data["segments"]))
-                for segment in data["segments"]:
-                    segment["words"] = [w for w in segment.get("words", [])
-                        if str(w.get("word", "")).strip() and float(w["end"]) > float(w["start"])]
-                data["text"] = "".join(s["text"] for s in data["segments"])
-                data["subtitle_source"] = "whisper"
-                if cloud_error:
-                    data["cloud_asr_error"] = cloud_error
-                    data["dialect_review"] = "uncertain"
+            import io
+            import wave
+            from concurrent.futures import ThreadPoolExecutor
+            ranges = asr_scene_ranges(timeline, len(audio)/16000)
+            def recognize_range(interval):
+                active()
+                start, end = interval
+                chunk = pcm[round(start*16000)*2:round(end*16000)*2]
+                if not chunk or not np.any(np.frombuffer(chunk, dtype="<i2")):
+                    return []
+                stream = io.BytesIO()
+                with wave.open(stream, "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(16000)
+                    wav.writeframes(chunk)
+                url = tos_service.upload_bytes(stream.getvalue(),
+                    filename=f"soundtrack-{key[:12]}-{round(start*1000)}.wav",
+                    content_type="audio/wav", project_id=directory.name, category="videos/optimization")
+                active()
+                # Automatic multilingual routing also preserves native code switching.
+                result = asr_service.recognize_result(url, format="wav",
+                    request_params=settings["asr_request"], check_active=active)
+                active()
+                parts = timed_asr_segments(result, len(chunk)/32000)
+                for part in parts:
+                    part["start"] += start
+                    part["end"] += start
+                    for word in part["words"]:
+                        word["start"] += start
+                        word["end"] += start
+                return parts
+            workers = max(1, min(4, int(config.get("video_optimization.asr_workers", 3))))
+            with ThreadPoolExecutor(max_workers=min(workers, len(ranges))) as executor:
+                segments = [part for parts in executor.map(recognize_range, ranges) for part in parts]
+            active()
+            segments = separate_segment_words(segments)
+            text = "".join(s["text"] for s in segments)
+            records = []
+            for scene in (timeline or []) if cantonese else []:
+                scene_text = "".join(s["text"] for s in segments
+                    if s["start"] < scene["end"] and s["end"] > scene["start"])
+                if scene_text:
+                    markers = sorted(set(re.findall(r"[啲嘅喺嚟咗哋嗰㗎唔冇咁]", scene_text)))
+                    records.append(dict(scene_number=scene["scene_number"], evidence_words=markers,
+                        status="cantonese_evidence" if markers else "uncertain"))
+            language = transcript_language(text, declared_languages)
+            if any(r["status"] == "cantonese_evidence" for r in records):
+                language = "yue"
+            data = {"segments": segments, "text": text, "language": language,
+                    "dialect_audit": records, "asr_status": "completed" if text else "no_speech"}
+            logger.info("[OPTIMIZE] Seed Speech timed ASR: resource=%s segments=%s chars=%s",
+                        asr_service.resource_id, len(segments), len(text))
         data["source_sha256"] = key
         data["audio_sha256"] = audio_key
-        data["whisper_model"] = model_name
-        data["transcription_revision"] = 5
-        data["cantonese_required"] = cantonese
-        data["native_asr_required"] = native
+        data.update(settings)
+        active()
         cache.write_text(json.dumps(data, ensure_ascii=False, indent=2))
         return data
 
     def verify_narration_leaks(self, source, directory, segments, script, timeline, check_active):
-        """An independent ASR must agree before any unrequested speech is removed."""
-        import whisper
+        """Corroborate production narration using a separate ASR resource; keep uncertain audio."""
+        from app.services.asr_service import ASRService, asr_service
         candidates = narration_leak_candidates(segments, script, timeline)
         if not candidates:
             return []
+        resource = config.get("video_optimization.narration_audit_resource_id", "volc.bigasr.auc")
+        if not resource or resource == asr_service.resource_id:
+            return []
+        audit_service = ASRService()
+        audit_service.resource_id = resource
         cache = directory/"audio-audit.json"
         key = hashlib.sha256(source.read_bytes()).hexdigest()
         context = hashlib.sha256(json.dumps(candidates, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         if cache.exists():
             data = json.loads(cache.read_text())
-            if data.get("source_sha256") == key and data.get("context_sha256") == context:
+            if (data.get("source_sha256") == key and data.get("context_sha256") == context
+                    and data.get("audit_resources") == [asr_service.resource_id, resource]):
                 return data["verified_ranges"]
-        audio = whisper.load_audio(str(source))
-        model = whisper.load_model("turbo", device=str(config.get("video_optimization.whisper_device", "cpu")),
-            download_root=str(Path(config.get("video_optimization.whisper_cache_dir")).expanduser()))
         verified, audits = [], []
         han = lambda text: "".join(re.findall(r"[\u4e00-\u9fff]", text))
         for candidate in candidates:
             check_active()
             a, b = candidate["start"], candidate["end"]
-            result = model.transcribe(audio[int(a*16000):int(b*16000)],
-                language="zh", word_timestamps=True, fp16=False, verbose=False,
-                condition_on_previous_text=False)
+            try:
+                wav = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(a), "-i", str(source),
+                    "-t", str(b-a), "-vn", "-ar", "16000", "-ac", "1", "-f", "wav", "-"],
+                    capture_output=True, check=True).stdout
+                check_active()
+                url = tos_service.upload_bytes(wav, filename=f"audio-audit-{uuid.uuid4().hex[:12]}.wav",
+                    content_type="audio/wav", project_id=directory.name, category="videos/optimization")
+                result = audit_service.recognize_result(url, format="wav",
+                    request_params={"enable_itn": False, "enable_ddc": False}, check_active=check_active)
+                check_active()
+            except Exception as error:
+                check_active()
+                logger.warning("Narration corroboration unavailable: %s", type(error).__name__)
+                continue
             primary = han("".join(s["text"] for s in candidate["utterances"]))
-            independent = han(result["text"])
-            agreed = SequenceMatcher(None, primary, independent, autojunk=False).find_longest_match().size
-            audits.append(dict(start=a, end=b, independent_text=result["text"], agreed_characters=agreed))
+            secondary = han(result.get("text", ""))
+            agreed = SequenceMatcher(None, primary, secondary, autojunk=False).find_longest_match().size
+            audits.append(dict(start=a, end=b, corroborating_text=result.get("text", ""), agreed_characters=agreed))
             if agreed >= 8:
                 verified.append(dict(start=a, end=b, scene_number=candidate["scene_number"],
-                    evidence="Two ASRs agree on spoken production description in a shot with no dialogue",
+                    evidence="Two ASR resources corroborate spoken production description in a shot with no dialogue",
                     actual_text="".join(s["text"] for s in candidate["utterances"])))
         cache.write_text(json.dumps(dict(source_sha256=key, context_sha256=context,
+            audit_resources=[asr_service.resource_id, resource],
             verified_ranges=verified, audits=audits), ensure_ascii=False, indent=2))
         return verified
 
@@ -1387,7 +1673,7 @@ class VideoOptimizationService:
         notify("source", "completed")
         notify("transcribe", "running")
         transcript = self.transcribe(source, directory, project.combined_input or project.user_input,
-            timeline, check_active) if has_audio else {"segments": [], "language": None}
+            timeline, check_active, script=project.script) if has_audio else {"segments": [], "language": None}
         notify("transcribe", "completed")
         raw_segments = transcript["segments"]
         transcript = dict(transcript)
@@ -1410,7 +1696,8 @@ class VideoOptimizationService:
         script = project.script.model_dump(mode="json")
         script["production_requirements"] = project.combined_input or project.user_input
         (directory / "storyboard.json").write_text(json.dumps(script, ensure_ascii=False, indent=2))
-        references = [im.url for im in project.character_reference_images]
+        references = ([] if getattr(project, "temporary_assets_cleaned", False)
+                      else [im.url for im in project.character_reference_images])
         settings = project.optimization_settings
         pending_faults = (project.optimization_report or {}).get("pending_faults", [])
         manual_cuts = validate_ranges([r.model_dump() for r in settings.cuts], transcript["segments"], duration)
@@ -1431,7 +1718,7 @@ class VideoOptimizationService:
                   "scene_timeline": timeline, "edit_settings": settings.model_dump(),
                   "dialect_audit": transcript.get("dialect_audit", []),
                   "stage_seconds": stage_seconds,
-                  "subtitle_source": transcript.get("subtitle_source", "whisper"),
+                  "subtitle_source": transcript.get("subtitle_source", "seed_speech"),
                   "subtitle_corrections": subtitle_corrections, "audio_repairs": audio_repairs,
                   "transcription_warning": transcript.get("cloud_asr_error"),
                   "local_source": str(source),
@@ -1479,6 +1766,9 @@ class VideoOptimizationService:
             if fast:
                 if verified.get("review_mode") != "fast_triage":
                     verified = triage_report(verified)
+                verified = self.confirm_fast_digits(
+                    verified, working_url, source, directory, script,
+                    transcript["segments"], references, check_active)
                 notify("triage", "running")
                 report["triage_decisions"] = verified.get("triage_decisions", [])
                 notify("triage", "completed")
@@ -1597,6 +1887,10 @@ class VideoOptimizationService:
                 notify("final_confirm", "completed")
             else:
                 report["final_review"] = initial_final
+            if fast:
+                report["final_review"] = self.confirm_fast_digits(
+                    report["final_review"], url, final, directory, script, mapped,
+                    references, check_active, final_context)
         except Exception as error:
             report["final_review"] = {"approved": False, "unavailable": True, "error": type(error).__name__}
         notify("final_review", "completed" if report["final_review"].get("approved") else
@@ -1613,11 +1907,8 @@ class VideoOptimizationService:
         stage_seconds["subtitle_upload"] = round(time.monotonic() - upload_started, 3)
         check_active()
         report["elapsed_before_report_upload_seconds"] = round(time.monotonic() - started, 3)
-        public_report = {k: v for k, v in report.items() if not k.startswith("local_") and not k.endswith("_url")}
         upload_started = time.monotonic()
-        report["report_url"] = tos_service.upload_bytes(json.dumps(public_report, ensure_ascii=False, indent=2).encode(),
-            filename="optimization-report.json", content_type="application/json",
-            project_id=project.project_id, category="videos/final")
+        self.publish_report(project, report, check_active)
         stage_seconds["report_upload"] = round(time.monotonic() - upload_started, 3)
         report["elapsed_seconds"] = round(time.monotonic() - started, 3)
         logger.info("[OPTIMIZE] completed elapsed=%.3fs stages=%s",
@@ -1625,6 +1916,17 @@ class VideoOptimizationService:
         check_active()
         (directory / "optimization-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
         return url, report
+
+    def publish_report(self, project, report, check_active):
+        """Publish after coordinator changes too, so the downloadable verdict is current."""
+        check_active()
+        public_report = {k: v for k, v in report.items()
+                         if not k.startswith("local_") and not k.endswith("_url")}
+        report["report_url"] = tos_service.upload_bytes(
+            json.dumps(public_report, ensure_ascii=False, indent=2).encode(),
+            filename="optimization-report.json", content_type="application/json",
+            project_id=project.project_id, category="videos/final")
+        check_active()
 
 
 video_optimization_service = VideoOptimizationService()

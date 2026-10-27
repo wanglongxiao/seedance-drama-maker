@@ -91,7 +91,7 @@ models:
   # ASR 资源配置：用于音频转文字
   # 对应代码：app/services/asr_service.py
   asr:
-    resource_id: "${ASR_RESOURCE_ID:-volc.bigasr.auc}"
+    resource_id: "${ASR_RESOURCE_ID:-volc.seedasr.auc}"
     submit_path: "/auc/bigmodel/submit"
     query_path: "/auc/bigmodel/query"
 
@@ -258,7 +258,6 @@ video_skills:
 
 video_optimization:
   enabled: true
-  whisper_cache_dir: "${WHISPER_CACHE_DIR:-~/.cache/whisper}"
   fast_triage: true  # 一次快速审核同时判断关键剧情、局部评分与处理动作，跳过多轮深度确认
   critical_regenerate_below: 40  # 仅关键剧情且评分低于此值、明确无法接受时自动局部补拍
   fast_review_max_tokens: 1600
@@ -270,21 +269,16 @@ video_optimization:
   min_kept_segment_seconds: 0.5
   review_max_tokens: 4000
   review_fps: 3  # 提高短动作/物体接触的观察密度，取值 0.2–5
-  whisper_model: "small"
-  whisper_min_avg_logprob: -1.0  # 过滤环境声/音乐引发的低置信度幻觉，避免错误字幕和剪辑
-  whisper_cantonese_model: "turbo"  # 支持 yue；仅明确要求粤语时加载
-  native_chinese_asr: true  # 中文/粤语对白优先原生词级 ASR，失败回退 Whisper
-  remove_prompt_narration: true  # 无对白镜头中朗读制作说明，须由两种 ASR 确认后局部修复音轨
-  whisper_device: "cpu"
+  remove_prompt_narration: true  # 两个不同 ASR 资源核验制作说明；不可核验时保留原声
+  narration_audit_resource_id: "volc.bigasr.auc"  # 主字幕使用 Seed Speech 2.0，复核使用 1.0
+  asr_workers: 3  # 按原分镜并发识别；请求启用 BytePlus 多语言自动检测
   subtitle_renderer: "ffmpeg"  # Remotion 字幕分页/SRT + FFmpeg 静态字幕合成；可切回 remotion 逐帧渲染
   max_review_rounds: 3
   max_repair_scenes_per_round: 4
   max_repair_fragments_per_round: 8
   fragment_max_attempts: 2
   fragment_max_seconds: 6
-  select_silent_patch_window: true  # 无对白补片可选择实际修正动作的连续窗口，再独立复核
-  repair_reference_after_failure: true  # 文字补拍失败后先生成修正目标参考，避免照抄原片缺陷
-  repair_reference_max_attempts: 2  # 目标图独立检查可见修正、接触和重复道具；不合格时先重绘
+  # 同分镜多个区间合并为一次 Seedance 2.5 原视频编辑，保留原声与未指定画面。
   anatomy_review_thinking: true  # 手指目标单图先数轮廓/关节/连接，再单独核对边界连续性
   anatomy_review_max_tokens: 3000
   repair_workers: 4

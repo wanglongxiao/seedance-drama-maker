@@ -2,7 +2,7 @@
 name: vlog-auto-edit
 description: AI Agent自动剪辑旅行Vlog的完整工作流。从原始素材到成品视频，系统级只需ffmpeg，其余在Python venv内完成。by nyx研究所 (GitHub @znyupup · B站/小红书 @nyx研究所)
 version: 1.1.0
-tags: [video-editing, vlog, ffmpeg, whisper, funasr, automation]
+tags: [video-editing, vlog, ffmpeg, seed-speech, automation]
 author: nyx研究所 (https://github.com/znyupup)
 status: stable
 ---
@@ -12,7 +12,7 @@ status: stable
 **Author:** nyx研究所 · [GitHub](https://github.com/znyupup) · [B站 @nyx研究所](https://space.bilibili.com/4330525) · 小红书 @nyx研究所 · [X @znyupup_music](https://x.com/znyupup_music)
 
 > 把一堆手机拍的旅行素材，用AI自动剪成一个完整vlog。
-> 最小依赖：ffmpeg + Python(whisper或FunASR+Pillow) + 视觉API。系统级只装ffmpeg，其余pip装。
+> 本项目适配：ffmpeg + BytePlus Seed Speech + Python/Pillow + 视觉API。原作者剪辑指导保留，音轨识别统一调用项目 ASR 服务。
 
 ## 触发条件
 
@@ -33,58 +33,13 @@ status: stable
 **先检测系统是否已安装所需包，不要无脑创建 venv：**
 
 ```bash
-# 检测 whisper
-python3 -c "import whisper; print('✅ whisper已安装:', whisper.__file__)"
-
-# 检测 Pillow
-python3 -c "from PIL import Image; print('✅ Pillow已安装')"
+python3 -c "from PIL import Image; print('Pillow ready')"
 ```
 
-**⚠ 重要：不要用 `2>/dev/null` 吃掉错误！要看到实际报错才能判断是真没装还是PATH问题。**
-
-**⚠ macOS 注意：** 检查系统已安装的包再决定是否需要 venv。如果系统 python3 已经能 `import whisper` 和 `from PIL import Image`，直接用就行，不要盲目创建 venv 导致找不到已有的包。
-
-**仅在检测不通过时才安装：**
-
-```bash
-# 方案A: 直接装到用户环境（推荐）
-pip install openai-whisper Pillow
-
-# 方案B: 如果用户环境有冲突，再用 venv
-python3 -m venv .venv && source .venv/bin/activate
-pip install openai-whisper Pillow
-```
-
-**⚠ 不要每个项目都新建 venv 重装一遍！whisper模型文件1.4GB，pip install也要几分钟。**
-
-**⚠ ASR引擎二选一：Whisper 或 FunASR**
-
-本工作流支持两个ASR引擎，优先用 whisper，whisper 装不上就用 FunASR：
-
-| | Whisper (OpenAI) | FunASR (阿里达摩院) |
-|---|---|---|
-| 安装 | `pip install openai-whisper` | `pip install funasr modelscope torchaudio` |
-| 模型 | medium (1.4GB, 从GitHub下载) | paraformer-zh (1.05GB, 从ModelScope下载) |
-| 附加模型 | 无 | VAD模型 + 标点模型 (首次运行自动下载, 共~50MB) |
-| 中文效果 | 好 | 好（与whisper medium相当，细节略多） |
-| 速度 | 14s音频 ≈ 5-10s (CPU) | 14s音频 ≈ 1.9s (CPU, RTF=0.132) ⚡ |
-| 时间戳粒度 | 句级别 (每句话一个start/end) | 字级别 (每个字一个时间戳) |
-| 模型下载源 | GitHub (国内不稳定，容易失败) | ModelScope (国内极快，~15MB/s) |
-| 隐性依赖 | torch | torch + torchaudio (⚠ 必须额外装) |
-
-**检测已安装的ASR引擎：**
-```bash
-python3 -c "import whisper; print('✅ whisper可用')" 2>/dev/null \
-  || python3 -c "from funasr import AutoModel; print('✅ funasr可用')" 2>/dev/null \
-  || echo "❌ 没有可用的ASR引擎，需要安装一个"
-```
-
-**⚠ FunASR 安装注意事项：**
-- 必须装 torchaudio！`pip install funasr modelscope` 不会自动装 torchaudio，import 时会报 `No module named 'torchaudio'`
-- 正确安装命令：`pip install funasr modelscope torchaudio`
-- 首次运行会自动从 ModelScope 下载3个模型（ASR + VAD + 标点），总共约1.1GB，国内速度快
-- 模型缓存在 `~/.cache/modelscope/hub/models/iic/` 目录下
-- import 时会有 urllib3 的 SSL 警告（NotOpenSSLWarning），可忽略，不影响功能
+音轨识别使用 `app.services.asr_service`，需要配置 `SPEECH_APPID`、`SPEECH_API_KEY`、
+`ASR_RESOURCE_ID=volc.seedasr.auc` 与 TOS。无需下载本地语音模型。
+中文、英文、粤语混合音轨不强制单一语言；请求原生词时间戳，保留口头词。
+ASR 失败应停止字幕生成并显示错误，不得把失败输出当作无语音成功。
 
 **标题卡方案自动选择：**
 ```bash
@@ -185,7 +140,7 @@ done
 **步骤：**
 1. 找2-3个同类型优质vlog（B站/YouTube）
 2. `yt-dlp` 下载720p视频 + 音频
-3. `whisper` 转录旁白（提取叙事结构）
+3. BytePlus Seed Speech 转录旁白（提取叙事结构）
 4. `scenedetect` 检测镜头切换（统计节奏）
 5. `ffmpeg` 抽关键帧 + 视觉API分析（理解画面构成）
 
@@ -207,66 +162,24 @@ done
 
 目标：让AI理解每条素材的内容。每条素材做三维分析：
 
-**a) 音频分析 — ASR转录（Whisper 或 FunASR）**
+**a) 音频分析 — BytePlus Seed Speech 转录**
 ```bash
-# 提取音频（16kHz单声道WAV，两个引擎通用的最佳输入格式）
+# 提取音频（16kHz单声道WAV）
 ffmpeg -i footage/INPUT.MOV -vn -acodec pcm_s16le -ar 16000 -ac 1 /tmp/audio.wav
 ```
 
-**方案1: Whisper转录（优先使用）**
 ```python
-import whisper, json
-model = whisper.load_model('medium')
-result = model.transcribe('/tmp/audio.wav', language='zh')
-segments = [{"start": s['start'], "end": s['end'], "text": s['text']} for s in result['segments']]
-# 输出: [{"start": 0.5, "end": 2.3, "text": "我们现在在中央大街"}, ...]
+from pathlib import Path
+from app.services.video_optimization_service import video_optimization_service
+
+directory = Path("/tmp/clip-analysis")
+directory.mkdir(exist_ok=True)
+result = video_optimization_service.transcribe(Path("/tmp/audio.wav"), directory)
+segments = result["segments"]
 ```
 
-**方案2: FunASR转录（Whisper装不上时的替代）**
-```python
-import warnings
-warnings.filterwarnings("ignore")
-from funasr import AutoModel
-
-model = AutoModel(
-    model="paraformer-zh",      # Paraformer-large，中文ASR主模型(1.05GB)
-    vad_model="fsmn-vad",       # 语音活动检测，自动切分静音段
-    punc_model="ct-punc",       # 自动加标点
-    log_level="ERROR",
-    disable_update=True         # 跳过版本检查，加快启动
-)
-
-result = model.generate(input="/tmp/audio.wav")
-text = result[0]["text"]        # 完整识别文本（已加标点）
-timestamps = result[0].get("timestamp", [])  # 字级别时间戳 [[start_ms, end_ms], ...]
-
-# ⚠ FunASR时间戳是字级别(毫秒)，需要聚合成句级别才能和whisper格式统一
-# 聚合策略：按标点符号（。！？，）切分成句子
-segments = []
-if timestamps and text:
-    puncs = set("。！？，,.!?")
-    current_start = timestamps[0][0] / 1000.0
-    current_text = ""
-    chars = list(text)
-    for i, (char, ts) in enumerate(zip(chars, timestamps)):
-        current_text += char
-        if char in puncs or i == len(chars) - 1:
-            segments.append({
-                "start": round(current_start, 1),
-                "end": round(ts[1] / 1000.0, 1),
-                "text": current_text.strip()
-            })
-            if i < len(chars) - 1:
-                current_start = timestamps[i + 1][0] / 1000.0
-            current_text = ""
-# 输出格式与whisper一致: [{"start": 0.6, "end": 2.9, "text": "我们现在在中央大街的入口，"}, ...]
-```
-
-**⚠ FunASR 输出差异注意：**
-- FunASR 返回的是完整文本 + 字级别时间戳，不像 whisper 直接给句级别 segments
-- 上面的聚合代码把字级别时间戳按标点切分成句子，输出格式与 whisper 对齐
-- 如果素材没有语音，FunASR 返回空文本 `""`，timestamps 为空 `[]`
-- FunASR 速度比 whisper 快 3-5x（14s音频只需1.9s），批量处理时优势明显
+句级与词级时间戳均来自音轨。词时间戳异常时保留可信句时间范围内的完整句子；
+若整句没有有效时间戳则报错，避免错位字幕或保护错误的剪切边界。
 
 **b) 音量检测 — ffmpeg**
 ```bash
@@ -618,7 +531,7 @@ def validate_and_fix(plan, speech_data):
 | 开头截断 | clip.start > speech.start + margin | clip.start → speech.start - 0.1s |
 | 结尾截断 | clip.end < speech.end - margin | clip.end → speech.end + 0.2s |
 
-**边界容差 (margin=0.3s)：** Whisper/FunASR 时间戳有±0.2-0.3s误差。修复后必须跑二次校验。
+**边界容差 (margin=0.3s)：** ASR 时间戳可能存在误差。修复后必须跑二次校验。
 
 ### 阶段5: ffmpeg自动执行
 
@@ -789,14 +702,14 @@ ffmpeg -i input.mp4 -filter:v "setpts=0.5*PTS" -filter:a "atempo=2.0" out.mp4
 
 1. **剪映不可用** — v10.4+ 对 draft_info.json 加密，不要浪费时间
 2. **视觉API端点要区分** — 有些平台视觉模型和文本模型端点不同，确认用对
-3. **Whisper模型选择** — base中文太差，large太慢，medium是性价比最优
+3. **语音识别资源** — 主字幕统一使用 Seed Speech 2.0，复核使用不同资源
 4. **不要跳过参考研究** — 没有"好vlog标准"的AI会剪出流水账
 5. **ffmpeg编码兼容** — 拼接时注意素材编码一致性，先逐片段统一编码再concat
 6. **视觉API限流** — 高峰时段容易限流，加retry和sleep
 7. **预处理在LLM之前做** — 口令/重复/晃动检测在阶段3.5处理
 8. **预处理是建议不是硬裁剪** — LLM保留覆盖权，某些口令可能有叙事价值
 9. **语音截断必须自动校验** — LLM输出的plan可能在语音中间切断
-10. **Whisper幻觉** — 纯音乐/环境音段落whisper会编造文字，需用音量阈值(-40dB)过滤
+10. **无语音音轨** — 使用 ASR 的无语音状态；不得以全片平均音量过滤安静对白
 11. **竖屏混横屏** — 素材分析阶段就要检测，竖屏(9:16)混在横屏里很突兀，建议去掉
 12. **overlay不要加shortest=1** — PNG只有1帧，shortest=1会让视频流截断
 13. **标题卡风格** — 白字+柔和阴影叠在视频画面上，**不要黑底标题卡**
@@ -810,10 +723,10 @@ ffmpeg -i input.mp4 -filter:v "setpts=0.5*PTS" -filter:a "atempo=2.0" out.mp4
 21. **BGM别太大声** — 有语音段BGM控制在8-12%，先试听再定
 22. **多段BGM衔接** — 保持相近的key和tempo(bpm差值<20)
 23. **混音后必须试听** — 不同素材原始音量差异大
-24. **不要重复安装依赖** — whisper/Pillow等先检测再装，不要每次都新建venv
-25. **FunASR必须装torchaudio** — `pip install funasr modelscope` 不够，必须 `pip install funasr modelscope torchaudio`，否则 import 报 `No module named 'torchaudio'`
-26. **FunASR时间戳是字级别** — 不像whisper直接给句级别segments，FunASR返回每个字的[start_ms, end_ms]，需要按标点聚合成句子才能喂给后续的语音截断校验(阶段4.5)
-27. **FunASR幻觉比whisper轻** — 纯环境音/音乐时FunASR通常返回空文本，不像whisper会编造内容。但仍需用音量阈值(-40dB)做二次确认
+24. **不要重复安装依赖** — Pillow等先检测再装，不要每次都新建venv
+25. **服务失败** — 传播 ASR 错误，不能当作成功的空字幕
+26. **原生时间戳** — 使用毫秒词时间戳，异常时保留完整句级时间戳
+27. **原声保护** — 无法核验制作旁白时保留，不根据剧本编造字幕
 
 ### 编码与拼接类（视频教程实战新增）
 
@@ -914,7 +827,7 @@ my-vlog-project/
  阶段2: 参考研究 → 下载优质vlog → 分析节奏（可选）
      │
      ▼
- 阶段3: 素材三维分析 → whisper/FunASR+音量+视觉 → clip_analysis.json
+ 阶段3: 素材三维分析 → Seed Speech+音量+视觉 → clip_analysis.json
      │
      ▼
  阶段3.5: 精修预处理 → 口令/重复/晃动/纯画面标注

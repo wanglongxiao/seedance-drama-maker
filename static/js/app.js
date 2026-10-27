@@ -102,8 +102,8 @@ function getPersistedProjectId() {
         return null;
     }
 }
-const I18N_VERSION = '20261027-fast-subtitles';
-const FRONTEND_CONFIG_VERSION = '20261027-repair-editor';
+const I18N_VERSION = '20261028-release';
+const FRONTEND_CONFIG_VERSION = '20261028-release';
 const SUPPORTED_UI_LANGUAGES = new Set(['zh-CN', 'zh-TW', 'en', 'ja', 'es']);
 const UI_LANGUAGE_ALIASES = {
     'zh-cn': 'zh-CN',
@@ -676,6 +676,7 @@ function renderStatusBar(text, mode = 'info', stepName = '') {
     if (mode !== 'script_quality_choice') statusSection.style.flexDirection = '';
 
     statusSection.dataset.mode = mode;
+    delete statusSection.dataset.snapshotPhase;
     statusSection.style.display = 'flex';
 
     if (mode === 'loading') {
@@ -965,6 +966,14 @@ async function restoreProjectOnLoad() {
     }
 }
 
+function restoreCleanedReferenceProgress(snap) {
+    // 清理只移除资产，合成产物仍证明参考图阶段已经完成。
+    if (!snap?.temporary_assets_cleaned || !(snap.merged_video_url || snap.final_video_url)) return;
+    referenceImageLocked = true;
+    stepProgress.reference_image = 100;
+    updateStepHighlight('image_agent', 100);
+}
+
 // 依据后端快照重建 UI 状态。尽量复用既有渲染函数，保证与实时链路一致。
 function applyRestoredSnapshot(snap) {
     currentProjectId = snap.project_id;
@@ -972,7 +981,7 @@ function applyRestoredSnapshot(snap) {
     projectEnded = false;
     projectEndBeaconSent = false;
     persistActiveProject(currentProjectId);
-    renderOptimizationProgress(snap);
+    restoreCleanedReferenceProgress(snap);
 
     // 恢复后默认不自动推进（isAutoRunMode 保持 false），避免刷新即触发合成等破坏性动作；
     // 用户可再次点击继续或输入 auto 指令恢复全自动。
@@ -1011,7 +1020,11 @@ function applyRestoredSnapshot(snap) {
     if (snap.final_video_url) {
         displayFinalVideo(snap.final_video_url, snap.optimization_report);
         currentStep = 'optimize';
-        stepProgress.optimize = snap.optimization_report?.final_review?.approved === false ? 99 : 100;
+        stepProgress.optimize = snap.optimization_report?.final_review?.approved === true ? 100 : 99;
+        if (stepProgress.optimize < 100 && snap.processing_phase !== 'optimize') {
+            pendingStep = 'optimize';
+            isWaitingForConfirm = true;
+        }
     } else if (snap.merged_video_url) {
         displayMergedVideo(snap.merged_video_url, !snap.processing_phase
             && (!isAutoRunMode || snap.status === 'optimization_failed'));
@@ -1029,6 +1042,17 @@ function applyRestoredSnapshot(snap) {
         currentStep = 'videos';
     }
 
+    // 恢复时右侧渲染可能留下上一阶段提示，按实际运行阶段立即补齐状态栏。
+    try {
+        reconcileStatusBarFromSnapshot(snap, true);
+    } catch (e) {
+        console.debug('Restore status bar failed:', e);
+    }
+    try {
+        renderOptimizationProgress(snap);
+    } catch (e) {
+        console.debug('Restore optimization progress failed:', e);
+    }
     updateOverallProgress();
     updateProjectActionState();
 
@@ -1254,6 +1278,11 @@ function reconcileUiFromSnapshot(snap) {
     } catch (e) {
         console.debug('Optimization progress reconciliation failed:', e);
     }
+    try {
+        restoreCleanedReferenceProgress(snap);
+    } catch (e) {
+        console.debug('Cleaned reference progress reconciliation failed:', e);
+    }
 
     updateOverallProgress();
     updateProjectActionState();
@@ -1311,7 +1340,7 @@ function announceAutoTransitionsFromSnapshot(snap) {
 // 仅当当前状态栏隐藏/为占位空文本时才补，避免覆盖实时链路已有的进行中提示。
 // processing_phase 覆盖「已进入某阶段但尚无数据」的生成窗口——这是云端多实例下
 // 实时 status/agent_output 全部丢失时右侧内容与底部状态栏空白的根因。
-function reconcileStatusBarFromSnapshot(snap) {
+function reconcileStatusBarFromSnapshot(snap, restoring = false) {
     if (!statusSection) return;
     if (snap.script_quality_pending) {
         showScriptQualityChoice(snap.script_quality_report || {});
@@ -1319,23 +1348,25 @@ function reconcileStatusBarFromSnapshot(snap) {
     }
     if (snap.final_video_url) return; // 最终完成态由 displayFinalVideo 处理
 
-    // 已有非占位内容（如实时链路的“生成中/等待确认/倒计时”）时不覆盖。
+    const phase = String(snap.processing_phase || '');
+    const snapshotPhase = statusSection.dataset.snapshotPhase;
+    // 快照补出的提示可随阶段前进；实时提示及确认交互仍由原链路控制。
     const isHidden = statusSection.style.display === 'none';
-    if (!isHidden) return;
+    if (!isHidden && !(restoring && phase) && !(snapshotPhase && phase && phase !== snapshotPhase)) return;
 
     // 1) 优先使用后端权威的「生成中」阶段标记，渲染带 spinner 的加载态状态栏。
-    const phase = String(snap.processing_phase || '');
     if (phase) {
         const phaseStatus = {
             'script': { step: t('steps.scriptTitle'), text: t('progress.script.generating') },
             'reference_category1': { step: t('steps.referenceImageTitle'), text: t('progress.reference.generating') },
             'reference_category2': { step: t('steps.referenceImageTitle'), text: t('progress.reference.generating') },
-            'videos': { step: t('steps.videosTitle'), text: t('status.startingVideoGeneration') },
+            'videos': { step: t('steps.videosTitle'), text: t('loading.videos') },
             'merge': { step: t('steps.mergeTitle'), text: t('progress.merge.generating') },
             'optimize': { step: t('steps.optimizeTitle'), text: t('progress.optimize.generating') },
         }[phase];
         if (phaseStatus) {
             renderStatusBar(phaseStatus.text, 'loading', phaseStatus.step);
+            statusSection.dataset.snapshotPhase = phase;
             return;
         }
     }
@@ -1394,7 +1425,7 @@ function renderOptimizationProgress(data) {
     if (!optimizationTasks.length) return;
     stepProgress.merge = 100;
     updateStepHighlight('merge_agent', 100);
-    const finalProgress = lastOptimizationReport?.final_review?.approved === false ? 99 : 100;
+    const finalProgress = lastOptimizationReport?.final_review?.approved === true ? 100 : 99;
     stepProgress.optimize = lastFinalVideoUrl ? finalProgress : Math.max(stepProgress.optimize || 0, 5);
     updateStepHighlight('optimization_agent', stepProgress.optimize);
     updateOverallProgress();
@@ -1422,8 +1453,9 @@ function renderOptimizationProgress(data) {
     const visible = failed ? [] : (active ? activeTasks : optimizationTasks.slice(-1));
     list.replaceChildren();
     for (const task of optimizationTasks) {
-        const range = task.scene_number ? t('optimization.fragmentLabel', {
-            scene: task.scene_number, start: Number(task.start).toFixed(1), end: Number(task.end).toFixed(1)}) : '';
+        const taskRanges = task.ranges?.length ? task.ranges : [{start: task.start, end: task.end}];
+        const range = task.scene_number ? taskRanges.map(r => t('optimization.fragmentLabel', {
+            scene: task.scene_number, start: Number(r.start).toFixed(1), end: Number(r.end).toFixed(1)})).join(' / ') : '';
         const customStageNames = {final_confirm: 'finalConfirm', fragment_select: 'fragmentSelect',
             fragment_reference: 'fragmentReference', fragment_reference_review: 'fragmentReferenceReview'};
         const stageName = t(customStageNames[task.stage]
@@ -1707,7 +1739,7 @@ function updateStepProgress(agent, progress, stepType = null) {
 
 // 更新整体进度
 function updateOverallProgress() {
-    // 计算整体进度：每个步骤占25%（4个步骤）
+    // 五个步骤各占20%；未审核通过不能因四舍五入显示100%。
     const stepWeights = {
         script: 0.20,
         reference_image: 0.20,
@@ -1723,11 +1755,10 @@ function updateOverallProgress() {
         }
     }
 
-    overallProgress = Math.round(totalProgress);
-    // 合成完成时，强制收尾到 100%
-    if (getStepOrder().every(step => stepProgress[step] >= 100)) {
-        overallProgress = 100;
-    }
+    const order = getStepOrder();
+    const completed = order.every(step => stepProgress[step] >= 100)
+        && (!order.includes('optimize') || lastOptimizationReport?.final_review?.approved === true);
+    overallProgress = completed ? 100 : Math.min(99, Math.round(totalProgress));
 
     // 更新UI
     const progressFill = document.getElementById('overallProgressFill');
@@ -2255,9 +2286,12 @@ async function sendMessage() {
             if (currentIndex >= 0 && currentIndex < steps.length - 1) {
                 startStepName = steps[currentIndex + 1];
             } else if (currentIndex === steps.length - 1) {
-                addAgentMessage(t('messages.allStepsCompleted'));
-                isAutoRunMode = false;
-                return;
+                if (lastOptimizationReport?.final_review?.approved === true) {
+                    addAgentMessage(t('messages.allStepsCompleted'));
+                    isAutoRunMode = false;
+                    return;
+                }
+                startStepName = 'optimize';
             }
         }
 
@@ -3929,6 +3963,7 @@ function displayScript(script) {
                             ${renderCharacterField('labels.personalityTraits', char.personality, '🧠 ')}
                             ${renderCharacterField('labels.identityBackground', char.identity_background)}
                             ${renderCharacterField('labels.voice', char.voice_type, '🎤 ')}
+                            ${renderCharacterField('optimization.dialogueLanguage', [char.dialogue_language, char.dialogue_dialect].filter(Boolean).join(' · '))}
                         </div>
                     </div>
                 `).join('')}
@@ -4892,7 +4927,7 @@ function displayMergedVideo(url, editable = false) {
 
 function displayFinalVideo(url, report = null) {
     report = report || (url === lastFinalVideoUrl ? lastOptimizationReport : null);
-    const finalApproved = !report || report.final_review?.approved === true;
+    const finalApproved = report?.final_review?.approved === true;
     const finalColor = finalApproved ? '#52c41a' : '#d48806';
     lastOptimizationReport = report;
     lastFinalVideoUrl = url;
@@ -4982,6 +5017,7 @@ function displayFinalVideo(url, report = null) {
     stepProgress.merge = 100;
     stepProgress.videos = 100;
     stepProgress.optimize = finalApproved ? 100 : 99;
+    updateStepHighlight('video_agent', 100);
     updateStepHighlight('optimization_agent', stepProgress.optimize);
     updateOverallProgress();
     updateProjectActionState();

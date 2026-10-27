@@ -432,9 +432,16 @@ class LLMService:
         """
         url = f"{self.base_url}/contents/generations/tasks"
 
-        # 模型支持 5-30 秒，这里进一步收口到项目配置的分镜时长范围。
-        duration = self._normalize_video_duration(duration)
-
+        editing = kwargs.get("omni_reference_task_type") == "edit"
+        if editing:
+            if not any(item.get("type") == "video_url"
+                       and item.get("role") == "reference_video"
+                       and item.get("video_url", {}).get("url") for item in content):
+                raise ValueError("Video editing requires an original reference video")
+            duration, aspect_ratio = -1, "adaptive"
+            kwargs["output_format"] = "mp4"
+        else:
+            duration = self._normalize_video_duration(duration)
         normalized_resolution = str(resolution).strip().lower() if resolution else ""
         logger.info(
             f"Video generation: duration={duration}s, resolution={normalized_resolution or 'default'}, "
@@ -463,7 +470,7 @@ class LLMService:
             "ratio": ratio,
             "duration": duration,
             "watermark": False,
-            # 生成 mov 格式视频（seedance-2.5 支持 output_format）
+            # 普通生成遵循配置；视频编辑由 kwargs 固定输出 MP4。
             "output_format": config.get('video_generation.output_format', 'mov'),
             **kwargs
         }

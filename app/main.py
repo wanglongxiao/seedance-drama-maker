@@ -279,10 +279,7 @@ def resolve_regenerate_client_id(
 
 
 def build_end_cleanup_keep_prefixes(project) -> list[str]:
-    keep_prefixes = []
-    if getattr(project, "final_video_url", None):
-        keep_prefixes.append("videos/final")
-    return keep_prefixes
+    return []
 
 
 def _scene_regeneration_blocks_merge(project) -> bool:
@@ -338,6 +335,7 @@ async def end_project_resources(
             tos_service.cleanup_project_directory(project_id, keep_prefixes=[])
         except Exception as e:
             logger.error(f"TOS cleanup failed for missing project {project_id}: {str(e)}")
+            raise RuntimeError("Project cloud directory deletion failed") from e
         try:
             cleanup_project_temp_dir(project_id)
         except Exception as e:
@@ -346,11 +344,13 @@ async def end_project_resources(
         return {"project_id": project_id, "status": "missing", "end_reason": reason}
 
     main_agent.mark_project_ended(project_id, reason=reason)
-    await cleanup_project_files(
+    cleaned = await cleanup_project_files(
         project,
         keep_prefixes=build_end_cleanup_keep_prefixes(project),
         cleanup_asset_library=True,
     )
+    if not cleaned:
+        raise RuntimeError("Project cloud directory deletion failed; retry ending the project")
     main_agent.remove_project(project_id)
     project_client_owners.pop(project_id, None)
 
@@ -384,18 +384,10 @@ async def schedule_disconnect_project_cleanup(client_id: str) -> None:
                     return
                 if project_client_owners.get(current_project_id) != current_client_id:
                     return
-                # 关键防线：绝不清理仍在生成中的项目。只有已结束/已失败的项目才允许因断连而清理。
-                # 否则会重演“视频生成中断连 -> 项目被删 -> 合成阶段未找到项目”的云端故障。
+                # 断连不代表结束；失败项目也必须保留以便重试。
                 project = main_agent.get_project(current_project_id)
-                if project is not None:
-                    status = getattr(project, "status", "") or ""
-                    is_ended = bool(getattr(project, "is_ended", False))
-                    if not is_ended and status not in {"failed"}:
-                        logger.info(
-                            f"Skip disconnect cleanup for in-progress project "
-                            f"{current_project_id} (status={status})"
-                        )
-                        return
+                if project is None or not getattr(project, "is_ended", False):
+                    return
                 await end_project_resources(
                     current_project_id,
                     reason="browser_disconnect",
@@ -665,9 +657,11 @@ async def restore_project_snapshot(project_id: str):
             "script_quality_pending": project.script_quality_pending,
             "script_quality_report": project.script_quality_report,
             "reference_output": (
-                main_agent._build_reference_output(project) if reference_ready else None
+                main_agent._build_reference_output(project)
+                if reference_ready and not project.temporary_assets_cleaned else None
             ),
-            "videos": videos_payload,
+            "videos": [] if project.temporary_assets_cleaned else videos_payload,
+            "temporary_assets_cleaned": project.temporary_assets_cleaned,
             "total_scenes": total_scenes,
             # 视频阶段已启动标记：前端据此立即渲染视频生成模块并开启对账轮询，
             # 即使跨实例 WS 消息全部丢失也能保证 UI 与项目状态一致。
@@ -2221,6 +2215,9 @@ async def continue_generate_after_reference_confirmation(client_id: str, project
             resume=resume,
         )
         project = main_agent.get_project(project_id)
+        if not project or getattr(project, "is_ended", False):
+            logger.debug("[FLOW] Project %s ended before video completion callback", project_id)
+            return
         # 视频阶段结束：清空生成中标记（分镜数据本身已由数据驱动对账补齐）。
         project.processing_phase = ""
         main_agent.save_project_state(project_id)
@@ -2233,13 +2230,17 @@ async def continue_generate_after_reference_confirmation(client_id: str, project
             logger.info(f"[AUTO-CHAIN] project {project_id} auto-advancing videos -> merge")
             asyncio.create_task(execute_merge_step(client_id, project_id))
     except Exception as e:
+        if getattr(project, "is_ended", False):
+            logger.debug("[FLOW] Project %s ended during video generation", project_id)
+            return
         logger.error(f"[FLOW] Video generation flow failed: {str(e)}")
         # 失败也清空生成中标记，避免状态栏「生成中」长期悬挂。
         try:
             failed_project = main_agent.get_project(project_id)
-            if failed_project:
-                failed_project.processing_phase = ""
-                main_agent.save_project_state(project_id)
+            if not failed_project or getattr(failed_project, "is_ended", False):
+                return
+            failed_project.processing_phase = ""
+            main_agent.save_project_state(project_id)
         except Exception:
             pass
         await manager.send_message(client_id, {
@@ -2549,11 +2550,17 @@ async def execute_merge_step(client_id: str, project_id: str):
 
 async def execute_optimize_step(client_id: str, project_id: str):
     project = main_agent.get_project(project_id)
-    if not project or project.is_ended or project.processing_phase in {"merge", "optimize"}:
+    if not project or project.is_ended or project.processing_phase:
         return
     if project.final_video_url and project.status == "completed":
         return
-    if not project.merged_video_url or _scene_regeneration_blocks_merge(project):
+    if _scene_regeneration_blocks_merge(project):
+        await manager.send_message(client_id, {"type": "error", "data": {
+            "message": translate(normalize_locale(project.output_language),
+                                 "error.merge_before_all_scenes_completed")}})
+        logger.info("Deferred optimization while scene regeneration/review is pending: project=%s", project_id)
+        return
+    if not project.merged_video_url:
         raise ValueError("Optimization requires an approved merged master")
     lang = normalize_locale(project.output_language)
     project.processing_phase = "optimize"
@@ -2584,24 +2591,49 @@ async def cleanup_project_files(
     keep_prefixes: Optional[list[str]] = None,
     cleanup_asset_library: bool = False,
 ):
-    """
-    清理项目相关的临时文件
-    - TOS 保留参考图、视频；未结束项目保留状态供重启恢复
-    - 完全删除本地任务 temp 子目录
-    """
+    """Only approved optimization may prune media; explicit end deletes everything."""
+    ended = bool(getattr(project, "is_ended", False))
+    report = getattr(project, "optimization_report", {}) or {}
+    if not ended and (
+        getattr(project, "processing_phase", "")
+        or getattr(project, "status", "") != "completed"
+        or report.get("final_review", {}).get("approved") is not True
+    ):
+        logger.info("Skip cleanup before approved optimization: project=%s", project.project_id)
+        return False
     logger.info(f"Starting cleanup for project {project.project_id}")
     try:
-        retained_prefixes = list(keep_prefixes or [
-            "references", "videos/scenes", "videos/final", "videos/optimization",
-        ])
-        if not getattr(project, "is_ended", False) and "state" not in retained_prefixes:
-            retained_prefixes.append("state")
+        retained_keys = []
+        if not ended:
+            for url in (project.merged_video_url, project.final_video_url,
+                        report.get("subtitle_url"), report.get("report_url")):
+                key = tos_service.extract_object_key_from_url(url) if url else None
+                if key:
+                    retained_keys.append(key)
+            if not project.merged_video_url or not project.final_video_url:
+                raise ValueError("Completed project is missing its final deliverables")
+            retained_keys.append(tos_service.build_state_object_key(project.project_id))
+            # Persist recovery metadata before deletion can partially succeed.
+            previous_cleanup = project.temporary_assets_cleaned
+            previous_timeline = project.merged_scene_timeline
+            previous_source = project.optimization_source_url
+            project.temporary_assets_cleaned = True
+            project.merged_scene_timeline = report.get("scene_timeline", []) or previous_timeline
+            project.optimization_source_url = None
+            project.state_version += 1
+            if not tos_service.put_project_state_json(project.project_id, project.model_dump_json()):
+                project.temporary_assets_cleaned = previous_cleanup
+                project.merged_scene_timeline = previous_timeline
+                project.optimization_source_url = previous_source
+                raise RuntimeError("Recovery state persistence failed; media cleanup was not started")
         tos_service.cleanup_project_directory(
             project.project_id,
-            keep_prefixes=retained_prefixes,
+            keep_prefixes=[] if ended else list(keep_prefixes or []),
+            keep_object_keys=retained_keys,
         )
     except Exception as e:
         logger.error(f"TOS cleanup failed for project {project.project_id}: {str(e)}")
+        return False
 
     try:
         cleanup_project_temp_dir(project.project_id)
@@ -2621,6 +2653,7 @@ async def cleanup_project_files(
             logger.error(f"Asset library cleanup failed for project {project.project_id}: {str(e)}")
 
     logger.info(f"Cleanup completed for project {project.project_id}")
+    return True
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 # @contact https://www.linkedin.com/in/alexwanglx/
 # Open Source Usage: attribution required; preserve this notice in redistributions.
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime
 from enum import Enum
@@ -51,6 +51,7 @@ class Scene(BaseModel):
     # 每个出场角色在本分镜中的装扮描述，如 {"林晚": "舞会盛装", "陈默": "身穿盔甲"}
     # 仅当角色装扮与其默认装扮(Character.clothing)不同时才需要给出对应条目
     character_outfits: Optional[Dict[str, str]] = None
+    dialogue_languages: Dict[str, str] = Field(default_factory=dict)
 
 
 class SceneDefinition(BaseModel):
@@ -76,10 +77,24 @@ class Character(BaseModel):
     voice_type: str
     voice_features: str
     voice_style: str
+    dialogue_language: str = ""
+    dialogue_dialect: str = ""
+    allow_english_mixing: bool = True
     # 角色性格侧写：简要的性格特征，体现真实性与人性复杂性；主角尤其需要
     personality: Optional[str] = None
     # 角色身份背景：职业、社会身份、来历、关系网络等，用于后续生图/生视频保持角色一致性
     identity_background: Optional[str] = None
+
+    @model_validator(mode="after")
+    def inherit_legacy_dialogue_language(self):
+        from app.utils.dialogue_language import requests_cantonese, requests_english_dialogue
+        if requests_cantonese(self.dialogue_dialect):
+            self.dialogue_language = "粤语"
+        if not self.dialogue_language.strip():
+            self.dialogue_language = (
+                "粤语" if requests_cantonese(self.voice_features, self.voice_style) else
+                "English" if requests_english_dialogue(self.voice_features, self.voice_style) else "中文普通话")
+        return self
 
 class Script(BaseModel):
     """剧本数据模型"""
@@ -94,6 +109,15 @@ class Script(BaseModel):
     scene_definitions: List[SceneDefinition] = Field(default_factory=list)
     scenes: List[Scene]
     total_duration: int
+
+    @model_validator(mode="after")
+    def align_scene_languages(self):
+        # Old snapshots inherit the same deterministic speaker lock as new scripts.
+        mapping = {c.name: c.dialogue_language for c in self.characters}
+        for scene in self.scenes:
+            scene.dialogue_languages = {
+                name: mapping[name] for name in scene.characters_present or [] if name in mapping}
+        return self
     
 class GeneratedImage(BaseModel):
     """生成的图片数据模型"""
@@ -201,6 +225,8 @@ class VideoProject(BaseModel):
     optimization_source_url: Optional[str] = None
     optimization_history: List[Dict[str, Any]] = Field(default_factory=list)
     optimization_tasks: List[Dict[str, Any]] = Field(default_factory=list)
+    temporary_assets_cleaned: bool = False
+    merged_scene_timeline: List[Dict[str, Any]] = Field(default_factory=list)
     status: str = "pending"
     current_step: str = "init"
     progress: int = 0

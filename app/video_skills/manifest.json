@@ -22,17 +22,12 @@
   {
     "skill": "media-use",
     "file": "SKILL.md",
-    "sha256": "ef3976a02ff516d8e5ed0b7fff19d4bbf9358264233bace33fdacaa3aa7f37de"
+    "sha256": "dfefaab73f7266e0e5d763df43317d666aeea3dd63806436c984b854539dbd8f"
   },
   {
     "skill": "media-use",
     "file": "references/resolve.md",
     "sha256": "c90a833f6c3dcc8f33b289f5ad90e9f835f59581873bdc774035f25b6eb72314"
-  },
-  {
-    "skill": "openai-whisper",
-    "file": "SKILL.md",
-    "sha256": "802e31d7310316fc25a5ec4fbe29308a0897c039cd2ae897f59fc25128ab4644"
   },
   {
     "skill": "remotion-captions",
@@ -52,7 +47,7 @@
   {
     "skill": "video-use",
     "file": "SKILL.md",
-    "sha256": "d3bbeb19bc0e81e197d74806fba15e0a5f5694a0cdf33f0a2348bffe8472a27b"
+    "sha256": "19fc4293b4b03cd6bbb71c52d9bbc6e612e90d59ee41859facbbea28450b74bf"
   },
   {
     "skill": "vlog-auto-edit",
@@ -62,7 +57,7 @@
   {
     "skill": "vlog-auto-edit",
     "file": "SKILL.md",
-    "sha256": "913d45d6b15f76b2a7cfd32d1442aa5e19d29a6b8b057c0fb108953a509eb539"
+    "sha256": "34fc7e99675ddd2fb96fab4def62ce72e833959d7c2ed99168d2154a33d08f1d"
   },
   {
     "skill": "vlog-auto-edit",
